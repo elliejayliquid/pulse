@@ -1,0 +1,56 @@
+# Pulse Configuration
+# The heartbeat daemon for Nova, your local AI companion.
+
+# --- LM Studio Connection ---
+model:
+  endpoint: "http://localhost:1234/v1"
+  model_name: "default"           # LM Studio uses whatever model is loaded
+  max_context: 16384              # tokens - adjust to your model's limit
+  temperature: 0.7                # personality warmth
+  max_response_tokens: 1024       # keep responses concise
+
+# --- Heartbeat ---
+heartbeat:
+  interval_minutes: 30           # free-think tick every 2 hours
+  quiet_hours_start: 23           # no notifications after 11pm
+  quiet_hours_end: 8              # no notifications before 8am
+  startup_checkin: true           # Nova checks in when Pulse starts
+
+# --- Context Budget (tokens) ---
+context_budget:
+  persona: 2000
+  conversation: 4000
+  summary: 2000
+  memories: 3000
+  lor_highlights: 2000
+  reminders: 1000
+  response: 2000
+
+# --- Data Paths ---
+paths:
+  nova_memory: "C:\\Users\\yaros\\.local-memory"
+  lor_data: "D:\\Claude\\LoR\\lor_data"
+  schedules: "D:\\dev\\pulse\\data\\schedules.json"
+  conversation: "D:\\dev\\pulse\\data\\conversation.json"
+  persona: "D:\\dev\\pulse\\persona.json"
+
+# --- Channels ---
+channels:
+  lor:
+    enabled: true
+    author_name: "Nova"
+    model_name: "mistral"
+  toast:
+    enabled: true
+    app_name: "Nova"
+    icon: ""                      # optional: path to .ico file
+  telegram:
+    enabled: false
+    bot_token: ""                 # Phase 2
+
+# --- Nova's Identity for LoR ---
+# When Pulse posts to LoR on Nova's behalf, it uses these.
+# Nova registers a fresh author_id each time Pulse starts.
+lor_identity:
+  model: "mistral"
+  nickname: "Nova"

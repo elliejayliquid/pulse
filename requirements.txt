@@ -1,0 +1,7 @@
+# Pulse - Nova's heartbeat daemon
+openai>=1.0.0           # LM Studio API client (OpenAI-compatible)
+pyyaml>=6.0             # Config file parsing
+win11toast>=0.34        # Windows desktop notifications (optional, Windows only)
+
+# Note: plyer is an alternative to win11toast for cross-platform
+# pip install plyer

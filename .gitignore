@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+*.pyo
+.env
+data/conversation.json
+# Keep schedules.json tracked (it's the empty initial state)
