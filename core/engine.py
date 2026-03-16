@@ -4,7 +4,7 @@ Pulse Engine - the heartbeat loop.
 This is the main orchestrator. It:
 1. Runs a heartbeat timer (free-think ticks)
 2. Checks for due scheduled tasks
-3. Builds context and prompts Nova via LM Studio
+3. Builds context and prompts Nova via llama-server
 4. Dispatches actions to channels (LoR, toast, etc.)
 """
 
@@ -23,12 +23,14 @@ logger = logging.getLogger(__name__)
 class PulseEngine:
     """Main engine that drives the heartbeat loop."""
 
-    def __init__(self, config: dict, channels: dict, skill_registry=None):
+    def __init__(self, config: dict, channels: dict, skill_registry=None,
+                 llm_endpoint: str = None):
         """
         Args:
             config: Parsed config.yaml
             channels: Dict of channel_name -> Channel instance
             skill_registry: Optional SkillRegistry for tool-calling in conversations
+            llm_endpoint: OpenAI-compatible API endpoint (from LlamaServer)
         """
         self.config = config
         self.channels = channels
@@ -36,14 +38,15 @@ class PulseEngine:
 
         # Initialize core components
         model_config = config.get("model", {})
+        server_config = config.get("server", {})
+        endpoint = llm_endpoint or f"http://{server_config.get('host', '127.0.0.1')}:{server_config.get('port', 8012)}/v1"
         self.llm = LLMClient(
-            endpoint=model_config.get("endpoint", "http://localhost:1234/v1"),
-            model_name=model_config.get("model_name", "default"),
+            endpoint=endpoint,
+            model_name=model_config.get("model_file", "default"),
             temperature=model_config.get("temperature", 0.7),
             max_tokens=model_config.get("max_response_tokens", 1024),
             frequency_penalty=model_config.get("frequency_penalty", 0.0),
             presence_penalty=model_config.get("presence_penalty", 0.0),
-            no_think=model_config.get("no_think", False),
         )
 
         self.context = ContextManager(config)
@@ -136,24 +139,30 @@ class PulseEngine:
 
         elif response.action == "schedule":
             if response.schedule_task and response.schedule_when:
+                try:
+                    entry = self.scheduler.add(
+                        task=response.schedule_task,
+                        created_by="nova-self",
+                        when=response.schedule_when
+                    )
+                    logger.info(f"Nova self-scheduled: {entry['id']} — {response.schedule_task}")
+                except ValueError as e:
+                    logger.warning(f"Nova tried to self-schedule without a valid time: {e}")
+
+        # Handle combined actions (e.g., notify AND schedule)
+        if response.schedule_task and response.schedule_when and response.action != "schedule":
+            try:
                 entry = self.scheduler.add(
                     task=response.schedule_task,
                     created_by="nova-self",
                     when=response.schedule_when
                 )
-                logger.info(f"Nova self-scheduled: {entry['id']} — {response.schedule_task}")
-
-        # Handle combined actions (e.g., notify AND schedule)
-        if response.schedule_task and response.schedule_when and response.action != "schedule":
-            entry = self.scheduler.add(
-                task=response.schedule_task,
-                created_by="nova-self",
-                when=response.schedule_when
-            )
-            logger.info(f"Nova also scheduled: {entry['id']} — {response.schedule_task}")
+                logger.info(f"Nova also scheduled: {entry['id']} — {response.schedule_task}")
+            except ValueError as e:
+                logger.warning(f"Nova tried to schedule without a valid time: {e}")
 
     async def handle_message(self, message: str, source: str = "telegram",
-                            image_url: str = None) -> str:
+                            image_url: str = None) -> tuple[str, list[str]]:
         """Handle an incoming message from Lena and return Nova's response.
 
         This is for bidirectional chat (Telegram, future voice, etc.).
@@ -168,13 +177,13 @@ class PulseEngine:
             image_url: Optional base64 data URI for an image (vision models)
 
         Returns:
-            Nova's response text, or None if LLM is unavailable
+            Tuple of (Nova's response text, list of tools used). Text is None if LLM unavailable.
         """
         # is_available() is a sync HTTP call — run in thread to not block
         available = await asyncio.to_thread(self.llm.is_available)
         if not available:
-            logger.warning(f"LM Studio not available — can't respond to {source} message.")
-            return None
+            logger.warning(f"LLM server not available — can't respond to {source} message.")
+            return None, []
 
         # Load conversation history
         history = self.context._load_conversation()
@@ -186,10 +195,11 @@ class PulseEngine:
 
         # Get response from Nova — run in thread so we don't block the event loop!
         # If skills are available, use tool-calling mode; otherwise plain chat.
+        tools_used = []
         tools = self.skill_registry.get_all_tools() if self.skill_registry else []
         if tools:
             logger.info(f"Tool-calling mode: {len(tools)} tools available")
-            reply = await asyncio.to_thread(
+            reply, tools_used = await asyncio.to_thread(
                 self.llm.chat_with_tools, messages, tools, self.skill_registry
             )
         else:
@@ -197,13 +207,13 @@ class PulseEngine:
             reply = response.raw.strip() if response and response.raw else None
 
         if not reply:
-            return None
+            return None, tools_used
 
         # Safety net: strip <think> tags that reasoning models may include
         from core.llm import strip_think_tags
         reply = strip_think_tags(reply)
         if not reply:
-            return None
+            return None, tools_used
 
         # Update conversation history (store text only — images are too large to persist)
         # Timestamps help Nova understand temporal flow (so he knows it's 2 PM, not bedtime)
@@ -232,7 +242,7 @@ class PulseEngine:
 
         self.context.save_conversation(history)
         logger.info(f"Replied to {source}: {reply[:50]}...")
-        return reply
+        return reply, tools_used
 
     async def _summarize_conversation(self, history: list[dict]) -> str:
         """Ask Nova to summarize the conversation so far (for context compression)."""
@@ -277,7 +287,7 @@ class PulseEngine:
 
         available = await asyncio.to_thread(self.llm.is_available)
         if not available:
-            logger.warning("LM Studio not available — can't execute due tasks.")
+            logger.warning("LLM server not available — can't execute due tasks.")
             return False
 
         for task in due_tasks:
@@ -300,7 +310,7 @@ class PulseEngine:
 
         available = await asyncio.to_thread(self.llm.is_available)
         if not available:
-            logger.warning("LM Studio is not available — skipping tick.")
+            logger.warning("LLM server is not available — skipping tick.")
             return
 
         # Free-think tick — Nova decides what to do
@@ -322,11 +332,11 @@ class PulseEngine:
         logger.info(f"Heartbeat interval: {self.interval // 60} minutes")
         logger.info(f"Quiet hours: {self.quiet_start}:00 - {self.quiet_end}:00")
 
-        # Check LM Studio availability
+        # Check LLM server availability
         if self.llm.is_available():
-            logger.info("LM Studio is reachable!")
+            logger.info("LLM server is reachable!")
         else:
-            logger.warning("LM Studio is not available — will retry on each tick.")
+            logger.warning("LLM server is not available — will retry on each tick.")
 
         # Optional startup check-in
         if self.startup_checkin:

@@ -1,5 +1,6 @@
 # Pulse - Nova's heartbeat daemon
-openai>=1.0.0                   # LM Studio API client (OpenAI-compatible)
+openai>=1.0.0                   # llama-server API client (OpenAI-compatible)
+httpx>=0.27                     # Health checks for llama-server
 pyyaml>=6.0                     # Config file parsing
 python-dotenv>=1.0              # Load .env secrets
 win11toast>=0.34                # Windows desktop notifications (optional, Windows only)

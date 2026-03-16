@@ -1,8 +1,7 @@
 """
-LM Studio client - OpenAI-compatible API wrapper.
+LLM client — OpenAI-compatible API wrapper for llama-server.
 
-Talks to whatever model is loaded in LM Studio at localhost:1234.
-If LM Studio isn't running, retries gracefully.
+Talks to the llama-server instance managed by core/server.py.
 
 Supports two modes:
 - chat()           → heartbeat/scheduled tasks (returns PulseResponse with JSON parsing)
@@ -98,38 +97,30 @@ class PulseResponse:
 
 
 class LLMClient:
-    """OpenAI-compatible client for LM Studio."""
+    """OpenAI-compatible client for llama-server."""
 
     def __init__(self, endpoint: str, model_name: str = "default",
                  temperature: float = 0.7, max_tokens: int = 1024,
-                 frequency_penalty: float = 0.0, presence_penalty: float = 0.0,
-                 no_think: bool = False):
+                 frequency_penalty: float = 0.0, presence_penalty: float = 0.0):
         self.client = OpenAI(
             base_url=endpoint,
-            api_key="not-needed"  # LM Studio doesn't require a key
+            api_key="not-needed"  # llama-server doesn't require a key
         )
         self.model_name = model_name
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.frequency_penalty = frequency_penalty
         self.presence_penalty = presence_penalty
-        self.no_think = no_think
         self._available = None
 
-    def _extra_body(self) -> dict:
-        """Build extra request body params (e.g. chat_template_kwargs for thinking models)."""
-        if self.no_think:
-            return {"chat_template_kwargs": {"enable_thinking": False}}
-        return {}
-
     def is_available(self) -> bool:
-        """Check if LM Studio is reachable."""
+        """Check if the LLM server is reachable."""
         try:
             self.client.models.list()
             self._available = True
             return True
         except (APIConnectionError, Exception) as e:
-            logger.debug(f"LM Studio not available: {e}")
+            logger.debug(f"LLM server not available: {e}")
             self._available = False
             return False
 
@@ -152,7 +143,6 @@ class LLMClient:
                 max_tokens=self.max_tokens,
                 frequency_penalty=self.frequency_penalty,
                 presence_penalty=self.presence_penalty,
-                extra_body=self._extra_body() or None,
             )
 
             text = response.choices[0].message.content or ""
@@ -167,18 +157,18 @@ class LLMClient:
             return PulseResponse.from_llm_output(text)
 
         except APIConnectionError:
-            logger.warning("LM Studio is not running or not reachable")
+            logger.warning("LLM server is not running or not reachable")
             return None
         except Exception as e:
             logger.error(f"LLM call failed: {e}")
             return None
 
     def chat_with_tools(self, messages: list[dict], tools: list[dict],
-                        skill_registry, max_rounds: int = 5) -> Optional[str]:
+                        skill_registry, max_rounds: int = 5) -> tuple[Optional[str], list[str]]:
         """Chat with tool-calling support for Telegram conversations.
 
         Implements an agentic loop:
-        1. Send messages + tool definitions to LM Studio
+        1. Send messages + tool definitions to llama-server
         2. If model returns tool_calls → execute them, feed results back
         3. Repeat until model gives a final text response (or max rounds)
 
@@ -189,10 +179,11 @@ class LLMClient:
             max_rounds: Max tool-calling rounds before forcing a text response
 
         Returns:
-            Final response text (with <think> tags stripped), or None
+            Tuple of (final response text, list of tool names used)
         """
         # Work on a copy so we don't mutate the caller's messages
         msgs = list(messages)
+        tools_used = []
 
         for round_num in range(max_rounds):
             try:
@@ -204,7 +195,6 @@ class LLMClient:
                     max_tokens=self.max_tokens,
                     frequency_penalty=self.frequency_penalty,
                     presence_penalty=self.presence_penalty,
-                    extra_body=self._extra_body() or None,
                 )
 
                 message = response.choices[0].message
@@ -215,7 +205,7 @@ class LLMClient:
                 if not tool_calls:
                     logger.info(f"LLM final response ({len(text)} chars, round {round_num + 1})")
                     cleaned = strip_think_tags(text)
-                    return cleaned if cleaned else None
+                    return (cleaned if cleaned else None), tools_used
 
                 # Model wants to call tools
                 logger.info(f"LLM requested {len(tool_calls)} tool call(s) (round {round_num + 1})")
@@ -246,6 +236,7 @@ class LLMClient:
                         logger.warning(f"Failed to parse tool arguments for {func_name}: {tc.function.arguments}")
 
                     logger.info(f"Executing tool: {func_name}({args})")
+                    tools_used.append(func_name)
                     result = skill_registry.execute(func_name, args)
 
                     msgs.append({
@@ -256,11 +247,11 @@ class LLMClient:
                     })
 
             except APIConnectionError:
-                logger.warning("LM Studio disconnected during tool loop")
-                return None
+                logger.warning("LLM server disconnected during tool loop")
+                return None, tools_used
             except Exception as e:
                 logger.error(f"Tool-calling loop failed (round {round_num + 1}): {e}")
-                return None
+                return None, tools_used
 
         # Exhausted max rounds — force a final response without tools
         logger.warning(f"Tool loop hit max rounds ({max_rounds}), requesting final response...")
@@ -270,10 +261,9 @@ class LLMClient:
                 messages=msgs,
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
-                extra_body=self._extra_body() or None,
             )
             text = response.choices[0].message.content or ""
-            return strip_think_tags(text) or None
+            return (strip_think_tags(text) or None), tools_used
         except Exception as e:
             logger.error(f"Final response after tool loop failed: {e}")
-            return None
+            return None, tools_used

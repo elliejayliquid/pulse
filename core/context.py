@@ -53,7 +53,6 @@ class ContextManager:
         self.config = config
         self.budget = config.get("context_budget", {})
         self.paths = config.get("paths", {})
-        self.no_think = config.get("model", {}).get("no_think", False)
         self.persona_data = self._load_persona()
 
     def _load_persona(self) -> dict:
@@ -348,13 +347,9 @@ class ContextManager:
             "Respond in JSON format as specified in your instructions."
         )
 
-        user_content = "\n\n".join(context_parts)
-        if self.no_think:
-            user_content += " /no_think"
-
         return [
             {"role": "system", "content": system},
-            {"role": "user", "content": user_content}
+            {"role": "user", "content": "\n\n".join(context_parts)}
         ]
 
     def build_conversation_prompt(self, user_message: str, history: list[dict] = None,
@@ -414,18 +409,17 @@ class ContextManager:
             messages.extend(trimmed)
 
         # Add the current message (with optional image for vision models)
-        no_think_suffix = " /no_think" if self.no_think else ""
         if image_url:
             # Multi-part content: text + image (OpenAI vision API format)
             messages.append({
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": user_message + no_think_suffix},
+                    {"type": "text", "text": user_message},
                     {"type": "image_url", "image_url": {"url": image_url}},
                 ],
             })
         else:
-            messages.append({"role": "user", "content": user_message + no_think_suffix})
+            messages.append({"role": "user", "content": user_message})
 
         return messages
 
@@ -453,9 +447,6 @@ class ContextManager:
             f"post_lor to write on the forum, etc).\n\n"
             f"Respond in JSON format as specified in your instructions."
         )
-
-        if self.no_think:
-            task_prompt += " /no_think"
 
         return [
             {"role": "system", "content": system},

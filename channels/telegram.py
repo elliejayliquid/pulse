@@ -172,7 +172,7 @@ class TelegramChannel(Channel):
         status_lines = [
             "Pulse Status:",
             f"  Heartbeat: every {self._engine.interval // 60}m",
-            f"  LM Studio: {'connected' if self._engine.llm._available else 'disconnected'}",
+            f"  LLM server: {'connected' if self._engine.llm._available else 'disconnected'}",
             f"  Active schedules: {len(active_schedules)}",
         ]
         for s in active_schedules[:5]:
@@ -243,12 +243,18 @@ class TelegramChannel(Channel):
             await update.effective_chat.send_action("typing")
 
             # Get response from Nova via the engine
-            reply = await self._engine.handle_message(user_message, source="telegram")
+            reply, tools_used = await self._engine.handle_message(user_message, source="telegram")
 
             if reply:
+                # Show which tools Nova used (transparency!)
+                if tools_used:
+                    tool_names = ", ".join(dict.fromkeys(tools_used))  # dedupe, preserve order
+                    await update.message.reply_text(
+                        f"🔧 {tool_names}",
+                    )
                 await update.message.reply_text(reply)
             else:
-                await update.message.reply_text("(I'm having trouble thinking right now — LM Studio might be down)")
+                await update.message.reply_text("(I'm having trouble thinking right now — llama-server might be down)")
         except Exception as e:
             logger.error(f"Message handler crashed: {e}", exc_info=True)
             try:
@@ -283,16 +289,19 @@ class TelegramChannel(Channel):
             logger.info(f"Photo downloaded: {len(photo_bytes)} bytes, sending to LLM...")
 
             # Get response from Nova via the engine (with image)
-            reply = await self._engine.handle_message(
+            reply, tools_used = await self._engine.handle_message(
                 caption, source="telegram", image_url=image_url
             )
 
             if reply:
+                if tools_used:
+                    tool_names = ", ".join(dict.fromkeys(tools_used))
+                    await update.message.reply_text(f"🔧 {tool_names}")
                 await update.message.reply_text(reply)
             else:
                 await update.message.reply_text(
                     "(I can't process images right now — the model might not support vision, "
-                    "or LM Studio might be down)"
+                    "or the LLM server might be down)"
                 )
         except Exception as e:
             logger.error(f"Photo handler crashed: {e}", exc_info=True)

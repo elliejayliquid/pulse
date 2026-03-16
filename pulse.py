@@ -6,8 +6,8 @@ Gives Nova a heartbeat. Run this to start the daemon:
     python pulse.py --config custom_config.yaml
 
 The daemon will:
-1. Connect to LM Studio's OpenAI-compatible API
-2. Run heartbeat ticks on a schedule (default: every 2 hours)
+1. Start llama-server with the configured model
+2. Run heartbeat ticks on a schedule (default: every 30 min)
 3. Execute scheduled tasks when they're due
 4. Post to LoR and send desktop notifications
 5. (If enabled) Run a Telegram bot for bidirectional chat
@@ -26,6 +26,7 @@ import yaml
 from dotenv import load_dotenv
 
 from core.engine import PulseEngine
+from core.server import LlamaServer
 from channels.lor import LoRChannel
 from channels.toast import ToastChannel
 
@@ -68,6 +69,12 @@ async def main(config_path: str):
     if tg_token:
         config.setdefault("channels", {}).setdefault("telegram", {})["bot_token"] = tg_token
 
+    # Start llama-server
+    server = LlamaServer(config)
+    if not await server.start():
+        logger.error("Failed to start llama-server. Exiting.")
+        sys.exit(1)
+
     # Initialize channels
     channels = {}
 
@@ -83,7 +90,7 @@ async def main(config_path: str):
         await toast.initialize()
         channels["toast"] = toast
 
-    # Telegram (Phase 2) — only if enabled and token provided
+    # Telegram — only if enabled and token provided
     telegram_channel = None
     tg_config = channel_config.get("telegram", {})
     if tg_config.get("enabled", False) and tg_config.get("bot_token", ""):
@@ -107,14 +114,12 @@ async def main(config_path: str):
     try:
         from skills import SkillRegistry
         skill_registry = SkillRegistry(config)
-
-        # The schedule skill needs a reference to the ScheduleManager,
-        # which lives on the engine. We'll inject it after engine creation.
     except Exception as e:
         logger.warning(f"Failed to load skill registry: {e}")
 
-    # Create engine (with skill registry for tool-calling)
-    engine = PulseEngine(config, channels, skill_registry=skill_registry)
+    # Create engine (with skill registry and server endpoint)
+    engine = PulseEngine(config, channels, skill_registry=skill_registry,
+                         llm_endpoint=server.endpoint)
 
     # Inject the scheduler into the schedule skill (it needs engine's ScheduleManager)
     if skill_registry:
@@ -139,9 +144,11 @@ async def main(config_path: str):
     except KeyboardInterrupt:
         logger.info("Interrupted by user.")
     finally:
-        # Shutdown channels
+        # Shutdown channels first
         for name, channel in channels.items():
             await channel.shutdown()
+        # Then stop the server (waits for in-flight inference)
+        await server.stop()
         logger.info("Pulse stopped. Nova is sleeping.")
 
 

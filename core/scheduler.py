@@ -146,6 +146,7 @@ class ScheduleManager:
             "task": task,
             "created_by": created_by,
             "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at_local": datetime.now().strftime("%A %b %d, %I:%M %p"),
             "enabled": True,
         }
 
@@ -171,9 +172,21 @@ class ScheduleManager:
             entry["cron"] = cron
             entry["last_run"] = None
         else:
+            if not run_at:
+                raise ValueError(
+                    "Cannot create a one-time schedule without a time. "
+                    "Use 'in 30 minutes', 'in 2 hours', or an ISO datetime."
+                )
             entry["schedule_type"] = "once"
             entry["run_at"] = run_at
             entry["completed"] = False
+            # Human-readable local time for the JSON file
+            if run_at:
+                try:
+                    dt = datetime.fromisoformat(run_at)
+                    entry["run_at_local"] = dt.astimezone().strftime("%A %b %d, %I:%M %p")
+                except ValueError:
+                    pass
 
         schedules.append(entry)
         self._save(schedules)

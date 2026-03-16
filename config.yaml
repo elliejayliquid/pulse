@@ -1,16 +1,25 @@
 # Pulse Configuration
 # The heartbeat daemon for Nova, your local AI companion.
 
-# --- LM Studio Connection ---
+# --- llama.cpp Server ---
+# Pulse starts and manages llama-server automatically.
+server:
+  llama_cpp_dir: "C:\\llama-cpp"          # where llama-server.exe lives
+  models_dir: "C:\\llama-cpp"             # where .gguf models are stored
+  host: "127.0.0.1"
+  port: 8012
+  gpu_layers: -1                          # -1 = offload all layers to GPU
+  flash_attention: true                   # faster inference on supported GPUs
+
+# --- Model ---
 model:
-  endpoint: "http://127.0.0.1:1234/v1"
-  model_name: "default"           # LM Studio uses whatever model is loaded
+  model_file: "Qwen3.5-9B-Q4_K_M.gguf"   # GGUF file name (in models_dir)
   max_context: 16384              # tokens - adjust to your model's limit
   temperature: 0.7                # personality warmth
   max_response_tokens: 2048       # keep responses concise
   frequency_penalty: 0.3          # discourage repeating the same words/topics
   presence_penalty: 0.2           # encourage topic variety
-  no_think: true                 # append /no_think to prompts (for Qwen 3.x thinking models)
+  reasoning: false                # set true for thinking models (Qwen 3.x, DeepSeek)
 
 # --- Heartbeat ---
 heartbeat:
