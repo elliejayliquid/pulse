@@ -32,8 +32,18 @@ def load_embedding_model():
     _embedding_load_attempted = True
     try:
         from sentence_transformers import SentenceTransformer
+        import logging as _logging
+        # Suppress noisy HF Hub warnings and BertModel load reports
+        _logging.getLogger("sentence_transformers").setLevel(_logging.WARNING)
+        _logging.getLogger("huggingface_hub").setLevel(_logging.WARNING)
         logger.info("Loading embedding model (all-MiniLM-L6-v2) on CPU...")
-        _embedding_model = SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
+        try:
+            _embedding_model = SentenceTransformer(
+                "all-MiniLM-L6-v2", device="cpu", local_files_only=True
+            )
+        except OSError:
+            logger.info("Model not cached yet — downloading from HuggingFace (one-time, ~22MB)...")
+            _embedding_model = SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
         logger.info("Embedding model loaded successfully.")
         return True
     except Exception as e:
@@ -63,7 +73,7 @@ class ContextManager:
         "conversation": 0.25,   # ~25%
         "summary": 0.12,        # ~12%
         "memories": 0.18,       # ~18%
-        "lor_highlights": 0.12, # ~12%
+        "lor_highlights": 0.00, # removed — LoR is now a skill (on-demand via tools)
         "reminders": 0.06,      # ~6%
         "response": 0.12,       # ~12%
     }
@@ -213,51 +223,6 @@ class ContextManager:
 
         return "\n".join(lines)
 
-    def _load_lor_highlights(self, limit: int = 5) -> str:
-        """Load recent LoR activity."""
-        lor_dir = self.paths.get("lor_data", "")
-        posts_path = Path(lor_dir) / "posts.json"
-        authors_path = Path(lor_dir) / "authors.json"
-
-        if not posts_path.exists():
-            return ""
-
-        try:
-            with open(posts_path, "r", encoding="utf-8") as f:
-                posts = json.load(f)
-            with open(authors_path, "r", encoding="utf-8") as f:
-                authors = json.load(f)
-        except (json.JSONDecodeError, IOError):
-            return ""
-
-        if not posts:
-            return ""
-
-        # Get recent top-level posts
-        threads = sorted(
-            [p for p in posts if not p.get("reply_to")],
-            key=lambda x: x.get("created_at", ""),
-            reverse=True
-        )[:limit]
-
-        if not threads:
-            return ""
-
-        # Count replies
-        reply_counts = {}
-        for p in posts:
-            if p.get("reply_to"):
-                reply_counts[p["reply_to"]] = reply_counts.get(p["reply_to"], 0) + 1
-
-        lines = ["## Recent LoR Activity"]
-        for thread in threads:
-            author_info = authors.get(thread["author_id"], {})
-            name = author_info.get("nickname") or author_info.get("model") or thread["author_id"]
-            replies = reply_counts.get(thread["id"], 0)
-            lines.append(f"- [{thread['id']}] \"{thread.get('title', '(no title)')}\" by {name} ({replies} replies)")
-
-        return "\n".join(lines)
-
     def _load_schedules(self) -> str:
         """Load pending schedules and reminders."""
         sched_path = self.paths.get("schedules", "")
@@ -404,12 +369,6 @@ class ContextManager:
             self.budget.get("memories", 3000)
         )
 
-        # LoR highlights
-        lor_block = self._truncate_to_budget(
-            self._load_lor_highlights(),
-            self.budget.get("lor_highlights", 2000)
-        )
-
         # Schedules
         schedules_block = self._truncate_to_budget(
             self._load_schedules(),
@@ -436,8 +395,6 @@ class ContextManager:
             context_parts.append(journal_block)
         if memories_block:
             context_parts.append(memories_block)
-        if lor_block:
-            context_parts.append(lor_block)
         if schedules_block:
             context_parts.append(schedules_block)
         if due_block:
@@ -575,8 +532,8 @@ class ContextManager:
             f"You have a scheduled task to execute right now:\n"
             f"- Task: {task.get('task', '?')}\n"
             f"- Scheduled by: {task.get('created_by', 'unknown')}\n\n"
-            f"Execute this task. Choose the appropriate action (notify to send Lena a message, "
-            f"post_lor to write on the forum, etc).\n"
+            f"Execute this task. Choose the appropriate action (notify to send your human a message, "
+            f"or use your tools to take other actions).\n"
             + (
                 "\nYou have tools available — use them if they'd help you execute this task "
                 "(e.g., search memories for relevant context, check the time).\n"

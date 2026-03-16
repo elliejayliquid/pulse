@@ -27,7 +27,6 @@ from dotenv import load_dotenv
 
 from core.engine import PulseEngine
 from core.server import LlamaServer
-from channels.lor import LoRChannel
 from channels.toast import ToastChannel
 
 # Configure logging
@@ -38,6 +37,9 @@ logging.basicConfig(
     stream=sys.stdout
 )
 logger = logging.getLogger("pulse")
+
+# Silence noisy HTTP request logs (httpx logs every Telegram poll)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 def load_config(path: str) -> dict:
@@ -86,11 +88,6 @@ async def main(config_path: str):
 
     channel_config = config.get("channels", {})
 
-    if channel_config.get("lor", {}).get("enabled", True):
-        lor = LoRChannel(config)
-        await lor.initialize()
-        channels["lor"] = lor
-
     if channel_config.get("toast", {}).get("enabled", True):
         toast = ToastChannel(config)
         await toast.initialize()
@@ -114,10 +111,6 @@ async def main(config_path: str):
             logger.error(f"Failed to initialize Telegram: {e}")
 
     logger.info(f"Active channels: {', '.join(channels.keys()) or 'none'}")
-
-    # Load embedding model for memory/journal semantic search
-    from core.context import load_embedding_model
-    load_embedding_model()
 
     # Initialize skill registry (tool-calling for conversations)
     skill_registry = None

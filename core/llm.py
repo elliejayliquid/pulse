@@ -47,10 +47,8 @@ def strip_think_tags(text: str) -> str:
 class PulseResponse:
     """Parsed response from Nova."""
     thinking: str = ""
-    action: str = "silent"         # notify | post_lor | schedule | silent
+    action: str = "silent"         # notify | schedule | silent
     message: str = ""
-    lor_category: str = "general"
-    lor_title: str = ""
     schedule_task: str = ""
     schedule_when: str = ""
     raw: str = ""
@@ -79,8 +77,6 @@ class PulseResponse:
             resp.thinking = data.get("thinking", "")
             resp.action = data.get("action", "silent")
             resp.message = data.get("message", "")
-            resp.lor_category = data.get("lor_category", "general")
-            resp.lor_title = data.get("lor_title", "")
 
             schedule = data.get("schedule")
             if schedule and isinstance(schedule, dict):

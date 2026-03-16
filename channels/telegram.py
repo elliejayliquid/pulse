@@ -57,13 +57,14 @@ class TelegramChannel(Channel):
             except Exception:
                 pass
 
-        # Build with longer HTTP timeouts (default 5s is too tight for flaky connections)
+        # HTTP timeouts: keep connect short (DNS should resolve fast or fail fast,
+        # especially after sleep/wake), but read/write can be longer for actual API calls.
         from telegram.request import HTTPXRequest
         request = HTTPXRequest(
-            connect_timeout=20.0,
+            connect_timeout=5.0,
             read_timeout=30.0,
             write_timeout=30.0,
-            pool_timeout=10.0,
+            pool_timeout=5.0,
         )
         self.app = (
             Application.builder()
@@ -94,10 +95,20 @@ class TelegramChannel(Channel):
         # Error handler — catch network blips gracefully
         self.app.add_error_handler(self._on_error)
 
+        # Suppress python-telegram-bot's own traceback dumps for network errors.
+        # We handle these in _on_error with a clean one-liner instead.
+        logging.getLogger("telegram.ext.Updater").setLevel(logging.CRITICAL)
+
         # Start polling in the background (non-blocking)
         await self.app.initialize()
         await self.app.start()
-        await self.app.updater.start_polling(drop_pending_updates=True)
+        await self.app.updater.start_polling(
+            drop_pending_updates=True,
+            # Short polling timeout = faster recovery after sleep/wake network loss.
+            # Default is 10s long-polling; 5s means we check connectivity more often.
+            poll_interval=1.0,
+            timeout=5,
+        )
 
         logger.info("Telegram bot started and polling for messages!")
 
@@ -328,14 +339,14 @@ class TelegramChannel(Channel):
             pass
 
         if isinstance(error, network_errors):
-            logger.debug(f"Telegram network blip (auto-recovers): {type(error).__name__}")
+            logger.info(f"Telegram: network blip, retrying... ({type(error).__name__})")
             return
 
         # Catch httpx transport errors too
         try:
             import httpx
             if isinstance(error, (httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError)):
-                logger.debug(f"Telegram httpx blip (auto-recovers): {type(error).__name__}")
+                logger.info(f"Telegram: network blip, retrying... ({type(error).__name__})")
                 return
         except ImportError:
             pass

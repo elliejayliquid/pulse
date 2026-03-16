@@ -72,9 +72,7 @@ class PulseEngine:
         self._stop_event = asyncio.Event()
 
         # Rate limiting — prevent Nova from flooding channels
-        self._last_lor_post = 0     # timestamp of last LoR post
         self._last_notify = 0       # timestamp of last notification
-        self._lor_cooldown = heartbeat_config.get("lor_cooldown_minutes", 120) * 60  # default 2 hours
         self._notify_cooldown = heartbeat_config.get("notify_cooldown_minutes", 60) * 60  # default 1 hour
 
         # Action log — tracks what Nova does each heartbeat for self-regulation
@@ -159,24 +157,6 @@ class PulseEngine:
                 logger.info(f"Notification sent: {response.message[:50]}...")
             else:
                 logger.info(f"[No notification channels] {response.message[:80]}...")
-
-        elif response.action == "post_lor":
-            # Rate limit LoR posts (unless it's a scheduled task)
-            if not is_scheduled_task and (now - self._last_lor_post) < self._lor_cooldown:
-                mins_left = int((self._lor_cooldown - (now - self._last_lor_post)) / 60)
-                logger.info(f"LoR post rate-limited ({mins_left}m cooldown remaining). Skipping.")
-                return
-            lor = self.channels.get("lor")
-            if lor:
-                await lor.send(
-                    response.message,
-                    category=response.lor_category,
-                    title=response.lor_title
-                )
-                self._last_lor_post = now
-                logger.info(f"Posted to LoR: {response.lor_title or response.message[:50]}...")
-            else:
-                logger.info(f"[LoR disabled] {response.message[:80]}...")
 
         elif response.action == "schedule":
             if response.schedule_task and response.schedule_when:

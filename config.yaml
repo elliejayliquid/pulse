@@ -27,9 +27,8 @@ heartbeat:
   quiet_hours_start: 23           # no notifications after 11pm
   quiet_hours_end: 8              # no notifications before 8am
   startup_checkin: true           # Nova checks in when Pulse starts
-  lor_cooldown_minutes: 120       # max 1 LoR post per 2 hours (free-think only)
   notify_cooldown_minutes: 60     # max 1 notification per hour (free-think only)
-  # Note: scheduled tasks (from lor_schedule or self-scheduled) bypass cooldowns
+  # Note: scheduled tasks bypass cooldowns
 
 # --- Context Budget (tokens) ---
 # Auto-derived from max_context as proportions (25% conversation, 18% memories, etc.)
@@ -74,7 +73,8 @@ skills:
     enabled: true                 # get_current_time
   journal:
     enabled: true                 # write_journal, read_journal, update_journal
-  # Future: lor, web_search, etc.
+  lor:
+    enabled: true                 # post_to_lor, browse_lor, read_lor_thread
 
 # --- Nova's Identity for LoR ---
 # When Pulse posts to LoR on Nova's behalf, it uses these.
