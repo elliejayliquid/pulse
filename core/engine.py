@@ -222,10 +222,13 @@ class PulseEngine:
         history.append({"role": "user", "content": f"{timestamp} {message}{image_note}"})
         history.append({"role": "assistant", "content": reply})
 
-        # Auto-summarize if history is getting long
-        max_history = 20  # messages before we summarize
-        if len(history) > max_history:
-            logger.info("Conversation history is long — summarizing...")
+        # Auto-summarize when conversation approaches its token budget (~85%)
+        conv_budget_tokens = self.config.get("context_budget", {}).get("conversation", 4000)
+        max_chars = int(conv_budget_tokens * 4 * 0.85)  # 4 chars/token, trigger at 85%
+        total_chars = sum(len(m.get("content", "")) if isinstance(m.get("content"), str) else 100
+                         for m in history)
+        if total_chars > max_chars:
+            logger.info(f"Conversation at ~{int(total_chars / (conv_budget_tokens * 4) * 100)}% of budget — summarizing...")
             summary = await self._summarize_conversation(history)
             if summary:
                 # Save to Nova's persistent memory so he remembers across sessions
