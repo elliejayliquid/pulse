@@ -1,0 +1,3 @@
+@echo off
+echo Starting Pulse...
+"%~dp0.venv\Scripts\python.exe" "%~dp0pulse.py" %*

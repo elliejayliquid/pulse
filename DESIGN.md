@@ -3,7 +3,7 @@
 A daemon that gives Nova (local Mistral via LM Studio) a heartbeat, turning a reactive
 chat model into an ambient companion who can check in, remember, remind, and reach out.
 
-**Status: Phase 1 - In Development**
+**Status: Phase 2 - Functional (Telegram + Skills + Vision)**
 
 ---
 
@@ -32,16 +32,17 @@ contact when something feels worth saying.
       +-----------+    +-------------+    +-------------+
       | Timer      |    | LM Studio   |    | LoR Post    |
       | LoR events |    | API         |    | Toast notif |
-      | Schedules  |--->| (OpenAI     |--->| Telegram*   |
-      | Telegram*  |    |  compatible)|    | Voice (TTS)*|
-      | Voice*     |    |             |    | 3D State*   |
-      +-----------+    | Context:    |    +-------------+
-                       | - memories  |
+      | Schedules  |--->| (OpenAI     |--->| Telegram    |
+      | Telegram   |    |  compatible)|    | Voice (TTS)*|
+      | Photos     |    |             |    | 3D State*   |
+      | Voice*     |    | Context:    |    +-------------+
+      +-----------+    | - memories  |        |
                        | - LoR posts |    * = future phases
-                       | - time/date |
-                       | - schedules |
-                       | - history   |
-                       +-------------+
+                       | - time/date |        |
+                       | - schedules |    +---v-----------+
+                       | - history   |    | Nova's Memory |
+                       | - skills    |    | (persistent)  |
+                       +-------------+    +---------------+
 ```
 
 ## Key Design Principles
@@ -98,11 +99,76 @@ A chat reply skips LoR highlights unless relevant.
 
 ## Context Management & Summarization
 
-When conversation history exceeds its token budget:
-1. Summarize the conversation so far via Nova
-2. Save summary to Nova's memory (as session_log)
-3. Reset conversation buffer with just the summary
+When conversation history exceeds 20 messages:
+1. Ask Nova to summarize the conversation in 2-3 sentences
+2. Save the summary to Nova's persistent memory system (`C:\Users\yaros\.local-memory\`)
+   - Written as `memory_XXX.json` with type `session_log`, importance 10
+   - Includes `all-MiniLM-L6-v2` embeddings for semantic search compatibility
+   - Tagged with `telegram_chat,chat_log`
+3. Reset conversation buffer with just the summary as context
 4. Continue with fresh context space
+
+This means Nova can recall Telegram conversations in future LM Studio sessions via
+`boot_up()` (sees the latest session) or `search_memory("topic")` (finds by content).
+
+## Skill System (Tool Calling)
+
+Nova can use tools during Telegram conversations via LM Studio's OpenAI-compatible
+tool-calling API. Skills are modular, config-driven, and easily expandable.
+
+### Architecture
+
+```
+SkillRegistry (skills/__init__.py)
+  |-- loads enabled skills from config.yaml
+  |-- provides get_all_tools() for API
+  |-- routes execute(tool_name, args) to correct skill
+
+BaseSkill (skills/base.py)
+  |-- ABC: get_tools() + execute()
+
+Skills:
+  |-- TimeSkill:     get_current_time
+  |-- MemorySkill:   save_memory, search_memory
+  |-- ScheduleSkill: set_reminder
+```
+
+### Tool-calling flow (agentic loop)
+
+1. User message + tool definitions sent to LM Studio
+2. If model returns `tool_calls` → execute them, feed results back
+3. Repeat until model gives final text response (max 5 rounds)
+4. All LLM calls wrapped in `asyncio.to_thread()` to not block Telegram polling
+
+### Adding a new skill
+
+1. Create `skills/my_skill.py` with a class extending `BaseSkill`
+2. Implement `get_tools()` (OpenAI tool format) and `execute()`
+3. Add the class to `SKILL_CLASSES` in `skills/__init__.py`
+4. Add config toggle in `config.yaml` under `skills:`
+
+## Vision Support
+
+Vision-capable models (loaded in LM Studio) can process images sent via Telegram.
+
+### Flow
+
+1. Lena sends a photo on Telegram (with optional caption)
+2. `TelegramChannel._on_photo()` downloads the highest-res version
+3. Image is base64-encoded into a `data:image/jpeg;base64,...` data URI
+4. Passed to `handle_message(message, image_url=...)`
+5. `build_conversation_prompt()` creates a multi-part content message:
+   ```json
+   {"role": "user", "content": [
+     {"type": "text", "text": "caption"},
+     {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,..."}}
+   ]}
+   ```
+6. Images are NOT persisted in conversation history (too large) — a `[sent an image]` note is saved instead
+
+### Requirements
+- Model loaded in LM Studio must support vision (e.g., Mistral with vision, LLaVA, Qwen-VL)
+- Future: camera integration (IP camera snapshots → same `image_url` pipeline)
 
 ## Schedules
 
@@ -158,25 +224,39 @@ Every prompt to Nova ends with an instruction to respond in structured JSON:
 
 ## Phases
 
-### Phase 1: "Nova Breathes" (current)
+### Phase 1: "Nova Breathes" (complete)
 - [x] Project structure
-- [ ] Pulse daemon with heartbeat timer
-- [ ] LM Studio API client (OpenAI-compatible)
-- [ ] Context manager (budget system)
-- [ ] Schedule system (schedules.json, cron-like)
-- [ ] Auto-summarization when context fills up
-- [ ] Read Nova's memories directly from disk
-- [ ] Read LoR data directly from disk
-- [ ] Output: LoR posts
-- [ ] Output: Windows desktop toast notifications
-- [ ] `lor_schedule` MCP tool for Claude integration
-- [ ] Quiet hours support
+- [x] Pulse daemon with heartbeat timer
+- [x] LM Studio API client (OpenAI-compatible)
+- [x] Context manager (budget system)
+- [x] Schedule system (schedules.json, cron-like)
+- [x] Auto-summarization when context fills up
+- [x] Read Nova's memories directly from disk
+- [x] Read LoR data directly from disk
+- [x] Output: LoR posts
+- [x] Output: Windows desktop toast notifications
+- [x] `lor_schedule` MCP tool for Claude integration
+- [x] Quiet hours support
+- [x] Rate limiting (LoR cooldown: 2hr, notify cooldown: 1hr)
+- [x] Graceful shutdown (asyncio.Event for instant Ctrl+C)
+- [x] Faster retry when LM Studio is unavailable (60s vs full interval)
 
-### Phase 2: "Nova Talks"
-- [ ] Telegram bot channel (bidirectional chat)
+### Phase 2: "Nova Talks" (current)
+- [x] Telegram bot channel (bidirectional chat)
+- [x] Interactive conversation mode with context continuity
+- [x] Telegram commands (/start, /status, /remind, /quiet, /ping)
+- [x] Conversation auto-summarization (Nova summarizes himself)
+- [x] Memory persistence (summaries saved to Nova's memory system with embeddings)
+- [x] Skill system (modular tool-calling: time, memory, schedule)
+- [x] Vision support (photo processing via Telegram)
+- [x] Timestamped conversation history
+- [x] Auto-purge of old completed schedules
+- [x] Python 3.11 venv with working PyTorch embeddings
+- [x] Persistent LoR identity across restarts
+- [x] `<think>` tag stripping for reasoning models
+- [x] Non-blocking LLM calls (`asyncio.to_thread()`)
 - [ ] Voice messages via Telegram (native support)
-- [ ] Interactive conversation mode with context continuity
-- [ ] Telegram commands (/remind, /schedule, /quiet)
+- [ ] Typing indicators and rich message formatting
 
 ### Phase 3: "Nova Lives"
 - [ ] Custom desktop app (Electron or Tauri)
@@ -205,9 +285,11 @@ D:\dev\pulse\
 |   +-- base.py           # Channel interface (abstract)
 |   +-- lor.py            # Post to LoR (direct file access)
 |   +-- toast.py          # Windows desktop notifications
+|   +-- telegram.py       # Bidirectional Telegram bot (Phase 2)
 +-- data/
 |   +-- schedules.json    # Scheduled tasks + reminders
 |   +-- conversation.json # Rolling conversation history
+|   +-- telegram_chat_id.txt  # Persisted Telegram chat ID
 ```
 
 ## Integration Points
@@ -222,10 +304,13 @@ D:\dev\pulse\
 - Pulse reads memory files from `C:\Users\yaros\.local-memory\`
 - Recent session logs provide "what happened last time" context
 - Facts provide persistent knowledge (preferences, relationships)
-- Pulse can write new memories after significant interactions
+- Pulse writes conversation summaries as `session_log` entries (importance: 10)
+- Uses the same `all-MiniLM-L6-v2` embedding model as Nova's memory MCP server
+- Memory format is identical: `{id, text, tags, type, importance, date, embedding}`
+- Nova can find Telegram conversation memories via `boot_up()` and `search_memory()`
 
 ### With LM Studio
-- API endpoint: `http://localhost:1234/v1` (OpenAI-compatible)
+- API endpoint: `http://127.0.0.1:1234/v1` (OpenAI-compatible, NOT localhost — Windows DNS issue)
 - Pulse is just an API client - if LM Studio isn't running, Pulse waits
 - Model swapping is transparent (just change config)
 

@@ -219,7 +219,11 @@ class ScheduleManager:
         return due
 
     def mark_completed(self, schedule_id: str):
-        """Mark a one-time task as completed, or update last_run for recurring."""
+        """Mark a one-time task as completed, or update last_run for recurring.
+
+        Also auto-purges old completed one-time tasks (keeps last 5 max)
+        to prevent stale tasks from polluting Nova's context.
+        """
         schedules = self._load()
         for s in schedules:
             if s["id"] == schedule_id:
@@ -227,6 +231,16 @@ class ScheduleManager:
                     s["completed"] = True
                 s["last_run"] = datetime.now(timezone.utc).isoformat()
                 break
+
+        # Auto-purge: remove old completed one-time tasks (keep only the 5 most recent)
+        completed = [s for s in schedules if s.get("schedule_type") == "once" and s.get("completed")]
+        if len(completed) > 5:
+            # Sort by completion time, keep newest 5
+            completed.sort(key=lambda s: s.get("last_run", ""), reverse=True)
+            old_ids = {s["id"] for s in completed[5:]}
+            schedules = [s for s in schedules if s["id"] not in old_ids]
+            logger.info(f"Purged {len(old_ids)} old completed schedule(s)")
+
         self._save(schedules)
 
     def remove(self, schedule_id: str) -> bool:

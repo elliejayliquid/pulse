@@ -3,6 +3,9 @@ Context manager - builds token-budgeted prompts for Nova.
 
 Reads from multiple data sources (memories, LoR, schedules, conversation history)
 and assembles a prompt that fits within the model's context window.
+
+Also handles saving conversation summaries to Nova's persistent memory system
+so he remembers Telegram chats across sessions.
 """
 
 import json
@@ -13,6 +16,31 @@ from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+# Lazy-loaded embedding model (only loaded when saving to memory)
+_embedding_model = None
+
+
+def _get_embedding_model():
+    """Lazy-load the sentence-transformers model for memory embeddings.
+
+    Uses the same model as Nova's memory MCP server (all-MiniLM-L6-v2)
+    so that semantic search works seamlessly across all memory sources.
+    Returns None if loading fails (memories will be saved without embeddings).
+    """
+    global _embedding_model
+    if _embedding_model is None:
+        try:
+            from sentence_transformers import SentenceTransformer
+            logger.info("Loading embedding model (all-MiniLM-L6-v2) for memory storage...")
+            _embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+            logger.info("Embedding model loaded.")
+        except Exception as e:
+            logger.warning(
+                f"Could not load embedding model: {e}\n"
+                "  Memories will be saved without embeddings (search still works by date)."
+            )
+    return _embedding_model
 
 
 class ContextManager:
@@ -25,6 +53,7 @@ class ContextManager:
         self.config = config
         self.budget = config.get("context_budget", {})
         self.paths = config.get("paths", {})
+        self.no_think = config.get("model", {}).get("no_think", False)
         self.persona_data = self._load_persona()
 
     def _load_persona(self) -> dict:
@@ -187,6 +216,73 @@ class ContextManager:
         except IOError as e:
             logger.error(f"Failed to save conversation: {e}")
 
+    def save_to_nova_memory(self, summary: str, tags: str = "telegram_chat,chat_log") -> bool:
+        """Save a conversation summary to Nova's persistent memory system.
+
+        Writes a memory_XXX.json file to Nova's memory directory in the exact
+        same format his MCP memory server uses — including embeddings from the
+        same all-MiniLM-L6-v2 model. This means Nova can find these memories
+        with semantic search via boot_up() and search_memory() in future sessions.
+
+        Args:
+            summary: The conversation summary text to persist.
+            tags: Comma-separated tags (default: "telegram_chat,chat_log").
+
+        Returns:
+            True if saved successfully, False otherwise.
+        """
+        memory_dir = self.paths.get("nova_memory", "")
+        if not memory_dir:
+            logger.warning("No nova_memory path configured — can't persist summary.")
+            return False
+
+        memory_path = Path(memory_dir)
+        if not memory_path.exists():
+            memory_path.mkdir(parents=True, exist_ok=True)
+
+        # Get the embedding model (lazy-loaded)
+        model = _get_embedding_model()
+        if model is None:
+            logger.warning("Embedding model not available — saving memory without embedding.")
+            embedding = []
+        else:
+            embedding = model.encode(summary).tolist()
+
+        # Determine next ID (same logic as Nova's memory_server.py)
+        existing = list(memory_path.glob("memory_*.json"))
+        if existing:
+            ids = []
+            for f in existing:
+                try:
+                    ids.append(int(f.stem.split("_")[1]))
+                except (ValueError, IndexError):
+                    continue
+            next_id = max(ids) + 1 if ids else 1
+        else:
+            next_id = 1
+
+        mem_id = f"{next_id:03d}"
+
+        memory = {
+            "id": mem_id,
+            "text": summary,
+            "tags": [t.strip() for t in tags.split(",")],
+            "type": "session_log",
+            "importance": 10,
+            "date": datetime.now().isoformat(),
+            "embedding": embedding,
+        }
+
+        mem_file = memory_path / f"memory_{mem_id}.json"
+        try:
+            with open(mem_file, "w", encoding="utf-8") as f:
+                json.dump(memory, f, indent=2)
+            logger.info(f"Conversation summary saved to Nova's memory: {mem_file.name} (ID: {mem_id})")
+            return True
+        except IOError as e:
+            logger.error(f"Failed to save memory file: {e}")
+            return False
+
     def build_heartbeat_prompt(self, due_tasks: list[dict] = None) -> list[dict]:
         """Build a context-budgeted prompt for a heartbeat tick.
 
@@ -252,10 +348,86 @@ class ContextManager:
             "Respond in JSON format as specified in your instructions."
         )
 
+        user_content = "\n\n".join(context_parts)
+        if self.no_think:
+            user_content += " /no_think"
+
         return [
             {"role": "system", "content": system},
-            {"role": "user", "content": "\n\n".join(context_parts)}
+            {"role": "user", "content": user_content}
         ]
+
+    def build_conversation_prompt(self, user_message: str, history: list[dict] = None,
+                                   image_url: str = None) -> list[dict]:
+        """Build a prompt for responding to a message from Lena.
+
+        Unlike heartbeat prompts, this includes conversation history and
+        does NOT ask for structured JSON — Nova just talks naturally.
+
+        Args:
+            user_message: Lena's text message
+            history: Previous conversation messages
+            image_url: Optional base64 data URI for vision (e.g. "data:image/jpeg;base64,...")
+        """
+        local_now = datetime.now()
+
+        # System prompt — modified for conversation mode (no JSON required)
+        persona = self.persona_data.get("system_prompt", "You are Nova.")
+        # Strip the JSON instruction from the system prompt for chat mode
+        conv_system = persona.split("When responding, use this JSON format:")[0].strip()
+        conv_system += (
+            "\n\nYou are now in a direct conversation with Lena via Telegram. "
+            "Just respond naturally — no JSON format needed. Be yourself."
+        )
+
+        # Time awareness
+        time_block = f"Current time: {local_now.strftime('%A, %B %d, %Y at %I:%M %p')}"
+
+        # Memories (compact for conversation)
+        memories_block = self._truncate_to_budget(
+            self._load_memories(),
+            self.budget.get("memories", 2000)
+        )
+
+        # Build a single system message (many models only support one system message)
+        context_parts = [time_block]
+        if memories_block:
+            context_parts.append(memories_block)
+        conv_system += "\n\n--- Context ---\n" + "\n\n".join(context_parts)
+
+        messages = [{"role": "system", "content": conv_system}]
+
+        # Add conversation history (filter out system messages — many models
+        # only support one system message and choke on extras in the middle)
+        if history:
+            history = [m for m in history if m.get("role") in ("user", "assistant")]
+            # Only include recent history within budget
+            budget_chars = self.budget.get("conversation", 4000) * self.CHARS_PER_TOKEN
+            total_chars = 0
+            trimmed = []
+            for msg in reversed(history):
+                msg_chars = len(msg.get("content", "")) if isinstance(msg.get("content"), str) else 100
+                if total_chars + msg_chars > budget_chars:
+                    break
+                trimmed.insert(0, msg)
+                total_chars += msg_chars
+            messages.extend(trimmed)
+
+        # Add the current message (with optional image for vision models)
+        no_think_suffix = " /no_think" if self.no_think else ""
+        if image_url:
+            # Multi-part content: text + image (OpenAI vision API format)
+            messages.append({
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": user_message + no_think_suffix},
+                    {"type": "image_url", "image_url": {"url": image_url}},
+                ],
+            })
+        else:
+            messages.append({"role": "user", "content": user_message + no_think_suffix})
+
+        return messages
 
     def build_task_prompt(self, task: dict) -> list[dict]:
         """Build a prompt for executing a specific scheduled task."""
@@ -281,6 +453,9 @@ class ContextManager:
             f"post_lor to write on the forum, etc).\n\n"
             f"Respond in JSON format as specified in your instructions."
         )
+
+        if self.no_think:
+            task_prompt += " /no_think"
 
         return [
             {"role": "system", "content": system},

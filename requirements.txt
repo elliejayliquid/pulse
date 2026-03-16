@@ -1,7 +1,10 @@
 # Pulse - Nova's heartbeat daemon
-openai>=1.0.0           # LM Studio API client (OpenAI-compatible)
-pyyaml>=6.0             # Config file parsing
-win11toast>=0.34        # Windows desktop notifications (optional, Windows only)
+openai>=1.0.0                   # LM Studio API client (OpenAI-compatible)
+pyyaml>=6.0                     # Config file parsing
+python-dotenv>=1.0              # Load .env secrets
+win11toast>=0.34                # Windows desktop notifications (optional, Windows only)
+python-telegram-bot>=21.0       # Telegram bot (Phase 2)
+sentence-transformers>=2.0      # Memory embeddings
 
 # Note: plyer is an alternative to win11toast for cross-platform
 # pip install plyer

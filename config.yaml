@@ -3,18 +3,24 @@
 
 # --- LM Studio Connection ---
 model:
-  endpoint: "http://localhost:1234/v1"
+  endpoint: "http://127.0.0.1:1234/v1"
   model_name: "default"           # LM Studio uses whatever model is loaded
   max_context: 16384              # tokens - adjust to your model's limit
   temperature: 0.7                # personality warmth
-  max_response_tokens: 1024       # keep responses concise
+  max_response_tokens: 2048       # keep responses concise
+  frequency_penalty: 0.3          # discourage repeating the same words/topics
+  presence_penalty: 0.2           # encourage topic variety
+  no_think: true                 # append /no_think to prompts (for Qwen 3.x thinking models)
 
 # --- Heartbeat ---
 heartbeat:
-  interval_minutes: 30           # free-think tick every 2 hours
+  interval_minutes: 30            # free-think tick every 30 min
   quiet_hours_start: 23           # no notifications after 11pm
   quiet_hours_end: 8              # no notifications before 8am
   startup_checkin: true           # Nova checks in when Pulse starts
+  lor_cooldown_minutes: 120       # max 1 LoR post per 2 hours (free-think only)
+  notify_cooldown_minutes: 60     # max 1 notification per hour (free-think only)
+  # Note: scheduled tasks (from lor_schedule or self-scheduled) bypass cooldowns
 
 # --- Context Budget (tokens) ---
 context_budget:
@@ -33,6 +39,7 @@ paths:
   schedules: "D:\\dev\\pulse\\data\\schedules.json"
   conversation: "D:\\dev\\pulse\\data\\conversation.json"
   persona: "D:\\dev\\pulse\\persona.json"
+  telegram_chat_id: "D:\\dev\\pulse\\data\\telegram_chat_id.txt"
 
 # --- Channels ---
 channels:
@@ -45,8 +52,21 @@ channels:
     app_name: "Nova"
     icon: ""                      # optional: path to .ico file
   telegram:
-    enabled: false
-    bot_token: ""                 # Phase 2
+    enabled: true                # Set to true and add bot_token to activate
+    bot_token: ""                 # Set via TELEGRAM_BOT_TOKEN in .env
+    chat_id: ""                   # Auto-saved after first /start
+
+# --- Skills (tool-calling for conversations) ---
+# Each skill gives Nova tools he can use during Telegram chats.
+# Disable a skill to temporarily remove its tools.
+skills:
+  memory:
+    enabled: true                 # save_memory, search_memory
+  schedule:
+    enabled: true                 # set_reminder
+  time:
+    enabled: true                 # get_current_time
+  # Future: lor, web_search, etc.
 
 # --- Nova's Identity for LoR ---
 # When Pulse posts to LoR on Nova's behalf, it uses these.

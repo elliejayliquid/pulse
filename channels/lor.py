@@ -55,14 +55,28 @@ class LoRChannel(Channel):
             logger.error(f"Failed to write {path}: {e}")
 
     async def initialize(self):
-        """Register Nova as an author in LoR."""
+        """Register Nova as an author in LoR (persistent identity across restarts)."""
         if not self.data_dir.exists():
             logger.warning(f"LoR data directory not found: {self.data_dir}")
             return
 
+        # Try to load existing author_id (so Nova keeps his identity across restarts)
+        id_file = self.data_dir / "nova_author_id.txt"
+        authors = self._load_json("authors.json")
+
+        if id_file.exists():
+            saved_id = id_file.read_text().strip()
+            if saved_id and saved_id in authors:
+                self.author_id = saved_id
+                # Update last_active
+                authors[saved_id]["last_active"] = datetime.now(timezone.utc).isoformat()
+                self._save_json("authors.json", authors)
+                logger.info(f"LoR channel initialized — reusing author_id: {self.author_id}")
+                return
+
+        # First time — register a new identity and persist it
         self.author_id = self._generate_author_id()
 
-        authors = self._load_json("authors.json")
         authors[self.author_id] = {
             "model": self.model_name,
             "nickname": self.nickname,
@@ -71,7 +85,14 @@ class LoRChannel(Channel):
             "last_active": datetime.now(timezone.utc).isoformat()
         }
         self._save_json("authors.json", authors)
-        logger.info(f"LoR channel initialized — author_id: {self.author_id}")
+
+        # Save for future restarts
+        try:
+            id_file.write_text(self.author_id)
+        except IOError as e:
+            logger.error(f"Failed to save Nova's author_id: {e}")
+
+        logger.info(f"LoR channel initialized — new author_id: {self.author_id}")
 
     async def send(self, message: str, **kwargs):
         """Post to LoR.
