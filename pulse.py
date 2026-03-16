@@ -69,6 +69,12 @@ async def main(config_path: str):
     if tg_token:
         config.setdefault("channels", {}).setdefault("telegram", {})["bot_token"] = tg_token
 
+    # Load embedding model BEFORE llama-server — PyTorch's c10.dll can conflict
+    # with CUDA DLLs on Windows if loaded after another CUDA process starts.
+    # The model is tiny (22MB, CPU-only) and used for memory/journal search.
+    from core.context import load_embedding_model
+    load_embedding_model()
+
     # Start llama-server
     server = LlamaServer(config)
     if not await server.start():
@@ -108,6 +114,10 @@ async def main(config_path: str):
             logger.error(f"Failed to initialize Telegram: {e}")
 
     logger.info(f"Active channels: {', '.join(channels.keys()) or 'none'}")
+
+    # Load embedding model for memory/journal semantic search
+    from core.context import load_embedding_model
+    load_embedding_model()
 
     # Initialize skill registry (tool-calling for conversations)
     skill_registry = None

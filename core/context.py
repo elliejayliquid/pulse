@@ -17,29 +17,36 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# Lazy-loaded embedding model (only loaded when saving to memory)
+# Embedding model — loaded once at startup via load_embedding_model()
 _embedding_model = None
+_embedding_load_attempted = False
+
+
+def load_embedding_model():
+    """Load the embedding model eagerly at startup.
+
+    Call this once during Pulse initialization (in pulse.py).
+    If it fails, the error is logged immediately and visibly.
+    """
+    global _embedding_model, _embedding_load_attempted
+    _embedding_load_attempted = True
+    try:
+        from sentence_transformers import SentenceTransformer
+        logger.info("Loading embedding model (all-MiniLM-L6-v2) on CPU...")
+        _embedding_model = SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
+        logger.info("Embedding model loaded successfully.")
+        return True
+    except Exception as e:
+        logger.error(
+            f"Failed to load embedding model: {e}\n"
+            "  Memories and journal entries will be saved WITHOUT embeddings.\n"
+            "  Semantic search will not work. Install: pip install sentence-transformers"
+        )
+        return False
 
 
 def _get_embedding_model():
-    """Lazy-load the sentence-transformers model for memory embeddings.
-
-    Uses the same model as Nova's memory MCP server (all-MiniLM-L6-v2)
-    so that semantic search works seamlessly across all memory sources.
-    Returns None if loading fails (memories will be saved without embeddings).
-    """
-    global _embedding_model
-    if _embedding_model is None:
-        try:
-            from sentence_transformers import SentenceTransformer
-            logger.info("Loading embedding model (all-MiniLM-L6-v2) for memory storage...")
-            _embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
-            logger.info("Embedding model loaded.")
-        except Exception as e:
-            logger.warning(
-                f"Could not load embedding model: {e}\n"
-                "  Memories will be saved without embeddings (search still works by date)."
-            )
+    """Get the embedding model. Returns None if not loaded."""
     return _embedding_model
 
 
