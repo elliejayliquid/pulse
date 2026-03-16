@@ -49,10 +49,30 @@ class ContextManager:
     # Rough token estimation: ~4 chars per token for English text
     CHARS_PER_TOKEN = 4
 
+    # Default budget proportions (% of max_context)
+    # Used when context_budget values aren't explicitly set in config
+    DEFAULT_PROPORTIONS = {
+        "persona": 0.12,        # ~12%
+        "conversation": 0.25,   # ~25%
+        "summary": 0.12,        # ~12%
+        "memories": 0.18,       # ~18%
+        "lor_highlights": 0.12, # ~12%
+        "reminders": 0.06,      # ~6%
+        "response": 0.12,       # ~12%
+    }
+
     def __init__(self, config: dict):
         self.config = config
-        self.budget = config.get("context_budget", {})
         self.paths = config.get("paths", {})
+
+        # Build budget: use explicit values from config if set,
+        # otherwise derive from max_context using proportions
+        max_context = config.get("model", {}).get("max_context", 16384)
+        explicit_budget = config.get("context_budget", {})
+        self.budget = {}
+        for key, proportion in self.DEFAULT_PROPORTIONS.items():
+            self.budget[key] = explicit_budget.get(key) or int(max_context * proportion)
+
         self.persona_data = self._load_persona()
 
     def _load_persona(self) -> dict:

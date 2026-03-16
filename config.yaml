@@ -32,14 +32,10 @@ heartbeat:
   # Note: scheduled tasks (from lor_schedule or self-scheduled) bypass cooldowns
 
 # --- Context Budget (tokens) ---
-context_budget:
-  persona: 2000
-  conversation: 4000
-  summary: 2000
-  memories: 3000
-  lor_highlights: 2000
-  reminders: 1000
-  response: 2000
+# Auto-derived from max_context as proportions (25% conversation, 18% memories, etc.)
+# Override individual values here to pin them instead:
+# context_budget:
+#   conversation: 4000
 
 # --- Data Paths ---
 paths:
