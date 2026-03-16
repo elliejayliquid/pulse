@@ -9,9 +9,11 @@ This is the main orchestrator. It:
 """
 
 import asyncio
+import json
 import logging
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 from core.llm import LLMClient, PulseResponse
 from core.context import ContextManager
@@ -54,6 +56,12 @@ class PulseEngine:
             config.get("paths", {}).get("schedules", "data/schedules.json")
         )
 
+        # Wire journal skill into context manager (if available)
+        if skill_registry:
+            journal_skill = skill_registry.get_skill("journal")
+            if journal_skill:
+                self.context.set_journal_skill(journal_skill)
+
         heartbeat_config = config.get("heartbeat", {})
         self.interval = heartbeat_config.get("interval_minutes", 120) * 60  # seconds
         self.quiet_start = heartbeat_config.get("quiet_hours_start", 23)
@@ -68,6 +76,39 @@ class PulseEngine:
         self._last_notify = 0       # timestamp of last notification
         self._lor_cooldown = heartbeat_config.get("lor_cooldown_minutes", 120) * 60  # default 2 hours
         self._notify_cooldown = heartbeat_config.get("notify_cooldown_minutes", 60) * 60  # default 1 hour
+
+        # Action log — tracks what Nova does each heartbeat for self-regulation
+        self._action_log_path = Path(
+            config.get("paths", {}).get("action_log", "data/action_log.json")
+        )
+        self._action_log_max = 20  # keep last 20 actions
+
+    def _log_action(self, action: str, tools_used: list[str] = None, summary: str = ""):
+        """Append an entry to the heartbeat action log (ring buffer)."""
+        log = []
+        if self._action_log_path.exists():
+            try:
+                with open(self._action_log_path, "r", encoding="utf-8") as f:
+                    log = json.load(f)
+            except (json.JSONDecodeError, IOError):
+                log = []
+
+        log.append({
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "action": action,
+            "tools": tools_used or [],
+            "summary": summary[:120],
+        })
+
+        # Keep only the most recent entries
+        log = log[-self._action_log_max:]
+
+        try:
+            self._action_log_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self._action_log_path, "w", encoding="utf-8") as f:
+                json.dump(log, f, indent=2)
+        except IOError as e:
+            logger.warning(f"Failed to write action log: {e}")
 
     async def _interruptible_sleep(self, seconds: int):
         """Sleep that can be interrupted instantly by stop()."""
@@ -293,18 +334,37 @@ class PulseEngine:
             logger.warning("LLM server not available — can't execute due tasks.")
             return False
 
+        tools = self.skill_registry.get_all_tools() if self.skill_registry else []
+
         for task in due_tasks:
             logger.info(f"Executing due task: {task['task']}")
-            messages = self.context.build_task_prompt(task)
-            response = await asyncio.to_thread(self.llm.chat, messages)
-            if response:
-                await self._dispatch(response, is_scheduled_task=True)
+            messages = self.context.build_task_prompt(task, has_tools=bool(tools))
+
+            if tools:
+                text, tools_used = await asyncio.to_thread(
+                    self.llm.chat_with_tools, messages, tools, self.skill_registry
+                )
+                if tools_used:
+                    logger.info(f"Task tools used: {', '.join(tools_used)}")
+                if text:
+                    response = PulseResponse.from_llm_output(text)
+                    await self._dispatch(response, is_scheduled_task=True)
+            else:
+                response = await asyncio.to_thread(self.llm.chat, messages)
+                if response:
+                    await self._dispatch(response, is_scheduled_task=True)
+
             self.scheduler.mark_completed(task["id"])
 
         return True
 
     async def _do_heartbeat(self):
-        """Execute a single heartbeat tick (free-think)."""
+        """Execute a single heartbeat tick (free-think).
+
+        If skills are available, Nova can use tools (search memory, write journal,
+        etc.) before deciding on an action. The final response is still parsed as
+        JSON (PulseResponse) for dispatch.
+        """
         logger.info("--- Heartbeat tick ---")
 
         if self._in_quiet_hours():
@@ -317,10 +377,29 @@ class PulseEngine:
             return
 
         # Free-think tick — Nova decides what to do
-        messages = self.context.build_heartbeat_prompt()
-        response = await asyncio.to_thread(self.llm.chat, messages)
-        if response:
-            await self._dispatch(response)
+        tools = self.skill_registry.get_all_tools() if self.skill_registry else []
+        messages = self.context.build_heartbeat_prompt(has_tools=bool(tools))
+
+        if tools:
+            # Tool-calling mode: Nova can use tools, then gives JSON decision
+            logger.info(f"Heartbeat with {len(tools)} tools available")
+            text, tools_used = await asyncio.to_thread(
+                self.llm.chat_with_tools, messages, tools, self.skill_registry
+            )
+            if tools_used:
+                logger.info(f"Heartbeat tools used: {', '.join(tools_used)}")
+            if text:
+                response = PulseResponse.from_llm_output(text)
+                await self._dispatch(response)
+                self._log_action(response.action, tools_used, response.message)
+            else:
+                self._log_action("silent", tools_used)
+        else:
+            # Plain mode: no tools, just JSON response
+            response = await asyncio.to_thread(self.llm.chat, messages)
+            if response:
+                await self._dispatch(response)
+                self._log_action(response.action, summary=response.message)
 
     async def run(self):
         """Main loop — runs forever until stopped.

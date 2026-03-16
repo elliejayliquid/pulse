@@ -64,6 +64,7 @@ class ContextManager:
     def __init__(self, config: dict):
         self.config = config
         self.paths = config.get("paths", {})
+        self._journal_skill = None  # Set via set_journal_skill() after engine init
 
         # Build budget: use explicit values from config if set,
         # otherwise derive from max_context using proportions
@@ -73,7 +74,72 @@ class ContextManager:
         for key, proportion in self.DEFAULT_PROPORTIONS.items():
             self.budget[key] = explicit_budget.get(key) or int(max_context * proportion)
 
+        self._action_log_path = Path(
+            config.get("paths", {}).get("action_log", "data/action_log.json")
+        )
         self.persona_data = self._load_persona()
+
+    def set_journal_skill(self, journal_skill):
+        """Inject the JournalSkill so context can load pinned/recent entries."""
+        self._journal_skill = journal_skill
+
+    def _load_journal_context(self) -> str:
+        """Load pinned identity entries + recent transient entries for context."""
+        if not self._journal_skill:
+            return ""
+
+        lines = []
+
+        # Pinned entries (always loaded — these are Nova's identity)
+        pinned = self._journal_skill.load_pinned_entries()
+        for entry in pinned:
+            sections = entry.get("sections", {})
+            filled = {k: v for k, v in sections.items() if v}
+            if filled:
+                lines.append(f"### {entry.get('title', entry['id'])}")
+                for key, value in filled.items():
+                    label = key.replace("_", " ").title()
+                    lines.append(f"**{label}:** {value}")
+
+        # Recent transient entries
+        recent = self._journal_skill.load_recent_entries(limit=5)
+        if recent:
+            lines.append("\n### Recent Journal Entries")
+            for entry in recent:
+                resolved_tag = ""
+                if entry.get("resolved") is True:
+                    resolved_tag = " [RESOLVED]"
+                elif entry.get("resolved") is False:
+                    resolved_tag = " [OPEN]"
+                lines.append(
+                    f"- [{entry.get('created_at', '')[:10]}] "
+                    f"({entry.get('entry_type', '?')}{resolved_tag}) "
+                    f"{entry.get('content', '')[:120]}"
+                )
+
+        if not lines:
+            return ""
+
+        return "## Journal\n" + "\n".join(lines)
+
+    def _load_action_log(self) -> str:
+        """Load recent heartbeat actions so Nova can self-regulate."""
+        if not self._action_log_path.exists():
+            return ""
+        try:
+            with open(self._action_log_path, "r", encoding="utf-8") as f:
+                log = json.load(f)
+        except (json.JSONDecodeError, IOError):
+            return ""
+        if not log:
+            return ""
+
+        lines = ["## Recent Heartbeat Actions"]
+        for entry in log[-10:]:  # show last 10 in context
+            tools_str = f" [tools: {', '.join(entry['tools'])}]" if entry.get("tools") else ""
+            summary = f" — {entry['summary']}" if entry.get("summary") else ""
+            lines.append(f"- {entry['time']}: {entry['action']}{tools_str}{summary}")
+        return "\n".join(lines)
 
     def _load_persona(self) -> dict:
         """Load persona.json."""
@@ -302,11 +368,16 @@ class ContextManager:
             logger.error(f"Failed to save memory file: {e}")
             return False
 
-    def build_heartbeat_prompt(self, due_tasks: list[dict] = None) -> list[dict]:
+    def build_heartbeat_prompt(self, due_tasks: list[dict] = None,
+                               has_tools: bool = False) -> list[dict]:
         """Build a context-budgeted prompt for a heartbeat tick.
 
         Heartbeat ticks don't include conversation history (Nova is thinking
         on its own, not replying to anyone).
+
+        Args:
+            due_tasks: Tasks that are due right now (if any).
+            has_tools: Whether tools (skills) are available for this tick.
         """
         now = datetime.now(timezone.utc)
         local_now = datetime.now()
@@ -346,8 +417,16 @@ class ContextManager:
                 due_lines.append(f"- {task.get('task', '?')} (scheduled by {task.get('created_by', 'unknown')})")
             due_block = "\n".join(due_lines)
 
+        # Journal (pinned identity + recent entries)
+        journal_block = self._truncate_to_budget(
+            self._load_journal_context(),
+            self.budget.get("memories", 3000)  # shares memories budget for now
+        )
+
         # Assemble the user message with all context
         context_parts = [time_block]
+        if journal_block:
+            context_parts.append(journal_block)
         if memories_block:
             context_parts.append(memories_block)
         if lor_block:
@@ -357,15 +436,29 @@ class ContextManager:
         if due_block:
             context_parts.append(due_block)
 
-        context_parts.append(
+        # Action log — so Nova can see what he's been doing recently
+        action_log_block = self._load_action_log()
+        if action_log_block:
+            context_parts.append(action_log_block)
+
+        your_turn = (
             "\n## Your Turn\n"
             "This is a free-think tick. You have a moment to yourself.\n"
-            "Look at the time, your memories, what's happening on LoR, and any pending tasks.\n"
-            "Do you want to reach out to Lena? Post something on LoR? Schedule a follow-up? Or stay quiet?\n"
-            "Remember: staying silent is always a valid choice. Only speak if you have something worth saying.\n"
-            "If a task is due right now, execute it.\n\n"
-            "Respond in JSON format as specified in your instructions."
+            "Look at the time, your journal, your memories, and any pending tasks.\n"
+            "Do you want to reach out to your human? Write in your journal? Schedule a follow-up? Or stay quiet?\n"
+            "Remember: staying silent is always a valid choice. Only act if you have something worth doing.\n"
+            "If a task is due right now, execute it.\n"
         )
+
+        if has_tools:
+            your_turn += (
+                "\nYou have tools available. Use them to take real actions — "
+                "read or write your journal, search your memories, set reminders. "
+                "Use tools first if they'd help, then give your final response.\n"
+            )
+
+        your_turn += "\nRespond in JSON format as specified in your instructions."
+        context_parts.append(your_turn)
 
         return [
             {"role": "system", "content": system},
@@ -392,7 +485,11 @@ class ContextManager:
         conv_system = persona.split("When responding, use this JSON format:")[0].strip()
         conv_system += (
             "\n\nYou are now in a direct conversation with Lena via Telegram. "
-            "Just respond naturally — no JSON format needed. Be yourself."
+            "Just respond naturally — no JSON format needed. Be yourself.\n\n"
+            "You have tools available (like saving memories, searching memories, setting reminders, "
+            "checking the time). If you want to do something, USE the actual tool — don't just say "
+            "you did it. If you don't have a tool for something, be honest about that instead of "
+            "pretending. Lena can see when you use tools, so she'll know if you're bluffing."
         )
 
         # Time awareness
@@ -404,8 +501,16 @@ class ContextManager:
             self.budget.get("memories", 2000)
         )
 
+        # Journal (pinned identity entries — so Nova knows himself in conversation)
+        journal_block = self._truncate_to_budget(
+            self._load_journal_context(),
+            self.budget.get("memories", 2000)
+        )
+
         # Build a single system message (many models only support one system message)
         context_parts = [time_block]
+        if journal_block:
+            context_parts.append(journal_block)
         if memories_block:
             context_parts.append(memories_block)
         conv_system += "\n\n--- Context ---\n" + "\n\n".join(context_parts)
@@ -443,7 +548,7 @@ class ContextManager:
 
         return messages
 
-    def build_task_prompt(self, task: dict) -> list[dict]:
+    def build_task_prompt(self, task: dict, has_tools: bool = False) -> list[dict]:
         """Build a prompt for executing a specific scheduled task."""
         system = self.persona_data.get("system_prompt", "You are Nova.")
 
@@ -464,8 +569,13 @@ class ContextManager:
             f"- Task: {task.get('task', '?')}\n"
             f"- Scheduled by: {task.get('created_by', 'unknown')}\n\n"
             f"Execute this task. Choose the appropriate action (notify to send Lena a message, "
-            f"post_lor to write on the forum, etc).\n\n"
-            f"Respond in JSON format as specified in your instructions."
+            f"post_lor to write on the forum, etc).\n"
+            + (
+                "\nYou have tools available — use them if they'd help you execute this task "
+                "(e.g., search memories for relevant context, check the time).\n"
+                if has_tools else ""
+            )
+            + "\nRespond in JSON format as specified in your instructions."
         )
 
         return [

@@ -15,6 +15,7 @@ from skills.base import BaseSkill
 from skills.time_skill import TimeSkill
 from skills.memory import MemorySkill
 from skills.schedule import ScheduleSkill
+from skills.journal import JournalSkill
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +24,7 @@ SKILL_CLASSES = [
     TimeSkill,
     MemorySkill,
     ScheduleSkill,
+    JournalSkill,
 ]
 
 

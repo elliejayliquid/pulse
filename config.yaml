@@ -43,6 +43,7 @@ paths:
   lor_data: "D:\\Claude\\LoR\\lor_data"
   schedules: "D:\\dev\\pulse\\data\\schedules.json"
   conversation: "D:\\dev\\pulse\\data\\conversation.json"
+  journal: "D:\\dev\\pulse\\data\\journal"
   persona: "D:\\dev\\pulse\\persona.json"
   telegram_chat_id: "D:\\dev\\pulse\\data\\telegram_chat_id.txt"
 
@@ -71,6 +72,8 @@ skills:
     enabled: true                 # set_reminder
   time:
     enabled: true                 # get_current_time
+  journal:
+    enabled: true                 # write_journal, read_journal, update_journal
   # Future: lor, web_search, etc.
 
 # --- Nova's Identity for LoR ---
