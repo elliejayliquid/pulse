@@ -1,7 +1,7 @@
 """
 Pulse - Proactive Local AI Companion Daemon
 
-Gives Nova a heartbeat. Run this to start the daemon:
+Gives your AI companion a heartbeat. Run this to start the daemon:
     python pulse.py
     python pulse.py --config custom_config.yaml
 
@@ -176,11 +176,11 @@ async def main(config_path: str):
             await channel.shutdown()
         # Then stop the server (waits for in-flight inference)
         await server.stop()
-        logger.info("Pulse stopped. Nova is sleeping.")
+        logger.info("Pulse stopped. Companion is sleeping.")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Pulse - Nova's heartbeat daemon")
+    parser = argparse.ArgumentParser(description="Pulse - AI companion heartbeat daemon")
     parser.add_argument(
         "--config", "-c",
         default="config.yaml",

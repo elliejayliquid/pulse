@@ -1,9 +1,9 @@
 """
-Telegram channel - bidirectional chat with Nova.
+Telegram channel - bidirectional chat with the AI companion.
 
 Handles both:
-- Outbound: Nova sends proactive messages (heartbeat, scheduled tasks)
-- Inbound: Lena chats with Nova, gets responses
+- Outbound: companion sends proactive messages (heartbeat, scheduled tasks)
+- Inbound: user chats with companion, gets responses
 
 Uses python-telegram-bot (async version).
 """
@@ -31,10 +31,19 @@ class TelegramChannel(Channel):
     def __init__(self, config: dict):
         tg_config = config.get("channels", {}).get("telegram", {})
         self.bot_token = tg_config.get("bot_token", "")
-        self.chat_id = tg_config.get("chat_id", "")  # Lena's chat ID (set after first /start)
+        self.chat_id = tg_config.get("chat_id", "")  # User's chat ID (set after first /start)
         self.app = None
         self._engine = None  # Set by engine after init
         self._chat_id_file = config.get("paths", {}).get("telegram_chat_id", "")
+        # Read companion name from persona (for user-facing messages)
+        self._ai_name = "Companion"
+        persona_path = config.get("paths", {}).get("persona", "persona.json")
+        try:
+            import json
+            with open(persona_path, "r", encoding="utf-8") as f:
+                self._ai_name = json.load(f).get("name", "Companion")
+        except Exception:
+            pass
 
     def set_engine(self, engine):
         """Connect the engine so incoming messages can trigger responses."""
@@ -113,12 +122,12 @@ class TelegramChannel(Channel):
         logger.info("Telegram bot started and polling for messages!")
 
     async def send(self, message: str, **kwargs):
-        """Send a message to Lena via Telegram.
+        """Send a message to the user via Telegram.
 
         Used by the engine for proactive messages (heartbeat, scheduled tasks).
         """
         if not self.app or not self.chat_id:
-            logger.warning("Telegram: no chat_id yet. Lena needs to /start the bot first.")
+            logger.warning("Telegram: no chat_id yet. User needs to /start the bot first.")
             return
 
         try:
@@ -165,7 +174,7 @@ class TelegramChannel(Channel):
                 logger.error(f"Failed to save chat_id: {e}")
 
         await update.message.reply_text(
-            "Hey! Nova here. I'm connected and ready to chat.\n"
+            f"Hey! {self._ai_name} here. I'm connected and ready to chat.\n"
             "Just message me anytime. I'll also send you proactive check-ins!\n\n"
             "Commands:\n"
             "/status — see what I'm up to\n"
@@ -232,8 +241,8 @@ class TelegramChannel(Channel):
             when = "in 1 hours"  # default: 1 hour
 
         entry = self._engine.scheduler.add(
-            task=f"Remind Lena: {task}",
-            created_by="lena-telegram",
+            task=f"Remind user: {task}",
+            created_by="user-telegram",
             when=when
         )
         await update.message.reply_text(f"Got it! I'll remind you: \"{task}\"\nSchedule ID: {entry['id']}")
@@ -241,23 +250,23 @@ class TelegramChannel(Channel):
     # --- Message handler ---
 
     async def _on_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle incoming text messages — route to Nova for a response."""
+        """Handle incoming text messages — route to the companion for a response."""
         try:
             if not self._engine:
                 await update.message.reply_text("I'm still starting up, give me a moment...")
                 return
 
             user_message = update.message.text
-            logger.info(f"Telegram message from Lena: {user_message[:50]}...")
+            logger.info(f"Telegram message from user: {user_message[:50]}...")
 
             # Show typing indicator
             await update.effective_chat.send_action("typing")
 
-            # Get response from Nova via the engine
+            # Get response from companion via the engine
             reply, tools_used = await self._engine.handle_message(user_message, source="telegram")
 
             if reply:
-                # Show which tools Nova used (transparency!)
+                # Show which tools were used (transparency!)
                 if tools_used:
                     tool_names = ", ".join(dict.fromkeys(tools_used))  # dedupe, preserve order
                     await update.message.reply_text(
@@ -274,7 +283,7 @@ class TelegramChannel(Channel):
                 pass
 
     async def _on_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle incoming photo messages — download, base64 encode, send to Nova."""
+        """Handle incoming photo messages — download, base64 encode, send to companion."""
         try:
             if not self._engine:
                 await update.message.reply_text("I'm still starting up, give me a moment...")
@@ -284,7 +293,7 @@ class TelegramChannel(Channel):
             photo = update.message.photo[-1]
             caption = update.message.caption or "What do you see in this image?"
 
-            logger.info(f"Telegram photo from Lena ({photo.width}x{photo.height}, caption: {caption[:50]}...)")
+            logger.info(f"Telegram photo from user ({photo.width}x{photo.height}, caption: {caption[:50]}...)")
 
             # Show typing indicator
             await update.effective_chat.send_action("typing")
@@ -299,7 +308,7 @@ class TelegramChannel(Channel):
 
             logger.info(f"Photo downloaded: {len(photo_bytes)} bytes, sending to LLM...")
 
-            # Get response from Nova via the engine (with image)
+            # Get response from companion via the engine (with image)
             reply, tools_used = await self._engine.handle_message(
                 caption, source="telegram", image_url=image_url
             )

@@ -17,7 +17,7 @@ class ToastChannel(Channel):
 
     def __init__(self, config: dict):
         toast_config = config.get("channels", {}).get("toast", {})
-        self.app_name = toast_config.get("app_name", "Nova")
+        self.app_name = toast_config.get("app_name", "Pulse")
         self.icon_path = toast_config.get("icon", "")
         self._toast_fn = None
 

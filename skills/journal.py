@@ -1,5 +1,5 @@
 """
-Journal skill — Nova's personal journal for continuity and self-reflection.
+Journal skill — personal journal for continuity and self-reflection.
 
 Three types of entries:
 - Pinned: _self, _user, _relationship — identity entries, always in context
@@ -41,7 +41,7 @@ VALID_ENTRY_TYPES = (
     "reflection",       # personal thought or observation
 )
 
-# Pinned entry templates — blank sections for Nova to fill in over time
+# Pinned entry templates — blank sections for the companion to fill in over time
 PINNED_TEMPLATES = {
     "_self": {
         "id": "_self",

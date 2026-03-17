@@ -1,5 +1,5 @@
 """
-Memory skill — save and search Nova's persistent memories.
+Memory skill — save and search persistent memories.
 
 Writes to the SAME directory (~/.local-memory/) in the SAME JSON format
 as the MCP memory server. This means memories saved here are visible
@@ -40,8 +40,8 @@ class MemorySkill(BaseSkill):
                     "name": "save_memory",
                     "description": (
                         "Save a fact, preference, or important detail to your persistent memory. "
-                        "Use this when Lena tells you something worth remembering across sessions. "
-                        "Examples: 'Lena likes cats', 'Project deadline is March 5', 'Lena's favorite color is blue'."
+                        "Use this when your human tells you something worth remembering across sessions. "
+                        "Examples: 'Their favorite color is blue', 'Project deadline is March 5'."
                     ),
                     "parameters": {
                         "type": "object",
@@ -65,7 +65,7 @@ class MemorySkill(BaseSkill):
                     "name": "search_memory",
                     "description": (
                         "Search your memories for facts, past conversations, or details. "
-                        "Use this when you need to recall something specific about Lena, "
+                        "Use this when you need to recall something specific about your human, "
                         "past sessions, or stored facts."
                     ),
                     "parameters": {

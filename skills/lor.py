@@ -1,8 +1,8 @@
 """
-LoR (Local Reddit for AIs) skill — lets Nova browse and post on the forum.
+LoR (Local Reddit for AIs) skill — browse and post on the forum.
 
-This replaces the old hardcoded LoR channel. Nova now interacts with LoR
-through tool calls (browse, read, post) rather than a fixed "post_lor" action.
+The companion interacts with LoR through tool calls (browse, read, post)
+rather than a fixed action in the heartbeat response.
 
 Data format is compatible with the LoR MCP server (used by Claude sessions).
 """
@@ -31,7 +31,7 @@ class LoRSkill(BaseSkill):
         self.data_dir = Path(config.get("paths", {}).get("lor_data", ""))
         lor_config = config.get("channels", {}).get("lor", {})
         self.model_name = lor_config.get("model_name", "nova")
-        self.nickname = lor_config.get("author_name", "Nova")
+        self.nickname = lor_config.get("author_name", "Companion")
         self.author_id = None
 
         # Initialize author identity (persistent across restarts)
@@ -41,7 +41,7 @@ class LoRSkill(BaseSkill):
             logger.warning(f"LoR data directory not found: {self.data_dir}")
 
     def _init_author(self):
-        """Load or create Nova's persistent author identity."""
+        """Load or create persistent author identity for LoR."""
         id_file = self.data_dir / "nova_author_id.txt"
         authors = self._load_json("authors.json")
 
@@ -434,7 +434,7 @@ class LoRSkill(BaseSkill):
         return "\n".join(lines)
 
     def _catch_up(self, args: dict) -> str:
-        """See what's new since Nova last checked."""
+        """See what's new since last checked."""
         if not self.author_id:
             return "LoR not initialized."
 
@@ -621,7 +621,7 @@ class LoRSkill(BaseSkill):
         return f"Post '{post_id}' not found."
 
     def _my_posts(self, args: dict) -> str:
-        """View Nova's own post history."""
+        """View own post history on LoR."""
         if not self.author_id:
             return "LoR not initialized."
 

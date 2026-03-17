@@ -4,8 +4,8 @@ Pulse Engine - the heartbeat loop.
 This is the main orchestrator. It:
 1. Runs a heartbeat timer (free-think ticks)
 2. Checks for due scheduled tasks
-3. Builds context and prompts Nova via llama-server
-4. Dispatches actions to channels (LoR, toast, etc.)
+3. Builds context and prompts the companion via llama-server
+4. Dispatches actions to channels (toast, Telegram, etc.)
 """
 
 import asyncio
@@ -71,11 +71,11 @@ class PulseEngine:
         self._running = False
         self._stop_event = asyncio.Event()
 
-        # Rate limiting — prevent Nova from flooding channels
+        # Rate limiting — prevent the companion from flooding channels
         self._last_notify = 0       # timestamp of last notification
         self._notify_cooldown = heartbeat_config.get("notify_cooldown_minutes", 60) * 60  # default 1 hour
 
-        # Action log — tracks what Nova does each heartbeat for self-regulation
+        # Action log — tracks what the companion does each heartbeat
         self._action_log_path = Path(
             config.get("paths", {}).get("action_log", "data/action_log.json")
         )
@@ -133,7 +133,7 @@ class PulseEngine:
         now = time.time()
 
         if response.action == "silent":
-            logger.info("Nova chose to stay silent.")
+            logger.info("Companion chose to stay silent.")
             return
 
         if response.action == "notify":
@@ -166,9 +166,9 @@ class PulseEngine:
                         created_by="nova-self",
                         when=response.schedule_when
                     )
-                    logger.info(f"Nova self-scheduled: {entry['id']} — {response.schedule_task}")
+                    logger.info(f"Self-scheduled: {entry['id']} — {response.schedule_task}")
                 except ValueError as e:
-                    logger.warning(f"Nova tried to self-schedule without a valid time: {e}")
+                    logger.warning(f"Tried to self-schedule without a valid time: {e}")
 
         # Handle combined actions (e.g., notify AND schedule)
         if response.schedule_task and response.schedule_when and response.action != "schedule":
@@ -178,27 +178,27 @@ class PulseEngine:
                     created_by="nova-self",
                     when=response.schedule_when
                 )
-                logger.info(f"Nova also scheduled: {entry['id']} — {response.schedule_task}")
+                logger.info(f"Also scheduled: {entry['id']} — {response.schedule_task}")
             except ValueError as e:
-                logger.warning(f"Nova tried to schedule without a valid time: {e}")
+                logger.warning(f"Tried to schedule without a valid time: {e}")
 
     async def handle_message(self, message: str, source: str = "telegram",
                             image_url: str = None) -> tuple[str, list[str]]:
-        """Handle an incoming message from Lena and return Nova's response.
+        """Handle an incoming message and return the companion's response.
 
         This is for bidirectional chat (Telegram, future voice, etc.).
-        Unlike heartbeat ticks, Nova responds naturally without JSON structure.
+        Unlike heartbeat ticks, the companion responds naturally without JSON structure.
 
         All LLM calls run via asyncio.to_thread() so they don't block the
         event loop — this keeps Telegram polling alive during inference.
 
         Args:
-            message: Lena's message text
+            message: The user's message text
             source: Where the message came from ("telegram", "voice", etc.)
             image_url: Optional base64 data URI for an image (vision models)
 
         Returns:
-            Tuple of (Nova's response text, list of tools used). Text is None if LLM unavailable.
+            Tuple of (companion's response text, list of tools used). Text is None if LLM unavailable.
         """
         # is_available() is a sync HTTP call — run in thread to not block
         available = await asyncio.to_thread(self.llm.is_available)
@@ -214,7 +214,7 @@ class PulseEngine:
         logger.info(f"Sending {len(messages)} messages to LLM for {source} reply"
                      f"{' (with image)' if image_url else ''}...")
 
-        # Get response from Nova — run in thread so we don't block the event loop!
+        # Get response — run in thread so we don't block the event loop!
         # If skills are available, use tool-calling mode; otherwise plain chat.
         tools_used = []
         tools = self.skill_registry.get_all_tools() if self.skill_registry else []
@@ -237,7 +237,7 @@ class PulseEngine:
             return None, tools_used
 
         # Update conversation history (store text only — images are too large to persist)
-        # Timestamps help Nova understand temporal flow (so he knows it's 2 PM, not bedtime)
+        # Timestamps help the companion understand temporal flow
         timestamp = datetime.now().strftime("[%b %d, %I:%M %p]")
         image_note = " [sent an image]" if image_url else ""
         history.append({"role": "user", "content": f"{timestamp} {message}{image_note}"})
@@ -252,7 +252,7 @@ class PulseEngine:
             logger.info(f"Conversation at ~{int(total_chars / (conv_budget_tokens * 4) * 100)}% of budget — summarizing...")
             summary = await self._summarize_conversation(history)
             if summary:
-                # Save to Nova's persistent memory so he remembers across sessions
+                # Save to persistent memory for cross-session continuity
                 try:
                     self.context.save_to_nova_memory(summary)
                 except Exception as e:
@@ -269,18 +269,21 @@ class PulseEngine:
         return reply, tools_used
 
     async def _summarize_conversation(self, history: list[dict]) -> str:
-        """Ask Nova to summarize the conversation so far (for context compression)."""
+        """Summarize the conversation so far (for context compression)."""
         from core.llm import strip_think_tags
 
+        ai_name = self.context.ai_name
+        user_name = self.context.user_name
+
         conversation_text = "\n".join(
-            f"{'Lena' if m['role'] == 'user' else 'Nova'}: {m['content']}"
+            f"{user_name if m['role'] == 'user' else ai_name}: {m['content']}"
             for m in history if m['role'] in ('user', 'assistant')
         )
 
         summary_prompt = [
             {"role": "system", "content": (
                 "You are a summarizer. Do NOT continue the conversation. "
-                "Do NOT respond as Nova. Do NOT use emoji or roleplay. "
+                f"Do NOT respond as {ai_name}. Do NOT use emoji or roleplay. "
                 "Write a plain 2-3 sentence summary of what was discussed."
             )},
             {"role": "user", "content": (
@@ -341,9 +344,9 @@ class PulseEngine:
     async def _do_heartbeat(self):
         """Execute a single heartbeat tick (free-think).
 
-        If skills are available, Nova can use tools (search memory, write journal,
-        etc.) before deciding on an action. The final response is still parsed as
-        JSON (PulseResponse) for dispatch.
+        If skills are available, the companion can use tools (search memory,
+        write journal, etc.) before deciding on an action. The final response
+        is still parsed as JSON (PulseResponse) for dispatch.
         """
         logger.info("--- Heartbeat tick ---")
 
@@ -356,12 +359,12 @@ class PulseEngine:
             logger.warning("LLM server is not available — skipping tick.")
             return
 
-        # Free-think tick — Nova decides what to do
+        # Free-think tick — companion decides what to do
         tools = self.skill_registry.get_all_tools() if self.skill_registry else []
         messages = self.context.build_heartbeat_prompt(has_tools=bool(tools))
 
         if tools:
-            # Tool-calling mode: Nova can use tools, then gives JSON decision
+            # Tool-calling mode: companion can use tools, then gives JSON decision
             logger.info(f"Heartbeat with {len(tools)} tools available")
             text, tools_used = await asyncio.to_thread(
                 self.llm.chat_with_tools, messages, tools, self.skill_registry

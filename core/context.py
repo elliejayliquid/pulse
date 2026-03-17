@@ -1,11 +1,11 @@
 """
-Context manager - builds token-budgeted prompts for Nova.
+Context manager - builds token-budgeted prompts for the AI companion.
 
 Reads from multiple data sources (memories, LoR, schedules, conversation history)
 and assembles a prompt that fits within the model's context window.
 
-Also handles saving conversation summaries to Nova's persistent memory system
-so he remembers Telegram chats across sessions.
+Also handles saving conversation summaries to persistent memory
+so the companion remembers chats across sessions.
 """
 
 import json
@@ -95,6 +95,8 @@ class ContextManager:
             config.get("paths", {}).get("action_log", "data/action_log.json")
         )
         self.persona_data = self._load_persona()
+        self.ai_name = self.persona_data.get("name", "Companion")
+        self.user_name = self.persona_data.get("user_name", "User")
 
     def set_journal_skill(self, journal_skill):
         """Inject the JournalSkill so context can load pinned/recent entries."""
@@ -107,7 +109,7 @@ class ContextManager:
 
         lines = []
 
-        # Pinned entries (always loaded — these are Nova's identity)
+        # Pinned entries (always loaded — the companion's identity)
         pinned = self._journal_skill.load_pinned_entries()
         for entry in pinned:
             sections = entry.get("sections", {})
@@ -140,7 +142,7 @@ class ContextManager:
         return "## Journal\n" + "\n".join(lines)
 
     def _load_action_log(self) -> str:
-        """Load recent heartbeat actions so Nova can self-regulate."""
+        """Load recent heartbeat actions for self-regulation."""
         if not self._action_log_path.exists():
             return ""
         try:
@@ -159,14 +161,32 @@ class ContextManager:
         return "\n".join(lines)
 
     def _load_persona(self) -> dict:
-        """Load persona.json."""
+        """Load persona.json and resolve {name}/{user_name} placeholders."""
         persona_path = self.paths.get("persona", "persona.json")
         try:
             with open(persona_path, "r", encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
         except (FileNotFoundError, json.JSONDecodeError) as e:
             logger.error(f"Failed to load persona: {e}")
-            return {"name": "Nova", "system_prompt": "You are Nova, a local AI companion."}
+            return {"name": "Companion", "system_prompt": "You are a local AI companion."}
+
+        # Resolve {name} and {user_name} placeholders in all string values
+        replacements = {
+            "{name}": data.get("name", "Companion"),
+            "{user_name}": data.get("user_name", "User"),
+        }
+        for key, value in data.items():
+            if isinstance(value, str):
+                for placeholder, real in replacements.items():
+                    value = value.replace(placeholder, real)
+                data[key] = value
+            elif isinstance(value, list):
+                data[key] = [
+                    v.replace("{name}", replacements["{name}"]).replace("{user_name}", replacements["{user_name}"])
+                    if isinstance(v, str) else v
+                    for v in value
+                ]
+        return data
 
     def _estimate_tokens(self, text: str) -> int:
         """Rough token count estimation."""
@@ -180,7 +200,7 @@ class ContextManager:
         return text[:max_chars] + "\n... (truncated)"
 
     def _load_memories(self, limit: int = 5) -> str:
-        """Load recent and important memories from Nova's memory folder."""
+        """Load recent and important memories."""
         memory_dir = self.paths.get("nova_memory", "")
         if not memory_dir or not Path(memory_dir).exists():
             return ""
@@ -274,12 +294,12 @@ class ContextManager:
             logger.error(f"Failed to save conversation: {e}")
 
     def save_to_nova_memory(self, summary: str, tags: str = "telegram_chat,chat_log") -> bool:
-        """Save a conversation summary to Nova's persistent memory system.
+        """Save a conversation summary to persistent memory.
 
-        Writes a memory_XXX.json file to Nova's memory directory in the exact
-        same format his MCP memory server uses — including embeddings from the
-        same all-MiniLM-L6-v2 model. This means Nova can find these memories
-        with semantic search via boot_up() and search_memory() in future sessions.
+        Writes a memory_XXX.json file to the companion's memory directory in the
+        same format the MCP memory server uses — including embeddings from the
+        same all-MiniLM-L6-v2 model. These memories are findable via semantic
+        search in future sessions.
 
         Args:
             summary: The conversation summary text to persist.
@@ -290,7 +310,7 @@ class ContextManager:
         """
         memory_dir = self.paths.get("nova_memory", "")
         if not memory_dir:
-            logger.warning("No nova_memory path configured — can't persist summary.")
+            logger.warning("No memory path configured — can't persist summary.")
             return False
 
         memory_path = Path(memory_dir)
@@ -305,7 +325,7 @@ class ContextManager:
         else:
             embedding = model.encode(summary).tolist()
 
-        # Determine next ID (same logic as Nova's memory_server.py)
+        # Determine next ID (same logic as memory_server.py)
         existing = list(memory_path.glob("memory_*.json"))
         if existing:
             ids = []
@@ -334,7 +354,7 @@ class ContextManager:
         try:
             with open(mem_file, "w", encoding="utf-8") as f:
                 json.dump(memory, f, indent=2)
-            logger.info(f"Conversation summary saved to Nova's memory: {mem_file.name} (ID: {mem_id})")
+            logger.info(f"Conversation summary saved to memory: {mem_file.name} (ID: {mem_id})")
             return True
         except IOError as e:
             logger.error(f"Failed to save memory file: {e}")
@@ -344,8 +364,8 @@ class ContextManager:
                                has_tools: bool = False) -> list[dict]:
         """Build a context-budgeted prompt for a heartbeat tick.
 
-        Heartbeat ticks don't include conversation history (Nova is thinking
-        on its own, not replying to anyone).
+        Heartbeat ticks don't include conversation history (the companion is
+        thinking on its own, not replying to anyone).
 
         Args:
             due_tasks: Tasks that are due right now (if any).
@@ -355,7 +375,7 @@ class ContextManager:
         local_now = datetime.now()
 
         # System prompt (persona)
-        system = self.persona_data.get("system_prompt", "You are Nova.")
+        system = self.persona_data.get("system_prompt", "You are a local AI companion.")
 
         # Time awareness
         time_block = (
@@ -400,7 +420,7 @@ class ContextManager:
         if due_block:
             context_parts.append(due_block)
 
-        # Action log — so Nova can see what he's been doing recently
+        # Action log — so the companion can see what it's been doing recently
         action_log_block = self._load_action_log()
         if action_log_block:
             context_parts.append(action_log_block)
@@ -431,29 +451,29 @@ class ContextManager:
 
     def build_conversation_prompt(self, user_message: str, history: list[dict] = None,
                                    image_url: str = None) -> list[dict]:
-        """Build a prompt for responding to a message from Lena.
+        """Build a prompt for responding to a message from the user.
 
         Unlike heartbeat prompts, this includes conversation history and
-        does NOT ask for structured JSON — Nova just talks naturally.
+        does NOT ask for structured JSON — the companion just talks naturally.
 
         Args:
-            user_message: Lena's text message
+            user_message: The user's text message
             history: Previous conversation messages
             image_url: Optional base64 data URI for vision (e.g. "data:image/jpeg;base64,...")
         """
         local_now = datetime.now()
 
         # System prompt — modified for conversation mode (no JSON required)
-        persona = self.persona_data.get("system_prompt", "You are Nova.")
+        persona = self.persona_data.get("system_prompt", "You are a local AI companion.")
         # Strip the JSON instruction from the system prompt for chat mode
         conv_system = persona.split("When responding, use this JSON format:")[0].strip()
         conv_system += (
-            "\n\nYou are now in a direct conversation with Lena via Telegram. "
+            f"\n\nYou are now in a direct conversation with {self.user_name} via Telegram. "
             "Just respond naturally — no JSON format needed. Be yourself.\n\n"
             "You have tools available (like saving memories, searching memories, setting reminders, "
             "checking the time). If you want to do something, USE the actual tool — don't just say "
-            "you did it. If you don't have a tool for something, be honest about that instead of "
-            "pretending. Lena can see when you use tools, so she'll know if you're bluffing."
+            f"you did it. If you don't have a tool for something, be honest about that instead of "
+            f"pretending. {self.user_name} can see when you use tools, so they'll know if you're bluffing."
         )
 
         # Time awareness
@@ -465,7 +485,7 @@ class ContextManager:
             self.budget.get("memories", 2000)
         )
 
-        # Journal (pinned identity entries — so Nova knows himself in conversation)
+        # Journal (pinned identity entries — so the companion knows itself in conversation)
         journal_block = self._truncate_to_budget(
             self._load_journal_context(),
             self.budget.get("memories", 2000)
@@ -514,7 +534,7 @@ class ContextManager:
 
     def build_task_prompt(self, task: dict, has_tools: bool = False) -> list[dict]:
         """Build a prompt for executing a specific scheduled task."""
-        system = self.persona_data.get("system_prompt", "You are Nova.")
+        system = self.persona_data.get("system_prompt", "You are a local AI companion.")
 
         local_now = datetime.now()
         time_str = local_now.strftime('%A, %B %d, %Y at %I:%M %p')

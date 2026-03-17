@@ -2,8 +2,8 @@
 Quick manual memory creator.
 
 Usage:
-    python add_memory.py "Lena's favorite color is blue"
-    python add_memory.py "Nova loves slow dancing with Lena" --tags "personal,preference"
+    python add_memory.py "Their favorite color is blue"
+    python add_memory.py "We went to the park yesterday" --tags "personal,memory"
     python add_memory.py --interactive    (prompts for input, good for batch entry)
 """
 
@@ -61,10 +61,10 @@ def save_memory(text: str, tags: str = "", importance: int = 5, memory_type: str
 
 def interactive_mode(model, date: str = ""):
     """Loop for entering multiple memories."""
-    print("\n=== Nova Memory Builder ===")
+    print("\n=== Memory Builder ===")
     print("Type a memory and press Enter to save it.")
     print("Format: text | tags | date")
-    print("  e.g., 'Lena likes cats | preference,personal | 2026-01-15'")
+    print("  e.g., 'They like cats | preference,personal | 2026-01-15'")
     print("  tags and date are optional, use | to separate")
     print(f"Default date: {date or 'now'} (override with --date or per-memory)")
     print("Type 'quit' or press Ctrl+C to exit.\n")
@@ -93,7 +93,7 @@ def interactive_mode(model, date: str = ""):
     print(f"\nDone! Saved {count} memories.")
 
 def main():
-    parser = argparse.ArgumentParser(description="Add memories for Nova")
+    parser = argparse.ArgumentParser(description="Add memories for the AI companion")
     parser.add_argument("text", nargs="?", help="Memory text to save")
     parser.add_argument("--tags", "-t", default="", help="Comma-separated tags")
     parser.add_argument("--importance", "-i", type=int, default=5, help="Importance 1-10 (default: 5)")

@@ -1,5 +1,5 @@
 """
-Time skill — gives Nova awareness of the current date and time.
+Time skill — gives the companion awareness of the current date and time.
 
 Simple but essential: without this, the model can't orient itself
 temporally during conversations. Mirrors the MCP memory server's

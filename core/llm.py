@@ -45,7 +45,7 @@ def strip_think_tags(text: str) -> str:
 
 @dataclass
 class PulseResponse:
-    """Parsed response from Nova."""
+    """Parsed response from the companion's heartbeat/task."""
     thinking: str = ""
     action: str = "silent"         # notify | schedule | silent
     message: str = ""

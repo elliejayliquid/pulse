@@ -235,7 +235,7 @@ class ScheduleManager:
         """Mark a one-time task as completed, or update last_run for recurring.
 
         Also auto-purges old completed one-time tasks (keeps last 5 max)
-        to prevent stale tasks from polluting Nova's context.
+        to prevent stale tasks from polluting the companion's context.
         """
         schedules = self._load()
         for s in schedules:

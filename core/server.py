@@ -41,6 +41,10 @@ class LlamaServer:
         # Reasoning model support
         self.reasoning = model_cfg.get("reasoning", False)
 
+        # Vision support (optional mmproj file)
+        mmproj_file = model_cfg.get("mmproj_file", "")
+        self.mmproj_path = models_dir / mmproj_file if mmproj_file else None
+
         # Process handle
         self._process: Optional[subprocess.Popen] = None
         self._healthy = False
@@ -73,6 +77,12 @@ class LlamaServer:
             "--reasoning", "on" if self.reasoning else "off",
         ]
 
+        if self.mmproj_path:
+            if not self.mmproj_path.exists():
+                logger.warning(f"mmproj file not found: {self.mmproj_path} — starting without vision")
+            else:
+                cmd.extend(["--mmproj", str(self.mmproj_path)])
+
         return cmd
 
     async def start(self, timeout: int = 120) -> bool:
@@ -93,6 +103,8 @@ class LlamaServer:
         logger.info(f"  Model: {self.model_path.name}")
         logger.info(f"  Port: {self.port} | GPU layers: {self.gpu_layers} | Context: {self.context_size}")
         logger.info(f"  Reasoning: {'on' if self.reasoning else 'off'}")
+        if self.mmproj_path:
+            logger.info(f"  Vision: {self.mmproj_path.name}")
         logger.debug(f"  Command: {' '.join(cmd)}")
 
         try:

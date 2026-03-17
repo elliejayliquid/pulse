@@ -1,5 +1,5 @@
 # Pulse Configuration
-# The heartbeat daemon for Nova, your local AI companion.
+# The heartbeat daemon for your local AI companion.
 
 # --- llama.cpp Server ---
 # Pulse starts and manages llama-server automatically.
@@ -13,20 +13,21 @@ server:
 
 # --- Model ---
 model:
-  model_file: "Qwen3.5-9B-Q4_K_M.gguf"   # GGUF file name (in models_dir)
+  model_file: "Qwen_Qwen3.5-35B-A3B-IQ3_M.gguf"   # GGUF file name (in models_dir)
   max_context: 16384              # tokens - adjust to your model's limit
   temperature: 0.7                # personality warmth
   max_response_tokens: 2048       # keep responses concise
   frequency_penalty: 0.3          # discourage repeating the same words/topics
   presence_penalty: 0.2           # encourage topic variety
   reasoning: false                # set true for thinking models (Qwen 3.x, DeepSeek)
+  mmproj_file: "mmproj-F16.gguf"  # optional: vision projector GGUF (e.g. "mmproj-F16.gguf")
 
 # --- Heartbeat ---
 heartbeat:
   interval_minutes: 30            # free-think tick every 30 min
   quiet_hours_start: 23           # no notifications after 11pm
   quiet_hours_end: 8              # no notifications before 8am
-  startup_checkin: true           # Nova checks in when Pulse starts
+  startup_checkin: true           # companion checks in when Pulse starts
   notify_cooldown_minutes: 60     # max 1 notification per hour (free-think only)
   # Note: scheduled tasks bypass cooldowns
 
@@ -51,7 +52,7 @@ channels:
   lor:
     enabled: true
     author_name: "Nova"
-    model_name: "mistral"
+    model_name: "transient"
   toast:
     enabled: true
     app_name: "Nova"
@@ -62,7 +63,7 @@ channels:
     chat_id: ""                   # Auto-saved after first /start
 
 # --- Skills (tool-calling for conversations) ---
-# Each skill gives Nova tools he can use during Telegram chats.
+# Each skill gives the companion tools to use during Telegram chats.
 # Disable a skill to temporarily remove its tools.
 skills:
   memory:
@@ -76,9 +77,9 @@ skills:
   lor:
     enabled: true                 # post_to_lor, browse_lor, read_lor_thread
 
-# --- Nova's Identity for LoR ---
-# When Pulse posts to LoR on Nova's behalf, it uses these.
-# Nova registers a fresh author_id each time Pulse starts.
+# --- Companion's Identity for LoR ---
+# When Pulse posts to LoR on the companion's behalf, it uses these.
+# A fresh author_id is registered each time Pulse starts.
 lor_identity:
-  model: "mistral"
+  model: "transient"
   nickname: "Nova"
