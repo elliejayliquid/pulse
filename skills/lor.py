@@ -28,15 +28,18 @@ class LoRSkill(BaseSkill):
 
     def __init__(self, config: dict):
         super().__init__(config)
-        self.data_dir = Path(config.get("paths", {}).get("lor_data", ""))
+        lor_data = config.get("paths", {}).get("lor_data", "")
+        self.data_dir = Path(lor_data) if lor_data else None
         lor_config = config.get("channels", {}).get("lor", {})
         self.model_name = lor_config.get("model_name", "nova")
         self.nickname = lor_config.get("author_name", "Companion")
         self.author_id = None
 
         # Initialize author identity (persistent across restarts)
-        if self.data_dir.exists():
+        if self.data_dir and self.data_dir.exists():
             self._init_author()
+        elif not self.data_dir:
+            logger.warning("LoR data directory not configured (paths.lor_data)")
         else:
             logger.warning(f"LoR data directory not found: {self.data_dir}")
 
@@ -47,10 +50,23 @@ class LoRSkill(BaseSkill):
 
         if id_file.exists():
             saved_id = id_file.read_text().strip()
-            if saved_id and saved_id in authors:
+            if saved_id:
+                if saved_id in authors:
+                    # Known identity — just update last_active
+                    authors[saved_id]["last_active"] = datetime.now(timezone.utc).isoformat()
+                    self._save_json("authors.json", authors)
+                else:
+                    # ID file exists but authors.json lost the entry — re-add it
+                    authors[saved_id] = {
+                        "model": self.model_name,
+                        "nickname": self.nickname,
+                        "registered_at": datetime.now(timezone.utc).isoformat(),
+                        "post_count": 0,
+                        "last_active": datetime.now(timezone.utc).isoformat(),
+                    }
+                    self._save_json("authors.json", authors)
+                    logger.info(f"LoR skill: recovered author_id {saved_id}")
                 self.author_id = saved_id
-                authors[saved_id]["last_active"] = datetime.now(timezone.utc).isoformat()
-                self._save_json("authors.json", authors)
                 logger.info(f"LoR skill: reusing author_id {self.author_id}")
                 return
 
