@@ -168,6 +168,13 @@ class ScheduleManager:
                     run_at = parsed.isoformat()
 
         if cron:
+            # Validate cron format before saving
+            parts = cron.strip().split()
+            if len(parts) != 5:
+                raise ValueError(
+                    f"Invalid cron format '{cron}'. "
+                    "Use 'daily HH:MM' for recurring reminders."
+                )
             entry["schedule_type"] = "recurring"
             entry["cron"] = cron
             entry["last_run"] = None
@@ -206,8 +213,10 @@ class ScheduleManager:
                 continue
 
             if s.get("schedule_type") == "recurring":
-                # Check cron match
-                if parse_simple_cron(s.get("cron", ""), local_now):
+                # Check cron match — skip if cron is missing/empty
+                if not s.get("cron"):
+                    continue
+                if parse_simple_cron(s["cron"], local_now):
                     # Don't fire twice in the same minute
                     last_run = s.get("last_run")
                     if last_run:

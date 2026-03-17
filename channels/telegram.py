@@ -148,6 +148,33 @@ class TelegramChannel(Channel):
         except Exception as e:
             logger.error(f"Telegram send failed: {e}")
 
+    async def _reply_with_retry(self, message, text: str, retries: int = 3):
+        """Send a reply with retry on timeout."""
+        for attempt in range(1, retries + 1):
+            try:
+                await message.reply_text(text)
+                return True
+            except Exception as e:
+                if attempt < retries:
+                    logger.warning(f"Reply attempt {attempt}/{retries} failed ({e}), retrying in 3s...")
+                    await asyncio.sleep(3)
+                else:
+                    logger.error(f"Reply failed after {retries} attempts: {e}")
+                    return False
+
+    async def send_photo(self, photo_url: str, caption: str = ""):
+        """Send a photo to the user via Telegram (by URL)."""
+        if not self.app or not self.chat_id:
+            return
+        try:
+            await self.app.bot.send_photo(
+                chat_id=self.chat_id,
+                photo=photo_url,
+                caption=caption[:1024] if caption else None,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to send photo: {e}")
+
     async def shutdown(self):
         """Stop the Telegram bot gracefully."""
         if self.app:
@@ -269,12 +296,27 @@ class TelegramChannel(Channel):
                 # Show which tools were used (transparency!)
                 if tools_used:
                     tool_names = ", ".join(dict.fromkeys(tools_used))  # dedupe, preserve order
-                    await update.message.reply_text(
-                        f"🔧 {tool_names}",
-                    )
-                await update.message.reply_text(reply)
+                    await self._reply_with_retry(update.message, f"🔧 {tool_names}")
+                await self._reply_with_retry(update.message, reply)
+
+                # Send any pending media/sources from web search
+                if self._engine and self._engine.skill_registry:
+                    web_skill = self._engine.skill_registry.get_skill("web_search")
+                    if web_skill:
+                        # Show sources so the user can verify
+                        if web_skill.pending_sources:
+                            source_lines = ["📎 Sources:"]
+                            for s in web_skill.pending_sources:
+                                source_lines.append(f"  • {s['title']}\n    {s['url']}")
+                            await self._reply_with_retry(update.message, "\n".join(source_lines))
+                            web_skill.pending_sources.clear()
+                        # Send images inline
+                        if web_skill.pending_images:
+                            for img_url in web_skill.pending_images:
+                                await self.send_photo(img_url)
+                            web_skill.pending_images.clear()
             else:
-                await update.message.reply_text("(I'm having trouble thinking right now — llama-server might be down)")
+                await self._reply_with_retry(update.message, "(I'm having trouble thinking right now — llama-server might be down)")
         except Exception as e:
             logger.error(f"Message handler crashed: {e}", exc_info=True)
             try:
@@ -316,10 +358,11 @@ class TelegramChannel(Channel):
             if reply:
                 if tools_used:
                     tool_names = ", ".join(dict.fromkeys(tools_used))
-                    await update.message.reply_text(f"🔧 {tool_names}")
-                await update.message.reply_text(reply)
+                    await self._reply_with_retry(update.message, f"🔧 {tool_names}")
+                await self._reply_with_retry(update.message, reply)
             else:
-                await update.message.reply_text(
+                await self._reply_with_retry(
+                    update.message,
                     "(I can't process images right now — the model might not support vision, "
                     "or the LLM server might be down)"
                 )

@@ -17,6 +17,7 @@ from skills.memory import MemorySkill
 from skills.schedule import ScheduleSkill
 from skills.journal import JournalSkill
 from skills.lor import LoRSkill
+from skills.web_search import WebSearchSkill
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,7 @@ SKILL_CLASSES = [
     ScheduleSkill,
     JournalSkill,
     LoRSkill,
+    WebSearchSkill,
 ]
 
 
