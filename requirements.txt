@@ -1,4 +1,4 @@
-# Pulse - Nova's heartbeat daemon
+# Pulse - AI companion heartbeat daemon
 openai>=1.0.0                   # llama-server API client (OpenAI-compatible)
 httpx>=0.27                     # Health checks for llama-server
 pyyaml>=6.0                     # Config file parsing

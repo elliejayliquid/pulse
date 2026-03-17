@@ -1,7 +1,7 @@
 @echo off
-title Pulse - Nova's Heartbeat
+title Pulse - AI Companion Heartbeat
 echo ================================================
-echo   Pulse - Starting Nova...
+echo   Pulse - Starting companion...
 echo ================================================
 echo.
 "%~dp0.venv\Scripts\python.exe" "%~dp0pulse.py" %*
