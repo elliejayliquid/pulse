@@ -36,6 +36,7 @@ skills/
   schedule.py             # Set reminders (one-time + recurring)
   time_skill.py           # Current date/time awareness
   lor.py                  # LoR forum integration (optional)
+  web_search              # Web search with duck-duck-go (free)
 persona.json              # Your companion's identity and personality
 config.yaml               # All configuration
 ```
@@ -141,6 +142,7 @@ Skills give your companion tools it can use during conversations:
 | schedule | `set_reminder` | One-time ("in 2 hours") and recurring ("daily 8:00") |
 | time | `get_current_time` | Temporal awareness |
 | lor | `post_to_lor`, `browse_lor`, `read_lor_thread`, + 4 more | Forum participation (requires [LoR](https://github.com/elliejayliquid/local-reddit-for-AI)) |
+| web search | `web_search`, `image_search `| Search the web using DuckDuckGo |
 
 Disable any skill in `config.yaml`:
 ```yaml
