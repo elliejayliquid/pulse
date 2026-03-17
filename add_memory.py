@@ -1,10 +1,21 @@
 """
-Quick manual memory creator.
+Manual memory seeder for Pulse companions.
+
+Use this to pre-load your companion's memory with facts about you,
+your relationship, shared history, or anything you want them to know
+from day one — before you've even had a conversation.
+
+Each memory is saved as a JSON file with an embedding (for semantic search),
+so your companion can recall these naturally during chats.
 
 Usage:
-    python add_memory.py "Their favorite color is blue"
-    python add_memory.py "We went to the park yesterday" --tags "personal,memory"
-    python add_memory.py --interactive    (prompts for input, good for batch entry)
+    python add_memory.py "I'm allergic to cats"
+    python add_memory.py "We met on March 1st 2026" --tags "milestone" --date "2026-03-01"
+    python add_memory.py "Their favorite book is Murderbot" --tags "preference,books"
+    python add_memory.py --interactive    (batch mode — enter multiple memories)
+
+Interactive mode supports inline tags and dates with | separators:
+    Memory> We watched Spirited Away together | movies,favorites | 2026-02-14
 """
 
 import argparse
@@ -93,7 +104,9 @@ def interactive_mode(model, date: str = ""):
     print(f"\nDone! Saved {count} memories.")
 
 def main():
-    parser = argparse.ArgumentParser(description="Add memories for the AI companion")
+    parser = argparse.ArgumentParser(
+        description="Seed your companion's memory with facts, preferences, and shared history"
+    )
     parser.add_argument("text", nargs="?", help="Memory text to save")
     parser.add_argument("--tags", "-t", default="", help="Comma-separated tags")
     parser.add_argument("--importance", "-i", type=int, default=5, help="Importance 1-10 (default: 5)")
