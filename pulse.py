@@ -21,6 +21,7 @@ import logging
 import os
 import signal
 import sys
+from pathlib import Path
 
 import yaml
 from dotenv import load_dotenv
@@ -29,13 +30,28 @@ from core.engine import PulseEngine
 from core.server import LlamaServer
 from channels.toast import ToastChannel
 
-# Configure logging
+# Configure logging — console + rotating file
+_log_format = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+_log_datefmt = "%H:%M:%S"
+
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%H:%M:%S",
-    stream=sys.stdout
+    format=_log_format,
+    datefmt=_log_datefmt,
+    stream=sys.stdout,
 )
+
+# File handler — logs/pulse.log, rotates at 2MB, keeps last 3 files
+from logging.handlers import RotatingFileHandler
+_log_dir = Path(__file__).parent / "logs"
+_log_dir.mkdir(exist_ok=True)
+_file_handler = RotatingFileHandler(
+    _log_dir / "pulse.log", maxBytes=2 * 1024 * 1024, backupCount=3, encoding="utf-8"
+)
+_file_handler.setFormatter(logging.Formatter(_log_format, datefmt=_log_datefmt))
+_file_handler.setLevel(logging.INFO)
+logging.getLogger().addHandler(_file_handler)
+
 logger = logging.getLogger("pulse")
 
 # Silence noisy HTTP request logs (httpx logs every Telegram poll)
@@ -100,15 +116,23 @@ async def main(config_path: str):
         try:
             from channels.telegram import TelegramChannel
             telegram_channel = TelegramChannel(config)
-            await telegram_channel.initialize()
-            channels["telegram"] = telegram_channel
+            # Retry up to 3 times — Telegram API can timeout on first try
+            for attempt in range(1, 4):
+                try:
+                    await telegram_channel.initialize()
+                    channels["telegram"] = telegram_channel
+                    break
+                except Exception as e:
+                    if attempt < 3:
+                        logger.warning(f"Telegram init attempt {attempt}/3 failed ({e}), retrying in 5s...")
+                        await asyncio.sleep(5)
+                    else:
+                        logger.error(f"Telegram init failed after 3 attempts: {e}")
         except ImportError:
             logger.warning(
                 "Telegram enabled but python-telegram-bot not installed.\n"
                 "  pip install python-telegram-bot"
             )
-        except Exception as e:
-            logger.error(f"Failed to initialize Telegram: {e}")
 
     logger.info(f"Active channels: {', '.join(channels.keys()) or 'none'}")
 

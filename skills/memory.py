@@ -80,6 +80,47 @@ class MemorySkill(BaseSkill):
                     },
                 },
             },
+            {
+                "type": "function",
+                "function": {
+                    "name": "list_memories",
+                    "description": (
+                        "List your most recent memories (newest first). "
+                        "Use this to review what you've remembered recently or browse your memory."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "limit": {
+                                "type": "integer",
+                                "description": "How many memories to show (default: 10, max: 50)",
+                            },
+                        },
+                        "required": [],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "list_all_memories",
+                    "description": (
+                        "Browse all your memories, paginated. "
+                        "Use this to go through your full memory collection. "
+                        "Memories are sorted by date (oldest first) so you can read them chronologically."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "page": {
+                                "type": "integer",
+                                "description": "Page number (default: 1). Each page shows 10 memories.",
+                            },
+                        },
+                        "required": [],
+                    },
+                },
+            },
         ]
 
     def execute(self, tool_name: str, arguments: dict) -> str:
@@ -91,6 +132,14 @@ class MemorySkill(BaseSkill):
         elif tool_name == "search_memory":
             return self._search_memory(
                 query=arguments.get("query", ""),
+            )
+        elif tool_name == "list_memories":
+            return self._list_memories(
+                limit=arguments.get("limit", 10),
+            )
+        elif tool_name == "list_all_memories":
+            return self._list_all_memories(
+                page=arguments.get("page", 1),
             )
         return f"Unknown tool: {tool_name}"
 
@@ -198,6 +247,54 @@ class MemorySkill(BaseSkill):
             return "No relevant memories found."
 
         return "\n".join(results)
+
+    def _list_memories(self, limit: int = 10) -> str:
+        """List most recent memories (newest first)."""
+        limit = max(1, min(limit, 50))
+
+        memories = self._load_all_memories()
+        if not memories:
+            return "No memories found yet."
+
+        # Sort by date, newest first
+        memories.sort(key=lambda m: m.get("date", ""), reverse=True)
+
+        results = []
+        for mem in memories[:limit]:
+            tags = ", ".join(mem.get("tags", []))
+            tag_str = f" [{tags}]" if tags else ""
+            results.append(f"#{mem['id']} [{mem['date'][:10]}]{tag_str} {mem['text']}")
+
+        header = f"Showing {len(results)} of {len(memories)} memories (newest first):"
+        return header + "\n" + "\n".join(results)
+
+    def _list_all_memories(self, page: int = 1) -> str:
+        """Browse all memories paginated, oldest first (chronological)."""
+        per_page = 10
+        page = max(1, page)
+
+        memories = self._load_all_memories()
+        if not memories:
+            return "No memories found yet."
+
+        # Sort by date, oldest first (chronological reading order)
+        memories.sort(key=lambda m: m.get("date", ""))
+
+        total_pages = (len(memories) + per_page - 1) // per_page
+        if page > total_pages:
+            return f"Page {page} doesn't exist. You have {total_pages} page(s) ({len(memories)} memories total)."
+
+        start = (page - 1) * per_page
+        page_memories = memories[start:start + per_page]
+
+        results = []
+        for mem in page_memories:
+            tags = ", ".join(mem.get("tags", []))
+            tag_str = f" [{tags}]" if tags else ""
+            results.append(f"#{mem['id']} [{mem['date'][:10]}]{tag_str} {mem['text']}")
+
+        header = f"Page {page}/{total_pages} ({len(memories)} memories total, oldest first):"
+        return header + "\n" + "\n".join(results)
 
     def _keyword_search(self, query: str, memories: list[dict]) -> str:
         """Simple keyword fallback when embeddings aren't available."""

@@ -238,7 +238,7 @@ class PulseEngine:
 
         # Update conversation history (store text only — images are too large to persist)
         # Timestamps help Nova understand temporal flow (so he knows it's 2 PM, not bedtime)
-        timestamp = datetime.now().strftime("[%I:%M %p]")
+        timestamp = datetime.now().strftime("[%b %d, %I:%M %p]")
         image_note = " [sent an image]" if image_url else ""
         history.append({"role": "user", "content": f"{timestamp} {message}{image_note}"})
         history.append({"role": "assistant", "content": reply})
