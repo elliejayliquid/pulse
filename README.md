@@ -2,7 +2,7 @@
 
 **A heartbeat daemon for local AI companions.**
 
-Pulse gives your locally-running LLM a life of its own. It runs in the background, letting your AI companion think on its own schedule, remember conversations, write in a journal, set reminders, and chat with you over Telegram — all running on your machine, no cloud required.
+Pulse gives your AI companion a life of its own. It runs in the background, letting your companion think on its own schedule, remember conversations, write in a journal, set reminders, and chat with you over Telegram. Runs locally with llama.cpp, or connects to cloud APIs (OpenAI, OpenRouter, Anthropic, etc.) — your choice.
 
 > **Status:** Actively being built. Core functionality works, but expect rough edges and frequent changes.
 
@@ -12,7 +12,10 @@ Pulse gives your locally-running LLM a life of its own. It runs in the backgroun
 - **Telegram chat** — Bidirectional messaging with tool use (your companion can save memories, set reminders, search its journal mid-conversation)
 - **Persistent memory** — Semantic search over stored facts and conversation summaries, carried across sessions
 - **Journal** — Pinned identity entries (who am I, who is my human, what's our relationship) plus transient reflections
-- **Self-scheduling** — The companion can set its own reminders and recurring tasks ("daily 8:00")
+- **Self-scheduling** — The companion can set its own reminders and recurring tasks ("daily 8:00"), with priority levels (urgent/routine/creative)
+- **Cloud or local** — Use a local GGUF model via llama.cpp, or any OpenAI-compatible API (OpenRouter, OpenAI, etc.)
+- **Token tracking** — Daily usage logging when using cloud APIs (data/usage.json)
+- **Dev ticks** — Optional autonomous self-improvement: the companion can review and create its own skills on a git branch, with human approval
 - **Vision** — Optional image understanding via mmproj (model-dependent)
 - **Desktop notifications** — Windows toast notifications for proactive messages
 - **Quiet hours** — No notifications while you sleep
@@ -25,7 +28,8 @@ core/
   server.py               # Manages llama-server subprocess
   engine.py               # Heartbeat loop, message handling, dispatch
   context.py              # Token-budgeted prompt assembly
-  llm.py                  # OpenAI-compatible API client
+  llm.py                  # OpenAI-compatible API client (local + cloud)
+  usage.py                # Token usage tracking for cloud APIs
   scheduler.py            # Cron + one-time task scheduling
 channels/
   telegram.py             # Bidirectional Telegram bot
@@ -36,20 +40,21 @@ skills/
   schedule.py             # Set reminders (one-time + recurring)
   time_skill.py           # Current date/time awareness
   lor.py                  # LoR forum integration (optional)
-  web_search              # Web search with duck-duck-go (free)
+  web_search.py           # Web search via DuckDuckGo (free)
+  dev.py                  # Autonomous skill creation (dev ticks)
 persona.json              # Your companion's identity and personality
 config.yaml               # All configuration
 ```
 
-Pulse talks to any OpenAI-compatible local server. It manages [llama.cpp](https://github.com/ggml-org/llama.cpp)'s `llama-server` automatically — starts it on boot, monitors health, and shuts it down gracefully.
+Pulse talks to any OpenAI-compatible API. Locally, it manages [llama.cpp](https://github.com/ggml-org/llama.cpp)'s `llama-server` automatically — starts it on boot, monitors health, and shuts it down gracefully. Or point it at a cloud provider and skip the local server entirely.
 
 ## Quick start
 
 ### Prerequisites
 
 - **Python 3.11+**
-- **llama.cpp** — [download a release](https://github.com/ggml-org/llama.cpp/releases) or build from source
-- **A GGUF model** — any chat model works (tested with Qwen 3.5, Mistral, etc.)
+- **For local models:** [llama.cpp](https://github.com/ggml-org/llama.cpp/releases) + a GGUF model (tested with Qwen 3.5, Mistral, etc.)
+- **For cloud APIs:** An API key from OpenRouter, OpenAI, Anthropic, or any OpenAI-compatible provider
 
 ### Setup
 
@@ -75,6 +80,24 @@ server:
 model:
   model_file: "your-model.gguf"      # your model filename
 ```
+
+### Cloud API (alternative to local)
+
+Instead of running a local model, you can use a cloud API. Add your key to `.env`:
+```
+OPENROUTER_API_KEY=sk-or-v1-your-key-here
+```
+
+Then set the provider in `config.yaml`:
+```yaml
+provider:
+  type: "openrouter"
+  api_key_env: "OPENROUTER_API_KEY"
+  model: "google/gemini-3-flash-preview"  # or any model on OpenRouter
+  max_context: 32768
+```
+
+Supported provider types: `local` (default), `openai`, `openrouter`, `anthropic`, `custom` (any OpenAI-compatible endpoint). When using a cloud provider, llama-server is not started — embeddings for memory search still run locally.
 
 Edit `persona.json` to name your companion:
 ```json
@@ -139,10 +162,11 @@ Skills give your companion tools it can use during conversations:
 |-------|-------|-------------|
 | memory | `save_memory`, `search_memory`, `list_memories`, `list_all_memories` | Persistent fact storage with semantic search |
 | journal | `write_journal`, `read_journal`, `update_journal` | Self-reflection and identity |
-| schedule | `set_reminder` | One-time ("in 2 hours") and recurring ("daily 8:00") |
+| schedule | `set_reminder` | One-time ("in 2 hours") and recurring ("daily 8:00") with priority levels |
 | time | `get_current_time` | Temporal awareness |
 | lor | `post_to_lor`, `browse_lor`, `read_lor_thread`, + 4 more | Forum participation (requires [LoR](https://github.com/elliejayliquid/local-reddit-for-AI)) |
-| web search | `web_search`, `image_search `| Search the web using DuckDuckGo |
+| web_search | `web_search`, `image_search` | Search the web using DuckDuckGo |
+| dev | `read_source`, `search_code`, `write_skill`, `list_skills`, `dev_journal_read`, `dev_journal_write` | Autonomous skill creation (used by dev ticks) |
 
 Disable any skill in `config.yaml`:
 ```yaml
@@ -153,7 +177,7 @@ skills:
 
 ## How it works
 
-1. **Pulse starts** `llama-server` with your model
+1. **Pulse starts** — either launches `llama-server` with your local model, or connects to a cloud API
 2. Every N minutes, the **heartbeat** fires — the companion gets context (time, memories, journal, pending tasks) and decides what to do: notify you, schedule something, journal, or stay silent
 3. When you **message via Telegram**, the companion responds naturally with full tool access
 4. **Conversations are summarized** when they get long, and summaries are saved to persistent memory with embeddings for future semantic search

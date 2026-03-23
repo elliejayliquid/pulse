@@ -29,10 +29,10 @@ model:
 # When using a cloud provider, the server: section is ignored (no llama-server started).
 # Embeddings for memory search always run locally regardless of provider.
 provider:
-  type: "local"                    # "local", "openai", "openrouter", "anthropic", "custom"
-  api_key_env: ""                  # env var name holding the API key (e.g. "OPENROUTER_API_KEY")
+  type: "openrouter"                # "local", "openai", "openrouter", "anthropic", "custom"
+  api_key_env: "OPENROUTER_API_KEY"  # env var name holding the API key (e.g. "OPENROUTER_API_KEY")
   base_url: ""                     # auto-set per type; override for "custom"
-  model: ""                        # API model name (e.g. "anthropic/claude-sonnet-4-20250514")
+  model: "google/gemini-3-flash-preview"  # API model name (e.g. "anthropic/claude-sonnet-4-20250514")
   max_context: 32768               # context budget for API calls (controls cost)
 
 # --- Heartbeat ---
