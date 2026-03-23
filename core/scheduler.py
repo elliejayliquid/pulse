@@ -175,7 +175,8 @@ class ScheduleManager:
 
     def add(self, task: str, created_by: str,
             cron: str = "", run_at: str = "", when: str = "",
-            origin: str = "companion") -> dict:
+            origin: str = "companion",
+            priority: str = "routine") -> dict:
         """Add a new schedule.
 
         Args:
@@ -186,6 +187,7 @@ class ScheduleManager:
             when: Human-friendly time (parsed into run_at or cron)
             origin: "user" (explicitly requested, always fires) or
                     "companion" (self-scheduled, can be skipped if redundant)
+            priority: "urgent", "routine", or "creative" (stored for context)
         """
         schedules = self._load()
 
@@ -194,6 +196,7 @@ class ScheduleManager:
             "task": task,
             "created_by": created_by,
             "origin": origin,
+            "priority": priority,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "created_at_local": datetime.now().strftime("%A %b %d, %I:%M %p"),
             "enabled": True,

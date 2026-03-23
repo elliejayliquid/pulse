@@ -49,6 +49,11 @@ class ScheduleSkill(BaseSkill):
                                 "type": "string",
                                 "description": "When to trigger (e.g. 'in 2 hours', 'in 30 minutes', 'tomorrow 3pm')",
                             },
+                            "priority": {
+                                "type": "string",
+                                "description": "Priority level for display: urgent, routine, or creative (default: routine)",
+                                "enum": ["urgent", "routine", "creative"],
+                            },
                         },
                         "required": ["task", "when"],
                     },
@@ -61,10 +66,11 @@ class ScheduleSkill(BaseSkill):
             return self._set_reminder(
                 task=arguments.get("task", ""),
                 when=arguments.get("when", ""),
+                priority=arguments.get("priority", "routine"),
             )
         return f"Unknown tool: {tool_name}"
 
-    def _set_reminder(self, task: str, when: str) -> str:
+    def _set_reminder(self, task: str, when: str, priority: str = "routine") -> str:
         """Create a one-time reminder via the ScheduleManager."""
         if not self._scheduler:
             return "Scheduler not available."
@@ -76,11 +82,12 @@ class ScheduleSkill(BaseSkill):
         try:
             entry = self._scheduler.add(
                 task=task.strip(),
-                created_by="nova-self",
+                created_by="companion",
                 origin="user",
                 when=when.strip(),
+                priority=priority,
             )
-            logger.info(f"Reminder set via skill: {entry['id']} — {task}")
+            logger.info(f"Reminder set via skill: {entry['id']} — {task} (priority: {priority})")
 
             # Format the actual resolved time clearly — the model MUST report this
             # accurately to the user (not guess or hallucinate a different time).
@@ -92,6 +99,7 @@ class ScheduleSkill(BaseSkill):
                     f"RECURRING REMINDER CONFIRMED — report these details exactly to the user:\n"
                     f"  Task: {task}\n"
                     f"  Schedule: {cron} (daily recurring)\n"
+                    f"  Priority: {priority}\n"
                     f"  Type: recurring\n"
                     f"  ID: {entry['id']}\n"
                     f"Do NOT say a different schedule. This repeats every day."
@@ -111,6 +119,7 @@ class ScheduleSkill(BaseSkill):
                     f"REMINDER CONFIRMED — report these details exactly to the user:\n"
                     f"  Task: {task}\n"
                     f"  Fires at: {local_time}\n"
+                    f"  Priority: {priority}\n"
                     f"  Type: one-time (NOT recurring)\n"
                     f"  ID: {entry['id']}\n"
                     f"Do NOT say a different time or claim it's recurring."

@@ -20,6 +20,7 @@ model:
   frequency_penalty: 0.3          # discourage repeating the same words/topics
   presence_penalty: 0.2           # encourage topic variety
   reasoning: true                # set true for thinking models (Qwen 3.x, DeepSeek)
+  max_tool_rounds: 8              # max tool-calling rounds per conversation/heartbeat turn
   mmproj_file: ""  # optional: vision projector GGUF (e.g. "mmproj-F16.gguf")
 
 # --- Heartbeat ---
@@ -27,7 +28,7 @@ heartbeat:
   interval_minutes: 30            # free-think tick every 30 min
   quiet_hours_start: 23           # no notifications after 11pm
   quiet_hours_end: 8              # no notifications before 8am
-  startup_checkin: true           # companion checks in when Pulse starts
+  startup_checkin: false           # companion checks in when Pulse starts
   notify_cooldown_minutes: 60     # max 1 notification per hour (free-think only)
   # Note: scheduled tasks bypass cooldowns
 
@@ -85,7 +86,7 @@ skills:
 dev_tick:
   enabled: false                   # set true to activate (start with false for safety!)
   interval_minutes: 720            # every 12 hours
-  max_rounds: 8                    # max tool-calling rounds per dev session
+  max_rounds: 16                   # max tool-calling rounds per dev session
 
 # --- Companion's Identity for LoR ---
 # When Pulse posts to LoR on the companion's behalf, it uses these.

@@ -51,6 +51,7 @@ class PulseEngine:
             presence_penalty=model_config.get("presence_penalty", 0.0),
         )
 
+        self.max_tool_rounds = model_config.get("max_tool_rounds", 5)
         self.context = ContextManager(config)
         self.scheduler = ScheduleManager(
             config.get("paths", {}).get("schedules", "data/schedules.json")
@@ -228,7 +229,8 @@ class PulseEngine:
         if tools:
             logger.info(f"Tool-calling mode: {len(tools)} tools available")
             reply, tools_used = await asyncio.to_thread(
-                self.llm.chat_with_tools, messages, tools, self.skill_registry
+                self.llm.chat_with_tools, messages, tools, self.skill_registry,
+                max_rounds=self.max_tool_rounds
             )
         else:
             response = await asyncio.to_thread(self.llm.chat, messages)
@@ -333,7 +335,8 @@ class PulseEngine:
             response = None
             if tools:
                 text, tools_used = await asyncio.to_thread(
-                    self.llm.chat_with_tools, messages, tools, self.skill_registry
+                    self.llm.chat_with_tools, messages, tools, self.skill_registry,
+                    max_rounds=self.max_tool_rounds
                 )
                 if tools_used:
                     logger.info(f"Task tools used: {', '.join(tools_used)}")
@@ -385,7 +388,8 @@ class PulseEngine:
             # Tool-calling mode: companion can use tools, then gives JSON decision
             logger.info(f"Heartbeat with {len(tools)} tools available")
             text, tools_used = await asyncio.to_thread(
-                self.llm.chat_with_tools, messages, tools, self.skill_registry
+                self.llm.chat_with_tools, messages, tools, self.skill_registry,
+                max_rounds=self.max_tool_rounds
             )
             if tools_used:
                 logger.info(f"Heartbeat tools used: {', '.join(tools_used)}")
