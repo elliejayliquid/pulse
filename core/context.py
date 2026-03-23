@@ -85,7 +85,12 @@ class ContextManager:
 
         # Build budget: use explicit values from config if set,
         # otherwise derive from max_context using proportions
-        max_context = config.get("model", {}).get("max_context", 16384)
+        # Use provider.max_context for cloud APIs, model.max_context for local
+        provider_cfg = config.get("provider", {})
+        if provider_cfg.get("type", "local") != "local" and provider_cfg.get("max_context"):
+            max_context = provider_cfg["max_context"]
+        else:
+            max_context = config.get("model", {}).get("max_context", 16384)
         explicit_budget = config.get("context_budget", {})
         self.budget = {}
         for key, proportion in self.DEFAULT_PROPORTIONS.items():

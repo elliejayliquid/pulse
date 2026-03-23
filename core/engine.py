@@ -26,13 +26,14 @@ class PulseEngine:
     """Main engine that drives the heartbeat loop."""
 
     def __init__(self, config: dict, channels: dict, skill_registry=None,
-                 llm_endpoint: str = None):
+                 llm_endpoint: str = None, api_key: str = ""):
         """
         Args:
             config: Parsed config.yaml
             channels: Dict of channel_name -> Channel instance
             skill_registry: Optional SkillRegistry for tool-calling in conversations
-            llm_endpoint: OpenAI-compatible API endpoint (from LlamaServer)
+            llm_endpoint: OpenAI-compatible API endpoint (from LlamaServer or cloud)
+            api_key: API key for cloud providers (empty for local)
         """
         self.config = config
         self.channels = channels
@@ -40,16 +41,34 @@ class PulseEngine:
 
         # Initialize core components
         model_config = config.get("model", {})
+        provider_config = config.get("provider", {})
+        provider_type = provider_config.get("type", "local")
         server_config = config.get("server", {})
         endpoint = llm_endpoint or f"http://{server_config.get('host', '127.0.0.1')}:{server_config.get('port', 8012)}/v1"
+
+        # Model name: from provider config for API, from model config for local
+        if provider_type != "local" and provider_config.get("model"):
+            model_name = provider_config["model"]
+        else:
+            model_name = model_config.get("model_file", "default")
+
+        # Token usage tracker (only meaningful for cloud APIs, but always safe)
+        from core.usage import UsageTracker
+        usage_tracker = UsageTracker(
+            config.get("paths", {}).get("usage", "data/usage.json")
+        )
+
         self.llm = LLMClient(
             endpoint=endpoint,
-            model_name=model_config.get("model_file", "default"),
+            model_name=model_name,
             temperature=model_config.get("temperature", 0.7),
             max_tokens=model_config.get("max_response_tokens", 1024),
             frequency_penalty=model_config.get("frequency_penalty", 0.0),
             presence_penalty=model_config.get("presence_penalty", 0.0),
+            api_key=api_key,
+            usage_tracker=usage_tracker,
         )
+        self.llm._provider_name = provider_type
 
         self.max_tool_rounds = model_config.get("max_tool_rounds", 5)
         self.context = ContextManager(config)

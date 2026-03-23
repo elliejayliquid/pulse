@@ -93,14 +93,56 @@ async def main(config_path: str):
     # Load embedding model BEFORE llama-server — PyTorch's c10.dll can conflict
     # with CUDA DLLs on Windows if loaded after another CUDA process starts.
     # The model is tiny (22MB, CPU-only) and used for memory/journal search.
+    # Always local regardless of provider — embeddings power memory dedup & search.
     from core.context import load_embedding_model
     load_embedding_model()
 
-    # Start llama-server
-    server = LlamaServer(config)
-    if not await server.start():
-        logger.error("Failed to start llama-server. Exiting.")
-        sys.exit(1)
+    # Resolve LLM provider
+    provider_config = config.get("provider", {})
+    provider_type = provider_config.get("type", "local")
+    server = None
+    endpoint = None
+    api_key = ""
+
+    if provider_type == "local":
+        # Local llama.cpp — start and manage the server process
+        server = LlamaServer(config)
+        if not await server.start():
+            logger.error("Failed to start llama-server. Exiting.")
+            sys.exit(1)
+        endpoint = server.endpoint
+    else:
+        # Cloud API — resolve endpoint and key, no server needed
+        api_key_env = provider_config.get("api_key_env", "")
+        api_key = os.getenv(api_key_env, "") if api_key_env else ""
+        if not api_key:
+            logger.error(
+                f"Provider '{provider_type}' requires an API key. "
+                f"Set {api_key_env or 'provider.api_key_env'} in .env"
+            )
+            sys.exit(1)
+
+        # Default base URLs per provider (override with provider.base_url)
+        default_urls = {
+            "openai": "https://api.openai.com/v1",
+            "openrouter": "https://openrouter.ai/api/v1",
+            "anthropic": "https://api.anthropic.com/v1",
+        }
+        endpoint = (
+            provider_config.get("base_url")
+            or default_urls.get(provider_type, "")
+        )
+        if not endpoint:
+            logger.error(
+                f"No base_url for provider '{provider_type}'. "
+                "Set provider.base_url in config.yaml"
+            )
+            sys.exit(1)
+
+        model_name = provider_config.get("model", "")
+        logger.info(f"Using cloud provider: {provider_type}")
+        logger.info(f"  Endpoint: {endpoint}")
+        logger.info(f"  Model: {model_name or '(default)'}")
 
     # Initialize channels
     channels = {}
@@ -147,9 +189,9 @@ async def main(config_path: str):
     except Exception as e:
         logger.warning(f"Failed to load skill registry: {e}")
 
-    # Create engine (with skill registry and server endpoint)
+    # Create engine (with skill registry and provider details)
     engine = PulseEngine(config, channels, skill_registry=skill_registry,
-                         llm_endpoint=server.endpoint)
+                         llm_endpoint=endpoint, api_key=api_key)
 
     # Inject the scheduler into the schedule skill (it needs engine's ScheduleManager)
     if skill_registry:
@@ -177,8 +219,9 @@ async def main(config_path: str):
         # Shutdown channels first
         for name, channel in channels.items():
             await channel.shutdown()
-        # Then stop the server (waits for in-flight inference)
-        await server.stop()
+        # Stop the server if we started one (waits for in-flight inference)
+        if server:
+            await server.stop()
         logger.info("Pulse stopped. Companion is sleeping.")
 
 

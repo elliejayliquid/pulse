@@ -1,9 +1,10 @@
 """
-LLM client — OpenAI-compatible API wrapper for llama-server.
+LLM client — OpenAI-compatible API wrapper.
 
-Talks to the llama-server instance managed by core/server.py.
+Supports local llama-server and cloud APIs (OpenAI, OpenRouter, Anthropic, etc.)
+via the OpenAI SDK's base_url mechanism.
 
-Supports two modes:
+Two call modes:
 - chat()           → heartbeat/scheduled tasks (returns PulseResponse with JSON parsing)
 - chat_with_tools() → Telegram conversations (tool-calling loop, returns plain text)
 """
@@ -97,14 +98,15 @@ class PulseResponse:
 
 
 class LLMClient:
-    """OpenAI-compatible client for llama-server."""
+    """OpenAI-compatible client for local llama-server or cloud APIs."""
 
     def __init__(self, endpoint: str, model_name: str = "default",
                  temperature: float = 0.7, max_tokens: int = 1024,
-                 frequency_penalty: float = 0.0, presence_penalty: float = 0.0):
+                 frequency_penalty: float = 0.0, presence_penalty: float = 0.0,
+                 api_key: str = "", usage_tracker=None):
         self.client = OpenAI(
             base_url=endpoint,
-            api_key="not-needed"  # llama-server doesn't require a key
+            api_key=api_key or "not-needed",
         )
         self.model_name = model_name
         self.temperature = temperature
@@ -112,6 +114,18 @@ class LLMClient:
         self.frequency_penalty = frequency_penalty
         self.presence_penalty = presence_penalty
         self._available = None
+        self._usage = usage_tracker
+        self._provider_name = ""  # set by engine for usage logging
+
+    def _track(self, response):
+        """Log token usage from an API response (no-op if no tracker)."""
+        if self._usage and hasattr(response, "usage") and response.usage:
+            self._usage.record(
+                prompt_tokens=response.usage.prompt_tokens or 0,
+                completion_tokens=response.usage.completion_tokens or 0,
+                provider=self._provider_name,
+                model=self.model_name,
+            )
 
     def is_available(self) -> bool:
         """Check if the LLM server is reachable."""
@@ -145,6 +159,7 @@ class LLMClient:
                 presence_penalty=self.presence_penalty,
             )
 
+            self._track(response)
             text = response.choices[0].message.content or ""
             logger.info(f"LLM response ({len(text)} chars)")
             logger.debug(f"Raw response: {text[:200]}...")
@@ -197,6 +212,7 @@ class LLMClient:
                     presence_penalty=self.presence_penalty,
                 )
 
+                self._track(response)
                 message = response.choices[0].message
                 text = message.content or ""
                 tool_calls = getattr(message, "tool_calls", None)
@@ -262,6 +278,7 @@ class LLMClient:
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
             )
+            self._track(response)
             text = response.choices[0].message.content or ""
             return (strip_think_tags(text) or None), tools_used
         except Exception as e:

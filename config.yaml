@@ -23,6 +23,18 @@ model:
   max_tool_rounds: 8              # max tool-calling rounds per conversation/heartbeat turn
   mmproj_file: ""  # optional: vision projector GGUF (e.g. "mmproj-F16.gguf")
 
+# --- Provider ---
+# Controls where the LLM runs. Default "local" uses llama.cpp (server: section above).
+# Set to "openai", "openrouter", "anthropic", or "custom" to use a cloud API instead.
+# When using a cloud provider, the server: section is ignored (no llama-server started).
+# Embeddings for memory search always run locally regardless of provider.
+provider:
+  type: "local"                    # "local", "openai", "openrouter", "anthropic", "custom"
+  api_key_env: ""                  # env var name holding the API key (e.g. "OPENROUTER_API_KEY")
+  base_url: ""                     # auto-set per type; override for "custom"
+  model: ""                        # API model name (e.g. "anthropic/claude-sonnet-4-20250514")
+  max_context: 32768               # context budget for API calls (controls cost)
+
 # --- Heartbeat ---
 heartbeat:
   interval_minutes: 30            # free-think tick every 30 min
