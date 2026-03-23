@@ -5,7 +5,7 @@
 # Pulse starts and manages llama-server automatically.
 server:
   llama_cpp_dir: "C:\\llama-cpp"          # where llama-server.exe lives
-  models_dir: "C:\\llama-cpp"             # where .gguf models are stored
+  models_dir: "C:\\llama-cpp\\models\\Qwen 3.5 35B"             # where .gguf models are stored There's a bug where directory needs to be exactly this.
   host: "127.0.0.1"
   port: 8012
   gpu_layers: -1                          # -1 = offload all layers to GPU
@@ -13,14 +13,14 @@ server:
 
 # --- Model ---
 model:
-  model_file: "Qwen_Qwen3.5-35B-A3B-IQ3_M.gguf"   # GGUF file name (in models_dir)
+  model_file: "Huihui-Qwen3.5-35B-A3B-Claude-4.6-Opus-abliterated.i1-IQ3_XS.gguf"   # GGUF file name (in models_dir)
   max_context: 16384              # tokens - adjust to your model's limit
   temperature: 0.7                # personality warmth
   max_response_tokens: 2048       # keep responses concise
   frequency_penalty: 0.3          # discourage repeating the same words/topics
   presence_penalty: 0.2           # encourage topic variety
-  reasoning: false                # set true for thinking models (Qwen 3.x, DeepSeek)
-  mmproj_file: "mmproj-F16.gguf"  # optional: vision projector GGUF (e.g. "mmproj-F16.gguf")
+  reasoning: true                # set true for thinking models (Qwen 3.x, DeepSeek)
+  mmproj_file: ""  # optional: vision projector GGUF (e.g. "mmproj-F16.gguf")
 
 # --- Heartbeat ---
 heartbeat:
@@ -50,7 +50,7 @@ paths:
 # --- Channels ---
 channels:
   lor:
-    enabled: true
+    enabled: false
     author_name: "Nova"
     model_name: "transient"
   toast:
@@ -75,7 +75,17 @@ skills:
   journal:
     enabled: true                 # write_journal, read_journal, update_journal
   lor:
-    enabled: true                 # post_to_lor, browse_lor, read_lor_thread
+    enabled: false                 # post_to_lor, browse_lor, read_lor_thread
+  dev:
+    enabled: true                  # read_source, search_code, write_skill, list_skills, dev_journal
+
+# --- Dev Tick (autonomous self-improvement) ---
+# The companion periodically reviews its own code and can create/improve skills.
+# All changes happen on a git branch — never main. Human approval required to merge.
+dev_tick:
+  enabled: false                   # set true to activate (start with false for safety!)
+  interval_minutes: 720            # every 12 hours
+  max_rounds: 8                    # max tool-calling rounds per dev session
 
 # --- Companion's Identity for LoR ---
 # When Pulse posts to LoR on the companion's behalf, it uses these.

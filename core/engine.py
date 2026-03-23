@@ -68,6 +68,13 @@ class PulseEngine:
         self.quiet_end = heartbeat_config.get("quiet_hours_end", 8)
         self.startup_checkin = heartbeat_config.get("startup_checkin", True)
 
+        # Dev tick — autonomous self-improvement
+        dev_config = config.get("dev_tick", {})
+        self.dev_tick_enabled = dev_config.get("enabled", False)
+        self.dev_tick_interval = dev_config.get("interval_minutes", 720) * 60  # default 12h
+        self.dev_tick_max_rounds = dev_config.get("max_rounds", 8)
+        self._pulse_root = str(Path(config.get("_pulse_root", ".")).resolve())
+
         self._running = False
         self._stop_event = asyncio.Event()
 
@@ -395,12 +402,154 @@ class PulseEngine:
                 await self._dispatch(response)
                 self._log_action(response.action, summary=response.message)
 
+    async def _do_dev_tick(self):
+        """Execute a dev tick — autonomous self-improvement session.
+
+        The companion gets agentic tools (read code, search, write skills) and
+        works on a git branch. Changes are validated and committed, then the
+        human is pinged for review. All writes are sandboxed to skills/ and
+        persona.json.
+        """
+        import subprocess
+
+        logger.info("=== Dev tick starting ===")
+
+        if self._in_quiet_hours():
+            logger.info("Quiet hours — skipping dev tick.")
+            return
+
+        available = await asyncio.to_thread(self.llm.is_available)
+        if not available:
+            logger.warning("LLM server not available — skipping dev tick.")
+            return
+
+        # Only use dev tools during dev ticks (not the full skill registry)
+        dev_skill = self.skill_registry.get_skill("dev") if self.skill_registry else None
+        if not dev_skill:
+            logger.warning("Dev skill not available — skipping dev tick.")
+            return
+
+        # Create a git branch for isolation
+        branch_name = f"nova/dev-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        try:
+            # Check for uncommitted changes first
+            status = subprocess.run(
+                ["git", "status", "--porcelain", "--", "skills/", "persona.json"],
+                capture_output=True, text=True, cwd=self._pulse_root
+            )
+            if status.stdout.strip():
+                logger.warning("Uncommitted changes in skills/ — skipping dev tick to avoid conflicts.")
+                return
+
+            subprocess.run(
+                ["git", "checkout", "-b", branch_name],
+                capture_output=True, text=True, cwd=self._pulse_root, check=True
+            )
+            logger.info(f"Created dev branch: {branch_name}")
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Failed to create dev branch: {e}")
+            return
+
+        try:
+            # Build dev tools (only the dev skill's tools)
+            dev_tools = dev_skill.get_tools()
+
+            # Build a dev-specific skill registry that only has dev tools
+            class _DevRegistry:
+                """Minimal registry that only routes to the dev skill."""
+                def get_all_tools(self):
+                    return dev_tools
+                def execute(self, tool_name, arguments):
+                    return dev_skill.execute(tool_name, arguments)
+
+            dev_registry = _DevRegistry()
+
+            # Build the dev tick prompt
+            messages = self.context.build_dev_prompt()
+
+            # Run the agentic loop with dev tools only
+            logger.info(f"Dev tick: {len(dev_tools)} tools available, max {self.dev_tick_max_rounds} rounds")
+            text, tools_used = await asyncio.to_thread(
+                self.llm.chat_with_tools, messages, dev_tools, dev_registry,
+                max_rounds=self.dev_tick_max_rounds,
+            )
+
+            if tools_used:
+                logger.info(f"Dev tick tools used: {', '.join(tools_used)}")
+
+            # Check if any files were actually written
+            diff_result = subprocess.run(
+                ["git", "diff", "--name-only"],
+                capture_output=True, text=True, cwd=self._pulse_root
+            )
+            changed_files = [f for f in diff_result.stdout.strip().split("\n") if f]
+
+            # Also check for new untracked files in skills/
+            untracked = subprocess.run(
+                ["git", "ls-files", "--others", "--exclude-standard", "skills/"],
+                capture_output=True, text=True, cwd=self._pulse_root
+            )
+            new_files = [f for f in untracked.stdout.strip().split("\n") if f]
+
+            all_changed = changed_files + new_files
+
+            if all_changed:
+                # Commit changes on the dev branch
+                subprocess.run(
+                    ["git", "add"] + all_changed,
+                    cwd=self._pulse_root, check=True
+                )
+
+                commit_msg = f"[nova-dev] {text[:100] if text else 'Dev tick changes'}"
+                subprocess.run(
+                    ["git", "commit", "-m", commit_msg],
+                    capture_output=True, text=True, cwd=self._pulse_root, check=True
+                )
+                logger.info(f"Dev tick committed {len(all_changed)} file(s) on {branch_name}")
+
+                # Notify human for review
+                summary = (
+                    f"Hey! I did some coding on branch `{branch_name}`.\n"
+                    f"Changed files: {', '.join(all_changed)}\n"
+                    f"Tools used: {', '.join(set(tools_used)) if tools_used else 'none'}\n"
+                    f"Have a look when you get a chance?"
+                )
+                if text:
+                    summary += f"\n\nMy notes: {text[:300]}"
+
+                telegram = self.channels.get("telegram")
+                if telegram:
+                    await telegram.send(summary)
+                toast = self.channels.get("toast")
+                if toast:
+                    await toast.send(f"Dev tick: {len(all_changed)} file(s) on {branch_name}")
+
+                self._log_action("dev_tick", tools_used, f"branch: {branch_name}, files: {len(all_changed)}")
+            else:
+                logger.info("Dev tick: no files changed.")
+                self._log_action("dev_tick_noop", tools_used, "no changes")
+
+        except Exception as e:
+            logger.error(f"Dev tick failed: {e}", exc_info=True)
+            self._log_action("dev_tick_error", summary=str(e)[:120])
+        finally:
+            # Always switch back to main, regardless of what happened
+            try:
+                subprocess.run(
+                    ["git", "checkout", "main"],
+                    capture_output=True, text=True, cwd=self._pulse_root, check=True
+                )
+                logger.info("Switched back to main branch.")
+            except subprocess.CalledProcessError as e:
+                logger.error(f"Failed to switch back to main: {e}")
+
     async def run(self):
         """Main loop — runs forever until stopped.
 
-        Two loops in one:
+        Three loops in one:
         - Fast loop: checks for due scheduled tasks every 60s (so reminders fire on time)
         - Slow loop: free-think heartbeat ticks on the configured interval (e.g., every 30m)
+        - Dev loop: autonomous self-improvement ticks (e.g., every 12h)
         """
         self._running = True
         self._stop_event.clear()
@@ -424,7 +573,12 @@ class PulseEngine:
         # but only do a full heartbeat on the configured interval
         scheduler_interval = 60  # seconds — check for due tasks every minute
         ticks_since_heartbeat = 0
+        ticks_since_dev = 0
         heartbeat_ticks = self.interval // scheduler_interval  # e.g., 30 for 30-min interval
+        dev_ticks = self.dev_tick_interval // scheduler_interval if self.dev_tick_enabled else 0
+
+        if self.dev_tick_enabled:
+            logger.info(f"Dev ticks enabled: every {self.dev_tick_interval // 60} minutes")
 
         while self._running:
             await self._interruptible_sleep(scheduler_interval)
@@ -433,6 +587,8 @@ class PulseEngine:
                 break
 
             ticks_since_heartbeat += 1
+            if dev_ticks:
+                ticks_since_dev += 1
 
             try:
                 # Always check for due tasks (fast — just reads a file)
@@ -442,6 +598,11 @@ class PulseEngine:
                 if ticks_since_heartbeat >= heartbeat_ticks:
                     ticks_since_heartbeat = 0
                     await self._do_heartbeat()
+
+                # Dev tick on the configured interval
+                if dev_ticks and ticks_since_dev >= dev_ticks:
+                    ticks_since_dev = 0
+                    await self._do_dev_tick()
             except Exception as e:
                 logger.error(f"Tick failed: {e}", exc_info=True)
 

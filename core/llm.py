@@ -40,6 +40,10 @@ def strip_think_tags(text: str) -> str:
         r'^Thinking(?:\s+Process)?:\s*\n[\s\S]*?(?=\n\{|\Z)',
         '', cleaned
     )
+    
+    # 5. Strip EOS tokens if they leaked through
+    cleaned = cleaned.replace('</s>', '')
+    
     return cleaned.strip()
 
 

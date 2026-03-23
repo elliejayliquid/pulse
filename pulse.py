@@ -87,6 +87,9 @@ async def main(config_path: str):
     if tg_token:
         config.setdefault("channels", {}).setdefault("telegram", {})["bot_token"] = tg_token
 
+    # Inject pulse root directory for dev skill and engine
+    config["_pulse_root"] = str(Path(__file__).parent.resolve())
+
     # Load embedding model BEFORE llama-server — PyTorch's c10.dll can conflict
     # with CUDA DLLs on Windows if loaded after another CUDA process starts.
     # The model is tiny (22MB, CPU-only) and used for memory/journal search.

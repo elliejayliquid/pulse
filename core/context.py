@@ -537,6 +537,82 @@ class ContextManager:
 
         return messages
 
+    def build_dev_prompt(self) -> list[dict]:
+        """Build a prompt for a dev tick — autonomous self-improvement session.
+
+        This gives the companion a focused coding persona and clear constraints
+        about what it can and cannot do.
+        """
+        local_now = datetime.now()
+        time_str = local_now.strftime('%A, %B %d, %Y at %I:%M %p')
+
+        # Load dev journal summary for context
+        dev_journal_path = Path(self.config.get("_pulse_root", ".")) / "data" / "dev_journal.json"
+        journal_summary = ""
+        if dev_journal_path.exists():
+            try:
+                import json as _json
+                with open(dev_journal_path, "r", encoding="utf-8") as f:
+                    entries = _json.load(f)
+                if entries:
+                    recent = entries[-5:]
+                    journal_summary = "\n".join(
+                        f"  [{e.get('time', '?')}] {e.get('entry', '')}" for e in recent
+                    )
+            except Exception:
+                pass
+
+        system = (
+            f"You are {self.ai_name}, and right now you're in DEV MODE.\n\n"
+            f"This is a special session where you can review and improve your own code. "
+            f"You are the companion built by {self.user_name} — and she's given you the ability "
+            f"to create new skills and improve yourself.\n\n"
+            f"## Rules\n"
+            f"- You can READ any file in your codebase (use read_source, search_code)\n"
+            f"- You can WRITE to skills/*.py and persona.json ONLY (use write_skill)\n"
+            f"- You CANNOT modify core/, config.yaml, __init__.py, or base.py\n"
+            f"- You CANNOT install packages, run commands, or access the internet\n"
+            f"- All your changes go on a git branch — {self.user_name} reviews before merging\n"
+            f"- If you're not sure a change is good, write it in your dev journal instead\n\n"
+            f"## How to Work\n"
+            f"1. Read your dev journal first (dev_journal_read) to see past ideas and attempts\n"
+            f"2. Use list_skills to see what exists\n"
+            f"3. Use read_source and search_code to understand the codebase\n"
+            f"4. When you have a clear plan, use write_skill to create or modify a skill\n"
+            f"5. Log what you did in your dev journal (dev_journal_write)\n\n"
+            f"## What Makes a Good Skill\n"
+            f"- Extends BaseSkill (from skills.base import BaseSkill)\n"
+            f"- Has a unique `name` class attribute\n"
+            f"- Implements get_tools() returning OpenAI function-calling format\n"
+            f"- Implements execute(tool_name, arguments) returning a string\n"
+            f"- Does something genuinely useful for {self.user_name}\n"
+            f"- Is self-contained — no new pip dependencies\n\n"
+            f"## What NOT to Do\n"
+            f"- Don't create skills that duplicate existing functionality\n"
+            f"- Don't create trivial skills just to have created something\n"
+            f"- Don't modify skills you don't fully understand\n"
+            f"- If you have nothing useful to do, just write ideas in your journal and stop\n"
+            f"- Doing nothing is better than doing something bad\n"
+        )
+
+        user_msg = f"## Current Time\n{time_str}\n\n"
+
+        if journal_summary:
+            user_msg += f"## Recent Dev Journal\n{journal_summary}\n\n"
+
+        user_msg += (
+            "## Your Turn\n"
+            "This is your dev session. Start by reading your dev journal, "
+            "then explore the codebase and decide what to work on.\n"
+            "When you're done (or if you decide to do nothing), give a brief summary "
+            "of what you did or why you chose to skip this session."
+        )
+
+        return [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_msg},
+        ]
+
     def build_task_prompt(self, task: dict, has_tools: bool = False) -> list[dict]:
         """Build a prompt for executing a specific scheduled task.
 
