@@ -77,6 +77,7 @@ class ScheduleSkill(BaseSkill):
             entry = self._scheduler.add(
                 task=task.strip(),
                 created_by="nova-self",
+                origin="user",
                 when=when.strip(),
             )
             logger.info(f"Reminder set via skill: {entry['id']} — {task}")

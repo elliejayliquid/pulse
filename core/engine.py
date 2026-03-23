@@ -323,6 +323,7 @@ class PulseEngine:
             logger.info(f"Executing due task: {task['task']}")
             messages = self.context.build_task_prompt(task, has_tools=bool(tools))
 
+            response = None
             if tools:
                 text, tools_used = await asyncio.to_thread(
                     self.llm.chat_with_tools, messages, tools, self.skill_registry
@@ -336,6 +337,16 @@ class PulseEngine:
                 response = await asyncio.to_thread(self.llm.chat, messages)
                 if response:
                     await self._dispatch(response, is_scheduled_task=True)
+
+            # Log the notification into conversation history so the companion
+            # remembers what it sent (and replies make sense in context)
+            if response and response.action == "notify" and response.message:
+                history = self.context._load_conversation()
+                history.append({
+                    "role": "assistant",
+                    "content": f"[Scheduled reminder] {response.message}"
+                })
+                self.context.save_conversation(history)
 
             self.scheduler.mark_completed(task["id"])
 

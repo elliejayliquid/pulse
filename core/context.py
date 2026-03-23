@@ -175,6 +175,11 @@ class ContextManager:
             "{name}": data.get("name", "Companion"),
             "{user_name}": data.get("user_name", "User"),
         }
+        
+        # If user wrote system_prompt as a list of strings for readability, join it
+        if isinstance(data.get("system_prompt"), list):
+            data["system_prompt"] = "\n".join(data["system_prompt"])
+            
         for key, value in data.items():
             if isinstance(value, str):
                 for placeholder, real in replacements.items():
@@ -533,7 +538,12 @@ class ContextManager:
         return messages
 
     def build_task_prompt(self, task: dict, has_tools: bool = False) -> list[dict]:
-        """Build a prompt for executing a specific scheduled task."""
+        """Build a prompt for executing a specific scheduled task.
+
+        For companion-origin tasks, includes recent conversation so the companion
+        can decide whether the follow-up is still relevant. User-origin tasks
+        always fire without negotiation.
+        """
         system = self.persona_data.get("system_prompt", "You are a local AI companion.")
 
         local_now = datetime.now()
@@ -545,15 +555,51 @@ class ContextManager:
             self.budget.get("memories", 2000)
         )
 
+        origin = task.get("origin", "companion")
+
         task_prompt = (
             f"## Current Time\n{time_str}\n\n"
             f"{memories_block}\n\n"
             f"## Task to Execute\n"
             f"You have a scheduled task to execute right now:\n"
             f"- Task: {task.get('task', '?')}\n"
-            f"- Scheduled by: {task.get('created_by', 'unknown')}\n\n"
-            f"Execute this task. Choose the appropriate action (notify to send your human a message, "
-            f"or use your tools to take other actions).\n"
+            f"- Scheduled by: {task.get('created_by', 'unknown')}\n"
+            f"- Origin: {origin}\n\n"
+        )
+
+        if origin == "user":
+            # User-created: no escape, always execute
+            task_prompt += (
+                "This was explicitly requested by your human. Execute it — do NOT skip.\n"
+            )
+        else:
+            # Companion-created: allow smart skip if already covered
+            recent_convo = self._load_conversation()
+            if recent_convo:
+                # Show last few messages so the companion can judge relevance
+                recent_lines = []
+                for msg in recent_convo[-6:]:
+                    role = msg.get("role", "?")
+                    content = msg.get("content", "")
+                    if isinstance(content, str):
+                        recent_lines.append(f"  {role}: {content[:200]}")
+                convo_block = "\n".join(recent_lines)
+                task_prompt += (
+                    f"## Recent Conversation\n{convo_block}\n\n"
+                )
+
+            task_prompt += (
+                "You scheduled this follow-up yourself. Before executing, consider:\n"
+                "- Are you already in conversation about this topic?\n"
+                "- Has this already been addressed or resolved?\n"
+                "- Would this message feel redundant or interruptive right now?\n"
+                "If yes, respond with `{\"action\": \"silent\"}` instead of notifying.\n"
+                "If the follow-up is still relevant and useful, go ahead and execute it.\n"
+            )
+
+        task_prompt += (
+            "\nChoose the appropriate action (notify to send your human a message, "
+            "or use your tools to take other actions).\n"
             + (
                 "\nYou have tools available — use them if they'd help you execute this task "
                 "(e.g., search memories for relevant context, check the time).\n"

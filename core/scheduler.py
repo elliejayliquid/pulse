@@ -9,12 +9,57 @@ import json
 import hashlib
 import logging
 import os
+import re
 import time
+from difflib import SequenceMatcher
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_task(text: str) -> str:
+    """Normalize task text for dedup comparison."""
+    text = text.lower().strip()
+    text = re.sub(r"[^\w\s]", "", text)  # strip punctuation/emoji
+    return re.sub(r"\s+", " ", text)
+
+
+def _cosine_similarity(a, b) -> float:
+    """Cosine similarity between two vectors."""
+    import numpy as np
+    a, b = np.asarray(a), np.asarray(b)
+    return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-9))
+
+
+def _tasks_similar(a: str, b: str, threshold: float = 0.7) -> bool:
+    """Check if two task descriptions are similar enough to be duplicates.
+
+    Uses semantic similarity (sentence embeddings) when available,
+    falls back to SequenceMatcher for string-level comparison.
+    """
+    na, nb = _normalize_task(a), _normalize_task(b)
+    if na == nb:
+        return True
+    # Check containment (one is a substring of the other)
+    if na in nb or nb in na:
+        return True
+
+    # Try semantic similarity via the embedding model (already in memory)
+    try:
+        from core.context import _get_embedding_model
+        model = _get_embedding_model()
+        if model is not None:
+            embeddings = model.encode([a, b])
+            sim = _cosine_similarity(embeddings[0], embeddings[1])
+            logger.debug(f"Semantic similarity: {sim:.3f} — '{a[:50]}' vs '{b[:50]}'")
+            return sim >= 0.75
+    except Exception as e:
+        logger.debug(f"Embedding similarity failed, falling back to string match: {e}")
+
+    # Fallback: string-level similarity
+    return SequenceMatcher(None, na, nb).ratio() >= threshold
 
 
 def generate_schedule_id() -> str:
@@ -129,7 +174,8 @@ class ScheduleManager:
             logger.error(f"Failed to save schedules: {e}")
 
     def add(self, task: str, created_by: str,
-            cron: str = "", run_at: str = "", when: str = "") -> dict:
+            cron: str = "", run_at: str = "", when: str = "",
+            origin: str = "companion") -> dict:
         """Add a new schedule.
 
         Args:
@@ -138,6 +184,8 @@ class ScheduleManager:
             cron: Cron expression for recurring tasks
             run_at: ISO datetime for one-time tasks
             when: Human-friendly time (parsed into run_at or cron)
+            origin: "user" (explicitly requested, always fires) or
+                    "companion" (self-scheduled, can be skipped if redundant)
         """
         schedules = self._load()
 
@@ -145,6 +193,7 @@ class ScheduleManager:
             "id": generate_schedule_id(),
             "task": task,
             "created_by": created_by,
+            "origin": origin,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "created_at_local": datetime.now().strftime("%A %b %d, %I:%M %p"),
             "enabled": True,
@@ -194,6 +243,17 @@ class ScheduleManager:
                     entry["run_at_local"] = dt.astimezone().strftime("%A %b %d, %I:%M %p")
                 except ValueError:
                     pass
+
+        # Dedup: skip if an active schedule with a similar task already exists
+        active = [s for s in schedules
+                  if s.get("enabled", True) and not s.get("completed", False)]
+        for existing in active:
+            if _tasks_similar(task, existing.get("task", "")):
+                logger.info(
+                    f"Dedup: skipping '{task}' — similar to existing '{existing['task']}' "
+                    f"({existing['id']})"
+                )
+                return existing  # return the existing entry instead
 
         schedules.append(entry)
         self._save(schedules)
