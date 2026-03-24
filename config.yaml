@@ -97,7 +97,8 @@ skills:
 # All changes happen on a git branch — never main. Human approval required to merge.
 dev_tick:
   enabled: false                   # set true to activate (start with false for safety!)
-  interval_minutes: 720            # every 12 hours
+  interval_minutes: 720            # every 12 hours (used when schedule_time is empty)
+  schedule_time: ""                # optional: run at a specific time daily, e.g. "20:00"
   max_rounds: 16                   # max tool-calling rounds per dev session
 
 # --- Companion's Identity for LoR ---

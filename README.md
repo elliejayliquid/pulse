@@ -1,6 +1,6 @@
 # Pulse
 
-**A heartbeat daemon for local AI companions.**
+**A heartbeat daemon for local/semi-local AI companions.**
 
 Pulse gives your AI companion a life of its own. It runs in the background, letting your companion think on its own schedule, remember conversations, write in a journal, set reminders, and chat with you over Telegram. Runs locally with llama.cpp, or connects to cloud APIs (OpenAI, OpenRouter, Anthropic, etc.) — your choice.
 
@@ -174,6 +174,29 @@ skills:
   lor:
     enabled: false
 ```
+
+### Dev ticks (autonomous self-improvement)
+
+Your companion can periodically review its own code and create or improve skills — autonomously. This is opt-in and heavily sandboxed:
+
+```yaml
+dev_tick:
+  enabled: false        # start with false!
+  interval_minutes: 720 # every 12 hours (when schedule_time is empty)
+  schedule_time: "20:00" # optional: run at a specific time daily instead
+  max_rounds: 16        # tool-calling rounds per dev session
+```
+
+**How it works:** On each dev tick, the companion gets a focused coding prompt, reads its dev journal (lessons from past attempts), and can read source files, search code, and write skill files. All changes happen on a git branch (`nova/dev-<timestamp>`) — never main. Dev ticks run during quiet hours (they're silent background work — only the approval ping notifies you).
+
+**Safety layers:**
+- Git branch isolation — changes never touch main directly
+- `py_compile` + structure validation before any file is written
+- Scope limits — can only modify `skills/*.py` and `persona.json`, not core engine files
+- Human approval gate — sends a diff summary to Telegram for you to review
+- Dev journal — the companion logs what it learned each session, reads it next time
+
+**What it can't do:** Modify core/ files, config.yaml, or anything outside the Pulse directory.
 
 ## How it works
 

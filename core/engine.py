@@ -93,6 +93,7 @@ class PulseEngine:
         self.dev_tick_enabled = dev_config.get("enabled", False)
         self.dev_tick_interval = dev_config.get("interval_minutes", 720) * 60  # default 12h
         self.dev_tick_max_rounds = dev_config.get("max_rounds", 8)
+        self.dev_tick_schedule = dev_config.get("schedule_time", "")  # e.g. "20:00"
         self._pulse_root = str(Path(config.get("_pulse_root", ".")).resolve())
 
         self._running = False
@@ -437,9 +438,8 @@ class PulseEngine:
 
         logger.info("=== Dev tick starting ===")
 
-        if self._in_quiet_hours():
-            logger.info("Quiet hours — skipping dev tick.")
-            return
+        # Dev ticks are silent background work — they bypass quiet hours.
+        # Notifications (the approval ping) are sent regardless.
 
         available = await asyncio.to_thread(self.llm.is_available)
         if not available:
@@ -598,10 +598,15 @@ class PulseEngine:
         ticks_since_heartbeat = 0
         ticks_since_dev = 0
         heartbeat_ticks = self.interval // scheduler_interval  # e.g., 30 for 30-min interval
-        dev_ticks = self.dev_tick_interval // scheduler_interval if self.dev_tick_enabled else 0
-
+        # Dev tick scheduling: either at a specific time or on an interval
+        dev_ticks = 0
+        dev_tick_ran_today = False
         if self.dev_tick_enabled:
-            logger.info(f"Dev ticks enabled: every {self.dev_tick_interval // 60} minutes")
+            if self.dev_tick_schedule:
+                logger.info(f"Dev ticks enabled: daily at {self.dev_tick_schedule}")
+            else:
+                dev_ticks = self.dev_tick_interval // scheduler_interval
+                logger.info(f"Dev ticks enabled: every {self.dev_tick_interval // 60} minutes")
 
         while self._running:
             await self._interruptible_sleep(scheduler_interval)
@@ -622,10 +627,27 @@ class PulseEngine:
                     ticks_since_heartbeat = 0
                     await self._do_heartbeat()
 
-                # Dev tick on the configured interval
-                if dev_ticks and ticks_since_dev >= dev_ticks:
-                    ticks_since_dev = 0
-                    await self._do_dev_tick()
+                # Dev tick — scheduled time or interval
+                if self.dev_tick_enabled:
+                    if self.dev_tick_schedule:
+                        # Clock-based: fire once when the scheduled minute arrives
+                        now = datetime.now()
+                        try:
+                            h, m = self.dev_tick_schedule.split(":")
+                            if now.hour == int(h) and now.minute == int(m):
+                                if not dev_tick_ran_today:
+                                    dev_tick_ran_today = True
+                                    await self._do_dev_tick()
+                            else:
+                                # Reset the flag once we've moved past the scheduled minute
+                                if dev_tick_ran_today and now.hour != int(h):
+                                    dev_tick_ran_today = False
+                        except ValueError:
+                            logger.warning(f"Invalid dev_tick schedule_time: {self.dev_tick_schedule}")
+                    elif dev_ticks and ticks_since_dev >= dev_ticks:
+                        # Interval-based: fire every N ticks
+                        ticks_since_dev = 0
+                        await self._do_dev_tick()
             except Exception as e:
                 logger.error(f"Tick failed: {e}", exc_info=True)
 
