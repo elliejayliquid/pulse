@@ -1,6 +1,5 @@
 """
-Tasks skill — manage Lena's to-do lists with persistent storage.
-Allows Nova to track tasks, mark them as complete, and provide rewards.
+Tasks skill — persistent to-do lists with completion tracking.
 """
 
 import json
