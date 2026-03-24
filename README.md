@@ -60,15 +60,14 @@ Pulse talks to any OpenAI-compatible API. Locally, it manages [llama.cpp](https:
 
 ```bash
 # Clone and install
-git clone https://github.com/anthropics/pulse.git
+git clone https://github.com/elliejayliquid/pulse.git
 cd pulse
 python -m venv .venv
 .venv/Scripts/activate    # Windows
 # source .venv/bin/activate  # Linux/Mac
 pip install -r requirements.txt
 
-# Configure
-cp config.yaml config.yaml  # Edit paths to your llama-server and model
+# Configure — edit config.yaml with your paths and persona.json with your companion's name
 ```
 
 Edit `config.yaml`:
