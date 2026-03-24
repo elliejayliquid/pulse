@@ -141,7 +141,10 @@ def parse_human_time(when: str, now: datetime = None) -> Optional[datetime]:
     try:
         dt = datetime.fromisoformat(when)
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
+            # Treat naive datetimes as LOCAL time (what the LLM intends),
+            # then convert to UTC for storage.
+            dt = dt.astimezone()  # attach local tz
+            dt = dt.astimezone(timezone.utc)  # convert to UTC
         return dt
     except ValueError:
         pass
@@ -341,6 +344,64 @@ class ScheduleManager:
     def list_all(self) -> list[dict]:
         """List all schedules."""
         return self._load()
+
+    def update(self, schedule_id: str, **kwargs) -> Optional[dict]:
+        """Update fields on an existing schedule.
+
+        Accepts keyword args: task, when, priority, enabled.
+        'when' is re-parsed into run_at (one-time) or cron (recurring).
+        Returns the updated entry, or None if not found.
+        """
+        schedules = self._load()
+        entry = None
+        for s in schedules:
+            if s["id"] == schedule_id:
+                entry = s
+                break
+        if entry is None:
+            return None
+
+        if "task" in kwargs and kwargs["task"]:
+            entry["task"] = kwargs["task"].strip()
+
+        if "priority" in kwargs and kwargs["priority"]:
+            entry["priority"] = kwargs["priority"]
+
+        if "enabled" in kwargs:
+            entry["enabled"] = kwargs["enabled"]
+
+        if "when" in kwargs and kwargs["when"]:
+            when = kwargs["when"].strip()
+            if "daily" in when.lower():
+                time_part = when.lower().replace("daily", "").strip()
+                try:
+                    parts = time_part.split(":")
+                    h = int(parts[0])
+                    m = int(parts[1]) if len(parts) > 1 else 0
+                    entry["schedule_type"] = "recurring"
+                    entry["cron"] = f"{m} {h} * * *"
+                    entry.pop("run_at", None)
+                    entry.pop("completed", None)
+                except (ValueError, IndexError):
+                    logger.warning(f"Could not parse daily time: {when}")
+            else:
+                parsed = parse_human_time(when)
+                if parsed:
+                    entry["schedule_type"] = "once"
+                    entry["run_at"] = parsed.isoformat()
+                    entry["completed"] = False
+                    entry.pop("cron", None)
+                    try:
+                        dt = datetime.fromisoformat(entry["run_at"])
+                        entry["run_at_local"] = dt.astimezone().strftime(
+                            "%A %b %d, %I:%M %p"
+                        )
+                    except ValueError:
+                        pass
+
+        self._save(schedules)
+        logger.info(f"Schedule updated: {entry['id']} — {entry.get('task', '')}")
+        return entry
 
     def list_active(self) -> list[dict]:
         """List only active (enabled, not completed) schedules."""

@@ -33,7 +33,7 @@ class ScheduleSkill(BaseSkill):
                         "Use this when your human asks you to remind them of something, "
                         "or when you want to schedule a follow-up for yourself. "
                         "Supports one-time: 'in 2 hours', 'in 30 minutes', 'in 3 days', "
-                        "ISO datetime like '2026-03-01T15:00:00'. "
+                        "ISO datetime like '2026-03-01T15:00:00' (interpreted as LOCAL time). "
                         "Supports recurring: 'daily 8:00', 'daily 14:30'. "
                         "IMPORTANT: Always report the exact time and type from the tool result — "
                         "do not guess or paraphrase the scheduled time."
@@ -59,6 +59,63 @@ class ScheduleSkill(BaseSkill):
                     },
                 },
             },
+            {
+                "type": "function",
+                "function": {
+                    "name": "update_reminder",
+                    "description": (
+                        "Update an existing reminder's time, task text, or priority. "
+                        "Use this when the user wants to change when a reminder fires, "
+                        "fix a wrong time, or update the task description. "
+                        "You need the reminder's ID (from set_reminder or list output). "
+                        "IMPORTANT: Always report the updated details from the tool result."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "id": {
+                                "type": "string",
+                                "description": "The schedule ID to update (e.g. 'sch_87517db9')",
+                            },
+                            "task": {
+                                "type": "string",
+                                "description": "New task description (leave empty to keep current)",
+                            },
+                            "when": {
+                                "type": "string",
+                                "description": "New time (e.g. 'in 2 hours', '2026-04-01T15:00:00', 'daily 9:00')",
+                            },
+                            "priority": {
+                                "type": "string",
+                                "description": "New priority level",
+                                "enum": ["urgent", "routine", "creative"],
+                            },
+                        },
+                        "required": ["id"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "delete_reminder",
+                    "description": (
+                        "Delete a reminder entirely. Use this when the user no longer "
+                        "needs a reminder or wants to cancel a scheduled task. "
+                        "You need the reminder's ID."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "id": {
+                                "type": "string",
+                                "description": "The schedule ID to delete (e.g. 'sch_87517db9')",
+                            },
+                        },
+                        "required": ["id"],
+                    },
+                },
+            },
         ]
 
     def execute(self, tool_name: str, arguments: dict) -> str:
@@ -67,6 +124,17 @@ class ScheduleSkill(BaseSkill):
                 task=arguments.get("task", ""),
                 when=arguments.get("when", ""),
                 priority=arguments.get("priority", "routine"),
+            )
+        if tool_name == "update_reminder":
+            return self._update_reminder(
+                schedule_id=arguments.get("id", ""),
+                task=arguments.get("task", ""),
+                when=arguments.get("when", ""),
+                priority=arguments.get("priority", ""),
+            )
+        if tool_name == "delete_reminder":
+            return self._delete_reminder(
+                schedule_id=arguments.get("id", ""),
             )
         return f"Unknown tool: {tool_name}"
 
@@ -127,3 +195,86 @@ class ScheduleSkill(BaseSkill):
         except Exception as e:
             logger.error(f"Failed to set reminder: {e}")
             return f"Failed to set reminder: {e}"
+
+    def _update_reminder(self, schedule_id: str, task: str = "",
+                         when: str = "", priority: str = "") -> str:
+        """Update an existing reminder."""
+        if not self._scheduler:
+            return "Scheduler not available."
+        if not schedule_id.strip():
+            return "Please provide the reminder ID to update."
+
+        kwargs = {}
+        if task.strip():
+            kwargs["task"] = task.strip()
+        if when.strip():
+            kwargs["when"] = when.strip()
+        if priority.strip():
+            kwargs["priority"] = priority.strip()
+
+        if not kwargs:
+            return "Nothing to update — provide at least one of: task, when, priority."
+
+        try:
+            entry = self._scheduler.update(schedule_id.strip(), **kwargs)
+            if entry is None:
+                return f"Reminder {schedule_id} not found. Check the ID and try again."
+
+            logger.info(f"Reminder updated via skill: {entry['id']}")
+
+            schedule_type = entry.get("schedule_type", "once")
+            if schedule_type == "recurring":
+                cron = entry.get("cron", "")
+                return (
+                    f"REMINDER UPDATED — report these details exactly to the user:\n"
+                    f"  Task: {entry.get('task', '')}\n"
+                    f"  Schedule: {cron} (daily recurring)\n"
+                    f"  Priority: {entry.get('priority', 'routine')}\n"
+                    f"  Type: recurring\n"
+                    f"  ID: {entry['id']}\n"
+                    f"Do NOT say a different schedule."
+                )
+            else:
+                actual_time = entry.get("run_at", "")
+                local_time = entry.get("run_at_local", "")
+                if not local_time and isinstance(actual_time, str) and "T" in actual_time:
+                    from datetime import datetime
+                    try:
+                        dt = datetime.fromisoformat(actual_time)
+                        local_time = dt.astimezone().strftime("%A %b %d, %I:%M %p")
+                    except ValueError:
+                        local_time = actual_time
+
+                return (
+                    f"REMINDER UPDATED — report these details exactly to the user:\n"
+                    f"  Task: {entry.get('task', '')}\n"
+                    f"  Fires at: {local_time}\n"
+                    f"  Priority: {entry.get('priority', 'routine')}\n"
+                    f"  Type: one-time\n"
+                    f"  ID: {entry['id']}\n"
+                    f"Do NOT say a different time."
+                )
+        except Exception as e:
+            logger.error(f"Failed to update reminder: {e}")
+            return f"Failed to update reminder: {e}"
+
+    def _delete_reminder(self, schedule_id: str) -> str:
+        """Delete a reminder entirely."""
+        if not self._scheduler:
+            return "Scheduler not available."
+        if not schedule_id.strip():
+            return "Please provide the reminder ID to delete."
+
+        try:
+            removed = self._scheduler.remove(schedule_id.strip())
+            if removed:
+                logger.info(f"Reminder deleted via skill: {schedule_id}")
+                return (
+                    f"REMINDER DELETED — ID: {schedule_id}\n"
+                    f"Confirm to the user that the reminder has been removed."
+                )
+            else:
+                return f"Reminder {schedule_id} not found. Check the ID and try again."
+        except Exception as e:
+            logger.error(f"Failed to delete reminder: {e}")
+            return f"Failed to delete reminder: {e}"
