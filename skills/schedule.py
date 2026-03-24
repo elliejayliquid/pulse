@@ -62,6 +62,27 @@ class ScheduleSkill(BaseSkill):
             {
                 "type": "function",
                 "function": {
+                    "name": "list_reminders",
+                    "description": (
+                        "List all active reminders and scheduled tasks. "
+                        "Use this to check what's scheduled, find reminder IDs "
+                        "for updating or deleting, or answer when the user asks "
+                        "'what reminders do I have?'"
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "include_completed": {
+                                "type": "boolean",
+                                "description": "Include completed one-time reminders (default: false)",
+                            },
+                        },
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
                     "name": "update_reminder",
                     "description": (
                         "Update an existing reminder's time, task text, or priority. "
@@ -125,6 +146,10 @@ class ScheduleSkill(BaseSkill):
                 when=arguments.get("when", ""),
                 priority=arguments.get("priority", "routine"),
             )
+        if tool_name == "list_reminders":
+            return self._list_reminders(
+                include_completed=arguments.get("include_completed", False),
+            )
         if tool_name == "update_reminder":
             return self._update_reminder(
                 schedule_id=arguments.get("id", ""),
@@ -137,6 +162,37 @@ class ScheduleSkill(BaseSkill):
                 schedule_id=arguments.get("id", ""),
             )
         return f"Unknown tool: {tool_name}"
+
+    def _list_reminders(self, include_completed: bool = False) -> str:
+        """List reminders."""
+        if not self._scheduler:
+            return "Scheduler not available."
+
+        if include_completed:
+            entries = self._scheduler.list_all()
+        else:
+            entries = self._scheduler.list_active()
+
+        if not entries:
+            return "No active reminders."
+
+        lines = [f"{'All' if include_completed else 'Active'} reminders ({len(entries)}):"]
+        for e in entries:
+            sid = e.get("id", "?")
+            task = e.get("task", "(no description)")
+            priority = e.get("priority", "routine")
+            stype = e.get("schedule_type", "once")
+
+            if stype == "recurring":
+                when = f"recurring — {e.get('cron', '?')}"
+            else:
+                when = e.get("run_at_local", e.get("run_at", "?"))
+                if e.get("completed"):
+                    when += " (completed)"
+
+            lines.append(f"  [{sid}] {task} | {when} | {priority}")
+
+        return "\n".join(lines)
 
     def _set_reminder(self, task: str, when: str, priority: str = "routine") -> str:
         """Create a one-time reminder via the ScheduleManager."""
