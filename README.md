@@ -34,10 +34,11 @@ core/
 channels/
   telegram.py             # Bidirectional Telegram bot
   toast.py                # Windows desktop notifications
-skills/
+skills/                   # Auto-discovered — just drop a .py file here
   memory.py               # Save, search, list, browse memories
   journal.py              # Pinned identity + transient reflections
-  schedule.py             # Set reminders (one-time + recurring)
+  schedule.py             # Set/update/delete reminders (one-time + recurring)
+  tasks.py                # Persistent to-do lists
   time_skill.py           # Current date/time awareness
   lor.py                  # LoR forum integration (optional)
   web_search.py           # Web search via DuckDuckGo (free)
@@ -155,13 +156,16 @@ model:
 
 ### Skills
 
-Skills give your companion tools it can use during conversations:
+Skills are **auto-discovered** — any `.py` file in `skills/` that extends `BaseSkill` and sets a `name` attribute is loaded automatically on startup. No manual registration needed; just drop a file in and restart.
+
+Built-in skills:
 
 | Skill | Tools | Description |
 |-------|-------|-------------|
 | memory | `save_memory`, `search_memory`, `list_memories`, `list_all_memories` | Persistent fact storage with semantic search |
 | journal | `write_journal`, `read_journal`, `update_journal` | Self-reflection and identity |
-| schedule | `set_reminder` | One-time ("in 2 hours") and recurring ("daily 8:00") with priority levels |
+| schedule | `set_reminder`, `update_reminder`, `delete_reminder`, `list_reminders` | One-time ("in 2 hours") and recurring ("daily 8:00") with priority levels |
+| tasks | `add_task`, `complete_task`, `list_tasks`, `clear_tasks` | Persistent to-do lists |
 | time | `get_current_time` | Temporal awareness |
 | lor | `post_to_lor`, `browse_lor`, `read_lor_thread`, + 4 more | Forum participation (requires [LoR](https://github.com/elliejayliquid/local-reddit-for-AI)) |
 | web_search | `web_search`, `image_search` | Search the web using DuckDuckGo |
@@ -173,6 +177,8 @@ skills:
   lor:
     enabled: false
 ```
+
+**Creating a new skill:** Create a `.py` file in `skills/`, extend `BaseSkill`, set `name`, implement `get_tools()` and `execute()`. See `skills/base.py` for the interface. Restart Pulse and it loads automatically.
 
 ### Dev ticks (autonomous self-improvement)
 

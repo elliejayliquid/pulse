@@ -58,7 +58,7 @@ def _is_writable(filepath: str, pulse_root: str) -> bool:
 
         # Writable directories (e.g. skills/)
         if parts and parts[0] in WRITABLE_PATHS:
-            # Don't allow writing to base.py or __init__.py (registry)
+            # Don't allow writing to base.py or __init__.py (core infrastructure)
             if resolved.name in ("base.py", "__init__.py"):
                 return False
             return True
@@ -345,8 +345,9 @@ class DevSkill(BaseSkill):
             return (
                 f"FILE WRITTEN: {path} ({len(content)} chars)\n"
                 f"Description: {description}\n"
-                f"This file is on disk but NOT yet committed or registered. "
-                f"It will be committed to a dev branch and sent for review."
+                f"This file is on disk and will be auto-discovered on next restart. "
+                f"New skills are loaded automatically — no manual registration needed. "
+                f"Just make sure your class extends BaseSkill and sets a `name` attribute."
             )
         except Exception as e:
             return f"Error writing '{path}': {e}"

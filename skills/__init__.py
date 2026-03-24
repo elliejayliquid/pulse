@@ -1,7 +1,8 @@
 """
 Skill Registry — discovers, loads, and manages Pulse skills.
 
-Each skill is a Python file in this directory with a BaseSkill subclass.
+Skills are auto-discovered: any .py file in this directory that contains
+a BaseSkill subclass with a `name` attribute will be found and loaded.
 Skills are enabled/disabled via config.yaml's `skills:` section.
 
 Usage:
@@ -10,28 +11,39 @@ Usage:
     result = registry.execute("save_memory", {"text": "..."})  # Run a tool call
 """
 
+import importlib
+import inspect
 import logging
+import pkgutil
+
 from skills.base import BaseSkill
-from skills.time_skill import TimeSkill
-from skills.memory import MemorySkill
-from skills.schedule import ScheduleSkill
-from skills.journal import JournalSkill
-from skills.lor import LoRSkill
-from skills.web_search import WebSearchSkill
-from skills.dev import DevSkill
 
 logger = logging.getLogger(__name__)
 
-# All available skill classes — add new skills here
-SKILL_CLASSES = [
-    TimeSkill,
-    MemorySkill,
-    ScheduleSkill,
-    JournalSkill,
-    LoRSkill,
-    WebSearchSkill,
-    DevSkill,
-]
+
+def _discover_skills() -> list[type[BaseSkill]]:
+    """Scan the skills package for all BaseSkill subclasses."""
+    import skills as skills_pkg
+
+    found = []
+    for finder, module_name, is_pkg in pkgutil.iter_modules(skills_pkg.__path__):
+        if module_name in ("base", "__init__"):
+            continue
+        try:
+            module = importlib.import_module(f"skills.{module_name}")
+        except Exception as e:
+            logger.error(f"Failed to import skills.{module_name}: {e}")
+            continue
+
+        for _, obj in inspect.getmembers(module, inspect.isclass):
+            if (
+                issubclass(obj, BaseSkill)
+                and obj is not BaseSkill
+                and getattr(obj, "name", "")
+            ):
+                found.append(obj)
+
+    return found
 
 
 class SkillRegistry:
@@ -43,8 +55,9 @@ class SkillRegistry:
         self._tool_map: dict[str, BaseSkill] = {}  # tool_name -> skill instance
 
         skills_config = config.get("skills", {})
+        discovered = _discover_skills()
 
-        for cls in SKILL_CLASSES:
+        for cls in discovered:
             skill_name = cls.name
             skill_conf = skills_config.get(skill_name, {})
 
