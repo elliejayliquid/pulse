@@ -299,8 +299,15 @@ class TelegramChannel(Channel):
                     await self._reply_with_retry(update.message, f"🔧 {tool_names}")
                 await self._reply_with_retry(update.message, reply)
 
-                # Send any pending media/sources from web search
+                # Send any pending structured output from skills
                 if self._engine and self._engine.skill_registry:
+                    # Tasks — show formatted task list
+                    tasks_skill = self._engine.skill_registry.get_skill("tasks")
+                    if tasks_skill and tasks_skill.pending_display:
+                        await self._reply_with_retry(update.message, tasks_skill.pending_display)
+                        tasks_skill.pending_display = None
+
+                    # Web search — show sources and images
                     web_skill = self._engine.skill_registry.get_skill("web_search")
                     if web_skill:
                         # Show sources so the user can verify
