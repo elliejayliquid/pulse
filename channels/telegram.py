@@ -289,6 +289,12 @@ class TelegramChannel(Channel):
             # Show typing indicator
             await update.effective_chat.send_action("typing")
 
+            # Clear any stale pending output from heartbeat tool calls
+            if self._engine and self._engine.skill_registry:
+                tasks_skill = self._engine.skill_registry.get_skill("tasks")
+                if tasks_skill:
+                    tasks_skill.pending_display = None
+
             # Get response from companion via the engine
             reply, tools_used = await self._engine.handle_message(user_message, source="telegram")
 
