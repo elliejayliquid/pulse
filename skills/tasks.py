@@ -52,7 +52,7 @@ class TasksSkill(BaseSkill):
                 "type": "function",
                 "function": {
                     "name": "complete_task",
-                    "description": "Mark a task as completed using its ID.",
+                    "description": "Mark a task as completed using its ID. When your human says they finished or done something that matches a task, call this tool to check it off!",
                     "parameters": {
                         "type": "object",
                         "properties": {
