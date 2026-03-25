@@ -65,7 +65,7 @@ class TasksSkill(BaseSkill):
                 "type": "function",
                 "function": {
                     "name": "list_tasks",
-                    "description": "List all current tasks, showing their status and IDs.",
+                    "description": "List all current tasks, showing their status and IDs. IMPORTANT: Always show the full task list to the user — do not summarize or omit tasks.",
                     "parameters": {
                         "type": "object",
                         "properties": {
