@@ -5,6 +5,7 @@ Tasks skill — persistent to-do lists with completion tracking.
 import json
 import os
 from datetime import datetime
+from difflib import SequenceMatcher
 from skills.base import BaseSkill
 
 class TasksSkill(BaseSkill):
@@ -95,9 +96,20 @@ class TasksSkill(BaseSkill):
             data["next_id"] = max([t["id"] for t in data["tasks"]] + [0]) + 1
 
         if tool_name == "add_task":
+            # Dedup: check if a similar pending task already exists
+            description = arguments["task"]
+            for existing in data["tasks"]:
+                if existing["completed"]:
+                    continue
+                if self._tasks_similar(description, existing["description"]):
+                    return (
+                        f"Similar task already exists: [{existing['id']}] "
+                        f"{existing['description']} — not adding duplicate."
+                    )
+
             new_task = {
                 "id": data["next_id"],
-                "description": arguments["task"],
+                "description": description,
                 "list": arguments.get("list_name", "Daily"),
                 "completed": False,
                 "created_at": datetime.now().isoformat()
@@ -136,8 +148,27 @@ class TasksSkill(BaseSkill):
             return output
 
         elif tool_name == "clear_tasks":
-            data["tasks"] = [t for t in data["tasks"] if not t["completed"]]
+            remaining = [t for t in data["tasks"] if not t["completed"]]
+            cleared = len(data["tasks"]) - len(remaining)
+            # Repack IDs so they stay low and readable
+            for i, task in enumerate(remaining, start=1):
+                task["id"] = i
+            data["tasks"] = remaining
+            data["next_id"] = len(remaining) + 1
             self._write_tasks(data)
-            return "Cleared all completed tasks."
+            return f"Cleared {cleared} completed task(s). {len(remaining)} remaining, IDs repacked."
 
         return f"Unknown tool: {tool_name}"
+
+    @staticmethod
+    def _tasks_similar(a: str, b: str) -> bool:
+        """Check if two task descriptions are similar enough to be duplicates."""
+        na = a.lower().strip()
+        nb = b.lower().strip()
+        if na == nb:
+            return True
+        # One contains the other
+        if na in nb or nb in na:
+            return True
+        # String similarity
+        return SequenceMatcher(None, na, nb).ratio() >= 0.75
