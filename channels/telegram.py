@@ -88,6 +88,8 @@ class TelegramChannel(Channel):
         self.app.add_handler(CommandHandler("quiet", self._cmd_quiet))
         self.app.add_handler(CommandHandler("remind", self._cmd_remind))
         self.app.add_handler(CommandHandler("ping", self._cmd_ping))
+        self.app.add_handler(CommandHandler("tasks", self._cmd_tasks))
+        self.app.add_handler(CommandHandler("tasks_clear", self._cmd_tasks_clear))
 
         # Message handler — all regular text messages
         self.app.add_handler(MessageHandler(
@@ -205,6 +207,7 @@ class TelegramChannel(Channel):
             "Just message me anytime. I'll also send you proactive check-ins!\n\n"
             "Commands:\n"
             "/status — see what I'm up to\n"
+            "/tasks — view your task list\n"
             "/remind <text> — set a quick reminder\n"
             "/quiet — toggle quiet mode"
         )
@@ -246,6 +249,58 @@ class TelegramChannel(Channel):
             f"  Conversation history: {history_len} messages\n"
             f"  LLM last known: {'ok' if llm_ok else 'down'}"
         )
+
+    async def _cmd_tasks(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /tasks — show task list directly, no LLM involved."""
+        if not self._engine or not self._engine.skill_registry:
+            await update.message.reply_text("Engine not connected yet.")
+            return
+
+        tasks_skill = self._engine.skill_registry.get_skill("tasks")
+        if not tasks_skill:
+            await update.message.reply_text("Tasks skill not loaded.")
+            return
+
+        data = tasks_skill._read_tasks()
+        tasks = data.get("tasks", [])
+        if not tasks:
+            await update.message.reply_text("No tasks yet!")
+            return
+
+        # Show all tasks — pending first, then completed
+        pending = [t for t in tasks if not t["completed"]]
+        completed = [t for t in tasks if t["completed"]]
+
+        lines = ["📋 Tasks:"]
+        for t in pending:
+            lines.append(f"  ☐ {t['id']}. {t['description']}")
+        for t in completed:
+            lines.append(f"  ✅ {t['id']}. {t['description']}")
+
+        await update.message.reply_text("\n".join(lines))
+
+    async def _cmd_tasks_clear(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /tasks_clear — remove all completed tasks."""
+        if not self._engine or not self._engine.skill_registry:
+            await update.message.reply_text("Engine not connected yet.")
+            return
+
+        tasks_skill = self._engine.skill_registry.get_skill("tasks")
+        if not tasks_skill:
+            await update.message.reply_text("Tasks skill not loaded.")
+            return
+
+        data = tasks_skill._read_tasks()
+        before = len(data.get("tasks", []))
+        data["tasks"] = [t for t in data["tasks"] if not t["completed"]]
+        after = len(data["tasks"])
+        tasks_skill._write_tasks(data)
+
+        cleared = before - after
+        if cleared:
+            await update.message.reply_text(f"Cleared {cleared} completed task{'s' if cleared != 1 else ''}.")
+        else:
+            await update.message.reply_text("Nothing to clear — no completed tasks.")
 
     async def _cmd_remind(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /remind <text> — quick reminder via scheduler."""
@@ -289,12 +344,6 @@ class TelegramChannel(Channel):
             # Show typing indicator
             await update.effective_chat.send_action("typing")
 
-            # Clear any stale pending output from heartbeat tool calls
-            if self._engine and self._engine.skill_registry:
-                tasks_skill = self._engine.skill_registry.get_skill("tasks")
-                if tasks_skill:
-                    tasks_skill.pending_display = None
-
             # Get response from companion via the engine
             reply, tools_used = await self._engine.handle_message(user_message, source="telegram")
 
@@ -307,12 +356,6 @@ class TelegramChannel(Channel):
 
                 # Send any pending structured output from skills
                 if self._engine and self._engine.skill_registry:
-                    # Tasks — show formatted task list
-                    tasks_skill = self._engine.skill_registry.get_skill("tasks")
-                    if tasks_skill and tasks_skill.pending_display:
-                        await self._reply_with_retry(update.message, tasks_skill.pending_display)
-                        tasks_skill.pending_display = None
-
                     # Web search — show sources and images
                     web_skill = self._engine.skill_registry.get_skill("web_search")
                     if web_skill:

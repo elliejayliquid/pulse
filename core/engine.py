@@ -402,7 +402,10 @@ class PulseEngine:
 
         # Free-think tick — companion decides what to do
         tools = self.skill_registry.get_all_tools() if self.skill_registry else []
-        messages = self.context.build_heartbeat_prompt(has_tools=bool(tools))
+        skill_summary = self.skill_registry.get_skill_summary() if self.skill_registry else []
+        messages = self.context.build_heartbeat_prompt(
+            has_tools=bool(tools), skill_summary=skill_summary
+        )
 
         if tools:
             # Tool-calling mode: companion can use tools, then gives JSON decision

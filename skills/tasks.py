@@ -14,7 +14,6 @@ class TasksSkill(BaseSkill):
         super().__init__(config)
         # Store tasks in the data directory to persist across reboots
         self.storage_path = os.path.join("data", "tasks.json")
-        self.pending_display = None  # Set by list_tasks for Telegram to show
         self._ensure_storage()
 
     def _ensure_storage(self):
@@ -127,15 +126,7 @@ class TasksSkill(BaseSkill):
                 tasks = [t for t in tasks if not t["completed"]]
 
             if not tasks:
-                self.pending_display = None
                 return "The task list is empty."
-
-            # Pretty version for Telegram display
-            display = "📋 Tasks:\n"
-            for t in tasks:
-                check = "✅" if t["completed"] else "☐"
-                display += f"  {check} {t['id']}. {t['description']}\n"
-            self.pending_display = display.strip()
 
             # Plain version for the LLM
             output = "Current Tasks:\n"

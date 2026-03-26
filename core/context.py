@@ -158,11 +158,26 @@ class ContextManager:
         if not log:
             return ""
 
+        recent = log[-10:]
         lines = ["## Recent Heartbeat Actions"]
-        for entry in log[-10:]:  # show last 10 in context
+        for entry in recent:
             tools_str = f" [tools: {', '.join(entry['tools'])}]" if entry.get("tools") else ""
             summary = f" — {entry['summary']}" if entry.get("summary") else ""
             lines.append(f"- {entry['time']}: {entry['action']}{tools_str}{summary}")
+
+        # Tool usage summary — flag repetition so the companion self-regulates
+        from collections import Counter
+        tool_counts = Counter()
+        for entry in recent:
+            for t in entry.get("tools", []):
+                tool_counts[t] += 1
+        if tool_counts:
+            lines.append("")
+            lines.append("Tool frequency (last 10 ticks):")
+            for tool, count in tool_counts.most_common():
+                flag = " ⚠️ repetitive — try something else" if count >= 5 else ""
+                lines.append(f"  {tool}: {count}x{flag}")
+
         return "\n".join(lines)
 
     def _load_persona(self) -> dict:
@@ -371,11 +386,13 @@ class ContextManager:
             return False
 
     def build_heartbeat_prompt(self, due_tasks: list[dict] = None,
-                               has_tools: bool = False) -> list[dict]:
+                               has_tools: bool = False,
+                               skill_summary: list[dict] = None) -> list[dict]:
         """Build a context-budgeted prompt for a heartbeat tick.
 
-        Heartbeat ticks don't include conversation history (the companion is
-        thinking on its own, not replying to anyone).
+        Includes a small snippet of recent conversation (last 4 messages) so
+        the companion knows the current vibe, but this is a free-think tick —
+        not a reply to the user.
 
         Args:
             due_tasks: Tasks that are due right now (if any).
@@ -419,10 +436,31 @@ class ContextManager:
             self.budget.get("memories", 3000)  # shares memories budget for now
         )
 
+        # Recent conversation snippet — so the companion knows the current vibe
+        recent_convo = self._load_conversation()
+        convo_block = ""
+        if recent_convo:
+            # Last 4 messages, trimmed — context only, not for replying
+            tail = recent_convo[-4:]
+            convo_lines = ["## Recent Conversation",
+                           "(Your last few messages — for context only, not to reply to.)"]
+            for msg in tail:
+                role = "Human" if msg.get("role") == "user" else "You"
+                text = msg.get("content", "")
+                if isinstance(text, list):  # multimodal messages
+                    text = " ".join(p.get("text", "") for p in text if p.get("type") == "text")
+                # Truncate long messages
+                if len(text) > 150:
+                    text = text[:150] + "…"
+                convo_lines.append(f"- {role}: {text}")
+            convo_block = "\n".join(convo_lines)
+
         # Assemble the user message with all context
         context_parts = [time_block]
         if journal_block:
             context_parts.append(journal_block)
+        if convo_block:
+            context_parts.append(convo_block)
         if memories_block:
             context_parts.append(memories_block)
         if schedules_block:
@@ -445,10 +483,23 @@ class ContextManager:
         )
 
         if has_tools:
+            # Build a grouped skill/tool menu
+            skill_menu = ""
+            if skill_summary:
+                menu_lines = ["## Available Skills & Tools"]
+                for s in skill_summary:
+                    tools_str = ", ".join(s["tools"])
+                    menu_lines.append(f"  {s['skill']}: {tools_str}")
+                skill_menu = "\n".join(menu_lines) + "\n\n"
+
             your_turn += (
-                "\nYou have tools available. Use them to take real actions — "
-                "read or write your journal, search your memories, set reminders. "
-                "Use tools first if they'd help, then give your final response.\n"
+                f"\n{skill_menu}"
+                "You have all these skills available — explore them! "
+                "Don't just reach for the same one every time.\n"
+                "\n**Variety matters.** Check the tool frequency in your Recent Heartbeat Actions. "
+                "If any tool is marked ⚠️ repetitive, do NOT use it this tick. "
+                "Do something different — write a journal entry, reflect on a memory, "
+                "or simply stay silent. Mix it up. Be interesting, not repetitive.\n"
             )
 
         your_turn += "\nRespond in JSON format as specified in your instructions."

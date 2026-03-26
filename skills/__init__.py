@@ -95,6 +95,21 @@ class SkillRegistry:
             tools.extend(skill.get_tools())
         return tools
 
+    def get_skill_summary(self) -> list[dict]:
+        """Return a compact summary of skills and their tool names.
+
+        Used in heartbeat prompts so the companion knows what's available
+        without seeing full schemas in the prompt text.
+        """
+        summary = []
+        for name, skill in self.skills.items():
+            tool_names = [
+                t.get("function", {}).get("name", "?")
+                for t in skill.get_tools()
+            ]
+            summary.append({"skill": name, "tools": tool_names})
+        return summary
+
     def execute(self, tool_name: str, arguments: dict) -> str:
         """Execute a tool call by routing to the appropriate skill.
 
