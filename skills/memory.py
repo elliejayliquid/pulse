@@ -175,6 +175,8 @@ class MemorySkill(BaseSkill):
             "tags": [t.strip() for t in tags.split(",") if t.strip()] if tags else [],
             "type": "fact",
             "importance": 5,
+            "retrieval_count": 0,
+            "last_accessed": None,
             "date": datetime.now().isoformat(),
             "embedding": embedding,
         }
@@ -183,6 +185,7 @@ class MemorySkill(BaseSkill):
         try:
             with open(mem_file, "w", encoding="utf-8") as f:
                 json.dump(memory, f, indent=2)
+            self._rebuild_aggregate()
             logger.info(f"Memory saved: {mem_file.name} — {text[:50]}...")
             return f"Remembered (ID: {mem_id}): '{text}'"
         except IOError as e:
@@ -219,8 +222,9 @@ class MemorySkill(BaseSkill):
         return memories
 
     def _semantic_search(self, query: str, memories: list[dict], model) -> str:
-        """Vector similarity search — mirrors MCP server's search_memory()."""
+        """Vector similarity search with boosting — mirrors MCP server's search_memory()."""
         query_vec = model.encode(query)
+        query_lower = query.lower()
 
         scored = []
         for mem in memories:
@@ -233,15 +237,27 @@ class MemorySkill(BaseSkill):
             norm_m = np.linalg.norm(mem_vec)
             if norm_q == 0 or norm_m == 0:
                 continue
-            score = float(np.dot(query_vec, mem_vec) / (norm_q * norm_m))
-            scored.append((score, mem))
+            base_score = float(np.dot(query_vec, mem_vec) / (norm_q * norm_m))
+
+            # Boosting (aligned with MCP server)
+            boost = 0.0
+            retrieval_count = mem.get("retrieval_count", 0)
+            boost += min(retrieval_count * 0.01, 0.05)  # frequently accessed
+            boost += mem.get("importance", 5) * 0.002     # importance
+            # Tag match
+            tags_lower = " ".join(mem.get("tags", [])).lower()
+            if any(kw in tags_lower for kw in query_lower.split()):
+                boost += 0.03
+
+            scored.append((base_score + boost, base_score, mem))
 
         scored.sort(key=lambda x: x[0], reverse=True)
 
         results = []
-        for score, mem in scored[:3]:
-            if score > 0.25:
-                results.append(f"[{mem['date'][:10]}] {mem['text']} (relevance: {int(score * 100)}%)")
+        for final_score, base_score, mem in scored[:3]:
+            if base_score > 0.25:
+                self._update_retrieval(mem)
+                results.append(f"[{mem['date'][:10]}] {mem['text']} (relevance: {int(final_score * 100)}%)")
 
         if not results:
             return "No relevant memories found."
@@ -295,6 +311,31 @@ class MemorySkill(BaseSkill):
 
         header = f"Page {page}/{total_pages} ({len(memories)} memories total, oldest first):"
         return header + "\n" + "\n".join(results)
+
+    def _update_retrieval(self, mem: dict):
+        """Bump retrieval_count and last_accessed, persist to disk."""
+        mem["retrieval_count"] = mem.get("retrieval_count", 0) + 1
+        mem["last_accessed"] = datetime.now().isoformat()
+        mem_file = self.memory_dir / f"memory_{mem['id']}.json"
+        try:
+            with open(mem_file, "w", encoding="utf-8") as f:
+                json.dump(mem, f, indent=2)
+        except IOError as e:
+            logger.warning(f"Failed to update retrieval stats: {e}")
+
+    def _rebuild_aggregate(self):
+        """Rebuild memories.json aggregate index (no embeddings, for quick browse)."""
+        memories = self._load_all_memories()
+        aggregate = []
+        for mem in sorted(memories, key=lambda m: m.get("date", "")):
+            entry = {k: v for k, v in mem.items() if k != "embedding"}
+            aggregate.append(entry)
+        agg_file = self.memory_dir / "memories.json"
+        try:
+            with open(agg_file, "w", encoding="utf-8") as f:
+                json.dump(aggregate, f, indent=2)
+        except IOError as e:
+            logger.warning(f"Failed to rebuild aggregate: {e}")
 
     def _keyword_search(self, query: str, memories: list[dict]) -> str:
         """Simple keyword fallback when embeddings aren't available."""

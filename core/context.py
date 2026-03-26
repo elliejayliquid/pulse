@@ -371,6 +371,8 @@ class ContextManager:
             "tags": [t.strip() for t in tags.split(",")],
             "type": "session_log",
             "importance": 10,
+            "retrieval_count": 0,
+            "last_accessed": None,
             "date": datetime.now().isoformat(),
             "embedding": embedding,
         }
