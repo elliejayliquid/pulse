@@ -11,7 +11,7 @@ Pulse gives your AI companion a life of its own. It runs in the background, lett
 - **Heartbeat loop** — Your companion gets periodic "free-think" ticks where it can decide to reach out, stay quiet, journal, or schedule follow-ups
 - **Telegram chat** — Bidirectional messaging with tool use (your companion can save memories, set reminders, search its journal mid-conversation)
 - **Persistent memory** — Semantic search over stored facts and conversation summaries, carried across sessions
-- **Journal** — Pinned identity entries (who am I, who is my human, what's our relationship) plus transient reflections
+- **Journal** — Pinned identity entries (who am I, who is my human, what's our relationship) plus transient reflections as clean markdown with YAML frontmatter
 - **Self-scheduling** — The companion can set its own reminders and recurring tasks ("daily 8:00"), with priority levels (urgent/routine/creative)
 - **Cloud or local** — Use a local GGUF model via llama.cpp, or any OpenAI-compatible API (OpenRouter, OpenAI, etc.)
 - **Token tracking** — Daily usage logging when using cloud APIs (data/usage.json)
@@ -36,7 +36,7 @@ channels/
   toast.py                # Windows desktop notifications
 skills/                   # Auto-discovered — just drop a .py file here
   memory.py               # Save, search, list, browse memories
-  journal.py              # Pinned identity + transient reflections
+  journal.py              # Markdown journal + pinned identity
   schedule.py             # Set/update/delete reminders (one-time + recurring)
   tasks.py                # Persistent to-do lists
   time_skill.py           # Current date/time awareness
@@ -45,6 +45,9 @@ skills/                   # Auto-discovered — just drop a .py file here
   dev.py                  # Autonomous skill creation (dev ticks)
 persona.json              # Your companion's identity and personality
 config.yaml               # All configuration
+scripts/
+  migrate_journal_phase2.py # Migrate journal from JSON to markdown format
+  backfill_embeddings.py    # Regenerate memory/journal embeddings
 ```
 
 Pulse talks to any OpenAI-compatible API. Locally, it manages [llama.cpp](https://github.com/ggml-org/llama.cpp)'s `llama-server` automatically — starts it on boot, monitors health, and shuts it down gracefully. Or point it at a cloud provider and skip the local server entirely.
@@ -163,7 +166,7 @@ Built-in skills:
 | Skill | Tools | Description |
 |-------|-------|-------------|
 | memory | `save_memory`, `search_memory`, `list_memories`, `list_all_memories` | Persistent fact storage with semantic search |
-| journal | `write_journal`, `read_journal`, `update_journal` | Self-reflection and identity |
+| journal | `write_journal`, `read_journal`, `update_journal` | Markdown entries + pinned identity (search via companion memories) |
 | schedule | `set_reminder`, `update_reminder`, `delete_reminder`, `list_reminders` | One-time ("in 2 hours") and recurring ("daily 8:00") with priority levels |
 | tasks | `add_task`, `complete_task`, `list_tasks`, `clear_tasks` | Persistent to-do lists |
 | time | `get_current_time` | Temporal awareness |

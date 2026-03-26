@@ -135,8 +135,9 @@ class ContextManager:
                     resolved_tag = " [RESOLVED]"
                 elif entry.get("resolved") is False:
                     resolved_tag = " [OPEN]"
+                date_str = entry.get("date", entry.get("created_at", ""))[:10]
                 lines.append(
-                    f"- [{entry.get('created_at', '')[:10]}] "
+                    f"- [{date_str}] "
                     f"({entry.get('entry_type', '?')}{resolved_tag}) "
                     f"{entry.get('content', '')[:120]}"
                 )

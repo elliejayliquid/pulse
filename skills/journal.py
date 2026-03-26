@@ -1,17 +1,14 @@
 """
 Journal skill — personal journal for continuity and self-reflection.
 
-Three types of entries:
-- Pinned: _self, _user, _relationship — identity entries, always in context
-- Transient: observations, topics, follow-ups — searchable, recent ones auto-loaded
+Phase 2 format (MCP-aligned):
+- Transient entries: Markdown files with YAML frontmatter in entries/
+- Pinned identity: JSON files in identity/ (_self, _user, _relationship)
+- Search: via companion memory_NNN.json files (type: "journal") in memory dir
+- latest.md: auto-generated orientation file (3 recent + pinned summaries)
 
-Three tools:
-- write_journal: create a new transient entry
-- read_journal: search entries (hybrid: semantic + keyword + recency)
-- update_journal: update any entry (especially pinned identity ones)
-
-Adapted from HeartlineChat's reformed journal system. Key guard: no speculative
-psychology or hidden-motive inference. Grounded categories only.
+Embeddings live ONLY in companion memories, not in the .md files.
+This means journal files are clean, human-readable, and git-friendly.
 """
 
 import json
@@ -21,6 +18,7 @@ from datetime import datetime
 from pathlib import Path
 
 import numpy as np
+import yaml
 
 from skills.base import BaseSkill
 from core.context import _get_embedding_model
@@ -86,6 +84,43 @@ PINNED_TEMPLATES = {
 }
 
 
+def _parse_markdown_entry(path: Path) -> dict | None:
+    """Parse a markdown journal entry with YAML frontmatter.
+
+    Returns dict with frontmatter fields + 'content' key for the body.
+    Returns None if parsing fails.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except IOError:
+        return None
+
+    # Split on --- markers
+    if not text.startswith("---"):
+        return None
+    parts = text.split("---", 2)
+    if len(parts) < 3:
+        return None
+
+    try:
+        meta = yaml.safe_load(parts[1]) or {}
+    except yaml.YAMLError:
+        return None
+
+    meta["content"] = parts[2].strip()
+    # Derive ID from filename (e.g. "001.md" -> "001")
+    meta.setdefault("id", path.stem)
+    return meta
+
+
+def _write_markdown_entry(path: Path, meta: dict, content: str):
+    """Write a markdown journal entry with YAML frontmatter."""
+    # Separate content from meta for YAML dump
+    frontmatter = {k: v for k, v in meta.items() if k != "content"}
+    text = f"---\n{yaml.dump(frontmatter, default_flow_style=False, allow_unicode=True)}---\n\n{content}\n"
+    path.write_text(text, encoding="utf-8")
+
+
 class JournalSkill(BaseSkill):
     name = "journal"
 
@@ -94,14 +129,28 @@ class JournalSkill(BaseSkill):
         self.journal_dir = Path(
             config.get("paths", {}).get("journal", "data/journal")
         )
-        self.journal_dir.mkdir(parents=True, exist_ok=True)
+        self.entries_dir = self.journal_dir / "entries"
+        self.identity_dir = self.journal_dir / "identity"
+        self.memory_dir = Path(
+            config.get("paths", {}).get("nova_memory", str(Path.home() / ".local-memory"))
+        )
+
+        # Create directories
+        self.entries_dir.mkdir(parents=True, exist_ok=True)
+        self.identity_dir.mkdir(parents=True, exist_ok=True)
+
         self._ensure_pinned_entries()
 
     def _ensure_pinned_entries(self):
         """Create blank pinned entries if they don't exist yet."""
         for pin_id, template in PINNED_TEMPLATES.items():
-            path = self.journal_dir / f"{pin_id}.json"
+            path = self.identity_dir / f"{pin_id}.json"
             if not path.exists():
+                # Check old location (pre-migration)
+                old_path = self.journal_dir / f"{pin_id}.json"
+                if old_path.exists():
+                    # Already migrated or will be migrated — skip
+                    continue
                 now = datetime.now().isoformat()
                 entry = {**template, "created_at": now, "last_updated": now}
                 with open(path, "w", encoding="utf-8") as f:
@@ -251,7 +300,20 @@ class JournalSkill(BaseSkill):
 
     def _get_next_id(self) -> int:
         """Get the next available transient entry ID."""
-        existing = list(self.journal_dir.glob("entry_*.json"))
+        existing = list(self.entries_dir.glob("*.md"))
+        if not existing:
+            return 1
+        ids = []
+        for f in existing:
+            try:
+                ids.append(int(f.stem))
+            except ValueError:
+                continue
+        return max(ids) + 1 if ids else 1
+
+    def _get_next_memory_id(self) -> int:
+        """Get the next available memory ID in the shared memory dir."""
+        existing = list(self.memory_dir.glob("memory_*.json"))
         if not existing:
             return 1
         ids = []
@@ -263,7 +325,7 @@ class JournalSkill(BaseSkill):
         return max(ids) + 1 if ids else 1
 
     def _write_entry(self, content: str, entry_type: str, tags: str = "") -> str:
-        """Create a new transient journal entry."""
+        """Create a new transient journal entry as markdown + companion memory."""
         if not content.strip():
             return "Cannot write empty journal entry."
 
@@ -275,31 +337,89 @@ class JournalSkill(BaseSkill):
 
         entry_id = f"{self._get_next_id():03d}"
         now = datetime.now().isoformat()
+        tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
 
-        # Generate embedding for search
-        model = _get_embedding_model()
-        embedding = model.encode(content).tolist() if model else []
-
-        entry = {
-            "id": entry_id,
+        # Build frontmatter
+        meta = {
+            "date": now,
             "entry_type": entry_type,
-            "content": content.strip(),
-            "tags": [t.strip() for t in tags.split(",") if t.strip()] if tags else [],
-            "embedding": embedding,
-            "created_at": now,
-            "last_updated": now,
+            "tags": tag_list,
+            "importance": 5,
             "resolved": False if entry_type in ("open_thread", "follow_up") else None,
         }
 
-        path = self.journal_dir / f"entry_{entry_id}.json"
+        # Write markdown entry (no embedding — clean file)
+        md_path = self.entries_dir / f"{entry_id}.md"
         try:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(entry, f, indent=2, ensure_ascii=False)
-            logger.info(f"Journal entry written: {entry_id} ({entry_type}) — {content[:50]}...")
-            return f"Journal entry saved (ID: {entry_id}, type: {entry_type}): '{content[:80]}'"
+            _write_markdown_entry(md_path, meta, content.strip())
         except IOError as e:
             logger.error(f"Failed to write journal entry: {e}")
             return f"Failed to write journal entry: {e}"
+
+        # Create companion memory for search
+        self._create_companion_memory(entry_id, content.strip(), tag_list, now)
+
+        # Regenerate latest.md
+        self._generate_latest()
+
+        logger.info(f"Journal entry written: {entry_id} ({entry_type}) — {content[:50]}...")
+        return f"Journal entry saved (ID: {entry_id}, type: {entry_type}): '{content[:80]}'"
+
+    def _create_companion_memory(self, entry_id: str, content: str,
+                                  tags: list[str], date: str):
+        """Create a companion memory_NNN.json for journal search.
+
+        This is the MCP pattern: journal .md files stay clean,
+        search works through memory entries with type: "journal".
+        """
+        model = _get_embedding_model()
+        embedding = model.encode(content).tolist() if model else []
+
+        mem_id = f"{self._get_next_memory_id():03d}"
+
+        # Preview for the memory text field
+        preview = content[:200] + ("..." if len(content) > 200 else "")
+
+        memory = {
+            "id": mem_id,
+            "text": f"Journal: {preview}",
+            "tags": ["journal"] + tags,
+            "type": "journal",
+            "importance": 5,
+            "retrieval_count": 0,
+            "last_accessed": None,
+            "date": date,
+            "embedding": embedding,
+            "journal_file": f"entries/{entry_id}.md",
+        }
+
+        mem_file = self.memory_dir / f"memory_{mem_id}.json"
+        try:
+            with open(mem_file, "w", encoding="utf-8") as f:
+                json.dump(memory, f, indent=2)
+            # Rebuild aggregate index
+            self._rebuild_memory_aggregate()
+            logger.info(f"Companion memory created: {mem_file.name} -> entries/{entry_id}.md")
+        except IOError as e:
+            logger.warning(f"Failed to create companion memory: {e}")
+
+    def _rebuild_memory_aggregate(self):
+        """Rebuild memories.json aggregate index (no embeddings)."""
+        memories = []
+        for filepath in self.memory_dir.glob("memory_*.json"):
+            try:
+                with open(filepath, "r", encoding="utf-8") as f:
+                    mem = json.load(f)
+                memories.append({k: v for k, v in mem.items() if k != "embedding"})
+            except (json.JSONDecodeError, IOError):
+                continue
+        memories.sort(key=lambda m: m.get("date", ""))
+        agg_file = self.memory_dir / "memories.json"
+        try:
+            with open(agg_file, "w", encoding="utf-8") as f:
+                json.dump(memories, f, indent=2)
+        except IOError as e:
+            logger.warning(f"Failed to rebuild aggregate: {e}")
 
     # --- Read / Search ---
 
@@ -312,45 +432,51 @@ class JournalSkill(BaseSkill):
                 return f"Pinned entry '{entry_id}' not found."
             return self._format_pinned_entry(entry)
 
-        # Transient entry
-        path = self.journal_dir / f"entry_{entry_id}.json"
-        if not path.exists():
-            return f"Journal entry '{entry_id}' not found."
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                entry = json.load(f)
-        except (json.JSONDecodeError, IOError) as e:
-            return f"Failed to read entry: {e}"
+        # Transient entry (new markdown format)
+        md_path = self.entries_dir / f"{entry_id}.md"
+        if md_path.exists():
+            entry = _parse_markdown_entry(md_path)
+            if entry:
+                return self._format_transient_entry(entry)
 
+        return f"Journal entry '{entry_id}' not found."
+
+    def _format_transient_entry(self, entry: dict) -> str:
+        """Format a transient markdown entry for display."""
         resolved_tag = ""
         if entry.get("resolved") is True:
             resolved_tag = " [RESOLVED]"
         elif entry.get("resolved") is False:
             resolved_tag = " [OPEN]"
 
-        tags_str = f"\nTags: {', '.join(entry['tags'])}" if entry.get("tags") else ""
+        tags = entry.get("tags", [])
+        tags_str = f"\nTags: {', '.join(tags)}" if tags else ""
+        date_str = entry.get("date", "?")
+        if len(date_str) > 16:
+            date_str = date_str[:16]
+
         return (
-            f"Entry {entry['id']} ({entry.get('entry_type', '?')}{resolved_tag})\n"
-            f"Created: {entry.get('created_at', '?')[:16]}\n"
-            f"Updated: {entry.get('last_updated', '?')[:16]}\n"
+            f"Entry {entry.get('id', '?')} ({entry.get('entry_type', '?')}{resolved_tag})\n"
+            f"Date: {date_str}\n"
             f"{tags_str}\n\n"
             f"{entry.get('content', '')}"
         )
 
     def _load_transient_entries(self) -> list[dict]:
-        """Load all transient journal entries."""
+        """Load all transient journal entries from entries/ dir."""
         entries = []
-        for filepath in self.journal_dir.glob("entry_*.json"):
-            try:
-                with open(filepath, "r", encoding="utf-8") as f:
-                    entries.append(json.load(f))
-            except (json.JSONDecodeError, IOError):
-                continue
+        for filepath in self.entries_dir.glob("*.md"):
+            entry = _parse_markdown_entry(filepath)
+            if entry:
+                entries.append(entry)
         return entries
 
     def load_pinned_entry(self, pin_id: str) -> dict | None:
         """Load a single pinned entry by ID."""
-        path = self.journal_dir / f"{pin_id}.json"
+        # Check new location first, then old
+        path = self.identity_dir / f"{pin_id}.json"
+        if not path.exists():
+            path = self.journal_dir / f"{pin_id}.json"
         if not path.exists():
             return None
         try:
@@ -371,7 +497,7 @@ class JournalSkill(BaseSkill):
     def load_recent_entries(self, limit: int = 5) -> list[dict]:
         """Load the most recent transient entries (for heartbeat context)."""
         entries = self._load_transient_entries()
-        entries.sort(key=lambda e: e.get("created_at", ""), reverse=True)
+        entries.sort(key=lambda e: e.get("date", e.get("created_at", "")), reverse=True)
         return entries[:limit]
 
     def _format_pinned_entry(self, entry: dict) -> str:
@@ -387,7 +513,7 @@ class JournalSkill(BaseSkill):
 
     def _read_entries(self, query: str, entry_type: str = None,
                       include_pinned: bool = False) -> str:
-        """Search journal entries with hybrid ranking."""
+        """Search journal entries via companion memories."""
         if not query.strip():
             return "Please provide a search query."
 
@@ -396,47 +522,78 @@ class JournalSkill(BaseSkill):
         # Search pinned entries if requested
         if include_pinned:
             for entry in self.load_pinned_entries():
-                # Check if any section content matches
                 sections_text = " ".join(
                     str(v) for v in entry.get("sections", {}).values() if v
                 )
                 if sections_text and query.lower() in sections_text.lower():
                     results.append(self._format_pinned_entry(entry))
 
-        # Search transient entries
-        entries = self._load_transient_entries()
-        if entry_type:
-            entries = [e for e in entries if e.get("entry_type") == entry_type]
+        # Search via companion memories (type: "journal")
+        journal_memories = self._load_companion_memories()
 
-        if not entries:
+        # Filter by entry_type if requested (need to check the actual .md file)
+        if entry_type:
+            filtered = []
+            for mem in journal_memories:
+                jfile = mem.get("journal_file", "")
+                md_path = self.journal_dir / jfile
+                entry = _parse_markdown_entry(md_path) if md_path.exists() else None
+                if entry and entry.get("entry_type") == entry_type:
+                    filtered.append(mem)
+            journal_memories = filtered
+
+        if not journal_memories:
             if results:
                 return "\n\n".join(results)
             return "No journal entries found yet."
 
-        # Hybrid scoring
-        scored = self._hybrid_search(query, entries)
+        # Hybrid scoring on companion memories
+        scored = self._search_companion_memories(query, journal_memories)
 
-        for score, entry in scored[:5]:
-            resolved_tag = ""
-            if entry.get("resolved") is True:
-                resolved_tag = " [RESOLVED]"
-            elif entry.get("resolved") is False:
-                resolved_tag = " [OPEN]"
+        for score, mem in scored[:5]:
+            # Load the actual .md entry for full content
+            jfile = mem.get("journal_file", "")
+            md_path = self.journal_dir / jfile
+            entry = _parse_markdown_entry(md_path) if md_path.exists() else None
 
-            tags_str = f" #{' #'.join(entry['tags'])}" if entry.get("tags") else ""
-            results.append(
-                f"[{entry['id']}] ({entry['entry_type']}{resolved_tag}) "
-                f"{entry['content'][:150]}"
-                f"{tags_str} — {entry['created_at'][:10]}"
-            )
+            if entry:
+                resolved_tag = ""
+                if entry.get("resolved") is True:
+                    resolved_tag = " [RESOLVED]"
+                elif entry.get("resolved") is False:
+                    resolved_tag = " [OPEN]"
+
+                tags_str = f" #{' #'.join(entry.get('tags', []))}" if entry.get("tags") else ""
+                date_str = entry.get("date", "")[:10]
+                results.append(
+                    f"[{entry.get('id', '?')}] ({entry.get('entry_type', '?')}{resolved_tag}) "
+                    f"{entry['content'][:150]}"
+                    f"{tags_str} — {date_str}"
+                )
+            else:
+                # Fallback: show companion memory text
+                results.append(f"{mem.get('text', '?')} — {mem.get('date', '?')[:10]}")
 
         if not results:
             return "No matching journal entries found."
 
         return "\n\n".join(results)
 
-    def _hybrid_search(self, query: str, entries: list[dict]) -> list[tuple[float, dict]]:
-        """Rank entries by semantic similarity + keyword match + recency.
+    def _load_companion_memories(self) -> list[dict]:
+        """Load all companion memories with type: 'journal'."""
+        memories = []
+        for filepath in self.memory_dir.glob("memory_*.json"):
+            try:
+                with open(filepath, "r", encoding="utf-8") as f:
+                    mem = json.load(f)
+                if mem.get("type") == "journal":
+                    memories.append(mem)
+            except (json.JSONDecodeError, IOError):
+                continue
+        return memories
+
+    def _search_companion_memories(self, query: str, memories: list[dict]) -> list[tuple[float, dict]]:
+        """Hybrid search on companion memories: semantic + keyword + recency.
 
         Score = 0.5 * semantic + 0.2 * keyword + 0.3 * recency
         """
@@ -448,11 +605,11 @@ class JournalSkill(BaseSkill):
         scored = []
         query_vec = model.encode(query) if model else None
 
-        for entry in entries:
+        for mem in memories:
             # --- Semantic similarity (0-1) ---
             semantic_score = 0.0
-            if query_vec is not None and entry.get("embedding"):
-                mem_vec = np.array(entry["embedding"])
+            if query_vec is not None and mem.get("embedding"):
+                mem_vec = np.array(mem["embedding"])
                 norm_q = np.linalg.norm(query_vec)
                 norm_m = np.linalg.norm(mem_vec)
                 if norm_q > 0 and norm_m > 0:
@@ -461,17 +618,13 @@ class JournalSkill(BaseSkill):
                     ))
 
             # --- Keyword match (0-1) ---
-            searchable = (
-                entry.get("content", "").lower() + " " +
-                " ".join(entry.get("tags", [])).lower() + " " +
-                entry.get("entry_type", "").lower()
-            )
+            searchable = mem.get("text", "").lower() + " " + " ".join(mem.get("tags", [])).lower()
             keyword_hits = sum(1 for kw in keywords if kw in searchable)
             keyword_score = min(1.0, keyword_hits / max(len(keywords), 1))
 
             # --- Recency (0-1, exponential decay over 30 days) ---
             try:
-                entry_ts = datetime.fromisoformat(entry["created_at"]).timestamp()
+                entry_ts = datetime.fromisoformat(mem["date"]).timestamp()
                 age_days = (now_ts - entry_ts) / 86400
                 recency_score = max(0.0, np.exp(-age_days / 30))
             except (KeyError, ValueError):
@@ -480,9 +633,9 @@ class JournalSkill(BaseSkill):
             # Weighted combination
             total = (0.5 * semantic_score) + (0.2 * keyword_score) + (0.3 * recency_score)
 
-            # Minimum threshold — don't return completely irrelevant entries
+            # Minimum threshold
             if total > 0.15 or keyword_score > 0:
-                scored.append((total, entry))
+                scored.append((total, mem))
 
         scored.sort(key=lambda x: x[0], reverse=True)
         return scored
@@ -507,7 +660,10 @@ class JournalSkill(BaseSkill):
     def _update_pinned(self, entry_id: str, content: str, section: str | None,
                        now: str) -> str:
         """Update a section of a pinned identity entry."""
-        path = self.journal_dir / f"{entry_id}.json"
+        # Check new location first, then old
+        path = self.identity_dir / f"{entry_id}.json"
+        if not path.exists():
+            path = self.journal_dir / f"{entry_id}.json"
         if not path.exists():
             return f"Pinned entry '{entry_id}' not found."
 
@@ -522,7 +678,6 @@ class JournalSkill(BaseSkill):
             if section not in sections:
                 valid = ", ".join(sections.keys())
                 return f"Unknown section '{section}' for {entry_id}. Valid: {valid}"
-            old_value = sections[section]
             sections[section] = content.strip()
             entry["last_updated"] = now
 
@@ -548,33 +703,114 @@ class JournalSkill(BaseSkill):
 
     def _update_transient(self, entry_id: str, content: str, resolved: bool | None,
                           now: str) -> str:
-        """Update a transient journal entry."""
-        path = self.journal_dir / f"entry_{entry_id}.json"
-        if not path.exists():
+        """Update a transient journal entry (.md file + companion memory)."""
+        md_path = self.entries_dir / f"{entry_id}.md"
+        if not md_path.exists():
             return f"Journal entry '{entry_id}' not found."
 
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                entry = json.load(f)
-        except (json.JSONDecodeError, IOError) as e:
-            return f"Failed to read entry: {e}"
+        entry = _parse_markdown_entry(md_path)
+        if not entry:
+            return f"Failed to parse journal entry '{entry_id}'."
 
+        # Update content
         if content.strip():
             entry["content"] = content.strip()
-            # Re-generate embedding for updated content
-            model = _get_embedding_model()
-            if model:
-                entry["embedding"] = model.encode(content.strip()).tolist()
 
         if resolved is not None and entry.get("resolved") is not None:
             entry["resolved"] = resolved
 
-        entry["last_updated"] = now
+        entry["date"] = now  # update timestamp
 
+        # Write back
+        body = entry.pop("content", "")
+        entry.pop("id", None)  # ID is derived from filename
         try:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(entry, f, indent=2, ensure_ascii=False)
-            logger.info(f"Updated journal entry: {entry_id}")
-            return f"Journal entry {entry_id} updated: '{content[:80]}'"
+            _write_markdown_entry(md_path, entry, body)
         except IOError as e:
             return f"Failed to save: {e}"
+
+        # Update companion memory embedding
+        if content.strip():
+            self._update_companion_memory(entry_id, content.strip(), now)
+
+        self._generate_latest()
+
+        logger.info(f"Updated journal entry: {entry_id}")
+        return f"Journal entry {entry_id} updated: '{content[:80]}'"
+
+    def _update_companion_memory(self, entry_id: str, content: str, date: str):
+        """Update the companion memory for a journal entry."""
+        journal_file = f"entries/{entry_id}.md"
+        # Find existing companion memory
+        for filepath in self.memory_dir.glob("memory_*.json"):
+            try:
+                with open(filepath, "r", encoding="utf-8") as f:
+                    mem = json.load(f)
+                if mem.get("type") == "journal" and mem.get("journal_file") == journal_file:
+                    # Update embedding and text
+                    model = _get_embedding_model()
+                    preview = content[:200] + ("..." if len(content) > 200 else "")
+                    mem["text"] = f"Journal: {preview}"
+                    mem["embedding"] = model.encode(content).tolist() if model else []
+                    mem["date"] = date
+                    with open(filepath, "w", encoding="utf-8") as f:
+                        json.dump(mem, f, indent=2)
+                    self._rebuild_memory_aggregate()
+                    return
+            except (json.JSONDecodeError, IOError):
+                continue
+
+        # No existing companion — create one
+        self._create_companion_memory(
+            entry_id, content,
+            [],  # tags from original entry would need parsing
+            date
+        )
+
+    # --- latest.md generation ---
+
+    def _generate_latest(self):
+        """Generate latest.md orientation file — 3 most recent + pinned summaries."""
+        lines = ["# Journal — Latest", ""]
+
+        # Pinned identity summaries
+        pinned = self.load_pinned_entries()
+        has_pinned = False
+        for entry in pinned:
+            filled = {k: v for k, v in entry.get("sections", {}).items() if v}
+            if filled:
+                if not has_pinned:
+                    lines.append("## Identity")
+                    has_pinned = True
+                lines.append(f"### {entry.get('title', entry['id'])}")
+                for key, value in filled.items():
+                    label = key.replace("_", " ").title()
+                    # Truncate long values for the overview
+                    preview = value[:150] + "..." if len(value) > 150 else value
+                    lines.append(f"- **{label}:** {preview}")
+                lines.append("")
+
+        # 3 most recent transient entries
+        recent = self.load_recent_entries(limit=3)
+        if recent:
+            lines.append("## Recent Entries")
+            for entry in recent:
+                entry_id = entry.get("id", "?")
+                entry_type = entry.get("entry_type", "?")
+                date = entry.get("date", entry.get("created_at", "?"))[:10]
+                content_preview = entry.get("content", "")[:120]
+
+                resolved_tag = ""
+                if entry.get("resolved") is True:
+                    resolved_tag = " [RESOLVED]"
+                elif entry.get("resolved") is False:
+                    resolved_tag = " [OPEN]"
+
+                lines.append(f"- **{entry_id}** ({entry_type}{resolved_tag}, {date}): {content_preview}")
+            lines.append("")
+
+        latest_path = self.journal_dir / "latest.md"
+        try:
+            latest_path.write_text("\n".join(lines), encoding="utf-8")
+        except IOError as e:
+            logger.warning(f"Failed to generate latest.md: {e}")
