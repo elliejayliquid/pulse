@@ -57,6 +57,8 @@ paths:
   schedules: "D:\\dev\\pulse\\data\\schedules.json"
   conversation: "D:\\dev\\pulse\\data\\conversation.json"
   journal: "D:\\dev\\pulse\\data\\journal"
+  tasks: "D:\\dev\\pulse\\data\\tasks.json"
+  dev_journal: "D:\\dev\\pulse\\data\\dev_journal.json"
   persona: "D:\\dev\\pulse\\persona.json"
   telegram_chat_id: "D:\\dev\\pulse\\data\\telegram_chat_id.txt"
 

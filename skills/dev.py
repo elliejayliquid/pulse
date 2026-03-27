@@ -76,6 +76,12 @@ class DevSkill(BaseSkill):
     def __init__(self, config: dict):
         super().__init__(config)
         self._pulse_root = str(Path(config.get("_pulse_root", ".")).resolve())
+        self._dev_journal_path = Path(
+            config.get("paths", {}).get(
+                "dev_journal",
+                str(Path(self._pulse_root) / "data" / "dev_journal.json"),
+            )
+        )
 
     def get_tools(self) -> list[dict]:
         return [
@@ -394,7 +400,7 @@ class DevSkill(BaseSkill):
         """Read the dev journal."""
         import json
 
-        journal_path = Path(self._pulse_root) / "data" / "dev_journal.json"
+        journal_path = self._dev_journal_path
         if not journal_path.exists():
             return "Dev journal is empty. This is your first dev session!"
 
@@ -421,7 +427,7 @@ class DevSkill(BaseSkill):
         if not entry.strip():
             return "Error: entry cannot be empty."
 
-        journal_path = Path(self._pulse_root) / "data" / "dev_journal.json"
+        journal_path = self._dev_journal_path
         journal_path.parent.mkdir(parents=True, exist_ok=True)
 
         entries = []

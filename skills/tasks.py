@@ -13,12 +13,11 @@ class TasksSkill(BaseSkill):
 
     def __init__(self, config: dict):
         super().__init__(config)
-        # Store tasks in the data directory to persist across reboots
-        self.storage_path = os.path.join("data", "tasks.json")
+        self.storage_path = config.get("paths", {}).get("tasks", os.path.join("data", "tasks.json"))
         self._ensure_storage()
 
     def _ensure_storage(self):
-        os.makedirs("data", exist_ok=True)
+        os.makedirs(os.path.dirname(self.storage_path) or ".", exist_ok=True)
         if not os.path.exists(self.storage_path):
             with open(self.storage_path, "w") as f:
                 json.dump({"tasks": [], "next_id": 1}, f)
