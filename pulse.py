@@ -140,11 +140,13 @@ def resolve_persona(config: dict, persona_name: str | None, pulse_root: Path) ->
         if key not in persona_paths:
             config["paths"][key] = default
 
-    # Auto-set persona.json path if the persona has one
+    # Auto-set persona identity path (.yaml preferred over .json)
+    persona_yaml = persona_dir / "persona.yaml"
     persona_json = persona_dir / "persona.json"
-    if persona_json.exists():
-        config["paths"]["persona"] = str(persona_json)
-        logger.info(f"  Using persona identity: {persona_json}")
+    persona_identity = persona_yaml if persona_yaml.exists() else persona_json
+    if persona_identity.exists():
+        config["paths"]["persona"] = str(persona_identity)
+        logger.info(f"  Using persona identity: {persona_identity}")
 
     # Store persona metadata for skills/context that need it
     config["_persona_name"] = name
@@ -321,14 +323,21 @@ def pick_persona(pulse_root: Path) -> str | None:
     personas = []
     for d in sorted(personas_dir.iterdir()):
         if d.is_dir() and not d.name.startswith(("_", ".")):
-            # Try to read the persona's display name
-            persona_json = d / "persona.json"
+            # Try to read the persona's display name (.yaml preferred)
             display_name = d.name
-            if persona_json.exists():
+            persona_yaml = d / "persona.yaml"
+            persona_json = d / "persona.json"
+            persona_file = persona_yaml if persona_yaml.exists() else persona_json
+            if persona_file.exists():
                 try:
-                    import json
-                    with open(persona_json, "r", encoding="utf-8") as f:
-                        display_name = json.load(f).get("name", d.name)
+                    if persona_file.suffix in (".yaml", ".yml"):
+                        import yaml
+                        with open(persona_file, "r", encoding="utf-8") as f:
+                            display_name = yaml.safe_load(f).get("name", d.name)
+                    else:
+                        import json
+                        with open(persona_file, "r", encoding="utf-8") as f:
+                            display_name = json.load(f).get("name", d.name)
                 except Exception:
                     pass
             personas.append((d.name, display_name))
