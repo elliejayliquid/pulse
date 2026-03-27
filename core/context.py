@@ -125,10 +125,10 @@ class ContextManager:
                     label = key.replace("_", " ").title()
                     lines.append(f"**{label}:** {value}")
 
-        # Recent transient entries
-        recent = self._journal_skill.load_recent_entries(limit=5)
+        # Active transient entries (type-aware time windows)
+        recent = self._journal_skill.load_active_entries(limit=6)
         if recent:
-            lines.append("\n### Recent Journal Entries")
+            lines.append("\n### Active Journal Entries")
             for entry in recent:
                 resolved_tag = ""
                 if entry.get("resolved") is True:
@@ -497,12 +497,14 @@ class ContextManager:
 
             your_turn += (
                 f"\n{skill_menu}"
-                "You have all these skills available — explore them! "
-                "Don't just reach for the same one every time.\n"
-                "\n**Variety matters.** Check the tool frequency in your Recent Heartbeat Actions. "
-                "If any tool is marked ⚠️ repetitive, do NOT use it this tick. "
-                "Do something different — write a journal entry, reflect on a memory, "
-                "or simply stay silent. Mix it up. Be interesting, not repetitive.\n"
+                "You have all these skills available — use them! "
+                "You can chain multiple tools in one tick (e.g., search a memory, "
+                "then write a journal reflection about what you found). "
+                "Doing several things in one tick is encouraged.\n"
+                "\nCheck the tool frequency in your Recent Heartbeat Actions. "
+                "If a tool is marked ⚠️ repetitive, try a different one instead — "
+                "there's always something interesting to explore. "
+                "Silence is fine, but it's an option, not a rule.\n"
             )
 
         your_turn += "\nRespond in JSON format as specified in your instructions."

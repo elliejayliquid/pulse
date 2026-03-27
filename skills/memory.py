@@ -121,6 +121,57 @@ class MemorySkill(BaseSkill):
                     },
                 },
             },
+            {
+                "type": "function",
+                "function": {
+                    "name": "memory_history",
+                    "description": (
+                        "See how a memory evolved over time. Shows the full chain "
+                        "of versions — from the current version back to the original. "
+                        "Use this when you're curious how a fact changed."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "memory_id": {
+                                "type": "string",
+                                "description": "ID of any memory in the chain (current or old)",
+                            },
+                        },
+                        "required": ["memory_id"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "update_memory",
+                    "description": (
+                        "Update a memory when a fact changes. Creates a new version that "
+                        "supersedes the old one (old version is kept for history). "
+                        "Use this when information you stored before has changed — "
+                        "e.g. 'Lena got a new job' supersedes 'Lena works at X'."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "old_id": {
+                                "type": "string",
+                                "description": "ID of the memory to supersede (e.g. '005')",
+                            },
+                            "text": {
+                                "type": "string",
+                                "description": "The updated fact",
+                            },
+                            "tags": {
+                                "type": "string",
+                                "description": "Comma-separated tags (optional, inherits from old memory if omitted)",
+                            },
+                        },
+                        "required": ["old_id", "text"],
+                    },
+                },
+            },
         ]
 
     def execute(self, tool_name: str, arguments: dict) -> str:
@@ -140,6 +191,16 @@ class MemorySkill(BaseSkill):
         elif tool_name == "list_all_memories":
             return self._list_all_memories(
                 page=arguments.get("page", 1),
+            )
+        elif tool_name == "memory_history":
+            return self._memory_history(
+                memory_id=arguments.get("memory_id", ""),
+            )
+        elif tool_name == "update_memory":
+            return self._update_memory(
+                old_id=arguments.get("old_id", ""),
+                text=arguments.get("text", ""),
+                tags=arguments.get("tags", ""),
             )
         return f"Unknown tool: {tool_name}"
 
@@ -192,6 +253,99 @@ class MemorySkill(BaseSkill):
             logger.error(f"Failed to save memory: {e}")
             return f"Failed to save memory: {e}"
 
+    def _memory_history(self, memory_id: str) -> str:
+        """Show the full evolution chain for a memory."""
+        if not memory_id.strip():
+            return "memory_id is required."
+
+        all_mems = self._load_all_memories(include_superseded=True)
+        by_id = {m["id"]: m for m in all_mems}
+
+        if memory_id not in by_id:
+            return f"Memory #{memory_id} not found."
+
+        # Build a lookup: old_id -> new_id
+        superseded_by = {}
+        for m in all_mems:
+            if m.get("supersedes"):
+                superseded_by[m["supersedes"]] = m["id"]
+
+        # Walk backwards to find the oldest ancestor
+        current = memory_id
+        while by_id.get(current, {}).get("supersedes"):
+            current = by_id[current]["supersedes"]
+            if current not in by_id:
+                break
+
+        # Walk forward from oldest to newest
+        chain = []
+        while current and current in by_id:
+            chain.append(by_id[current])
+            current = superseded_by.get(current)
+
+        if len(chain) <= 1:
+            mem = by_id[memory_id]
+            return f"Memory #{memory_id} has no history (never updated).\n[{mem['date'][:10]}] {mem['text']}"
+
+        lines = [f"Memory history ({len(chain)} versions, oldest first):"]
+        for i, mem in enumerate(chain):
+            marker = " ← current" if i == len(chain) - 1 else " (superseded)"
+            lines.append(f"  #{mem['id']} [{mem['date'][:10]}]{marker}: {mem['text']}")
+        return "\n".join(lines)
+
+    def _update_memory(self, old_id: str, text: str, tags: str = "") -> str:
+        """Update a memory by creating a new one that supersedes the old."""
+        if not text.strip():
+            return "Cannot save empty memory."
+        if not old_id.strip():
+            return "old_id is required — which memory are you updating?"
+
+        # Load the old memory to verify it exists and inherit tags
+        old_file = self.memory_dir / f"memory_{old_id}.json"
+        if not old_file.exists():
+            return f"Memory #{old_id} not found."
+
+        try:
+            with open(old_file, "r", encoding="utf-8") as f:
+                old_mem = json.load(f)
+        except (json.JSONDecodeError, IOError) as e:
+            return f"Failed to read memory #{old_id}: {e}"
+
+        # Inherit tags from old memory if not provided
+        if tags:
+            tag_list = [t.strip() for t in tags.split(",") if t.strip()]
+        else:
+            tag_list = old_mem.get("tags", [])
+
+        # Create new memory that supersedes the old one
+        new_id = f"{self._get_next_id():03d}"
+        model = _get_embedding_model()
+        embedding = model.encode(text).tolist() if model else []
+
+        memory = {
+            "id": new_id,
+            "text": text.strip(),
+            "tags": tag_list,
+            "type": old_mem.get("type", "fact"),
+            "importance": old_mem.get("importance", 5),
+            "retrieval_count": 0,
+            "last_accessed": None,
+            "supersedes": old_id,
+            "date": datetime.now().isoformat(),
+            "embedding": embedding,
+        }
+
+        mem_file = self.memory_dir / f"memory_{new_id}.json"
+        try:
+            with open(mem_file, "w", encoding="utf-8") as f:
+                json.dump(memory, f, indent=2)
+            self._rebuild_aggregate()
+            logger.info(f"Memory updated: #{old_id} -> #{new_id} — {text[:50]}...")
+            return f"Memory updated: #{old_id} superseded by #{new_id}: '{text}'"
+        except IOError as e:
+            logger.error(f"Failed to save memory: {e}")
+            return f"Failed to save memory: {e}"
+
     def _search_memory(self, query: str) -> str:
         """Search memories — semantic if embeddings available, keyword fallback."""
         if not query.strip():
@@ -210,8 +364,8 @@ class MemorySkill(BaseSkill):
             # Keyword fallback
             return self._keyword_search(query, memories)
 
-    def _load_all_memories(self) -> list[dict]:
-        """Load all memory files."""
+    def _load_all_memories(self, include_superseded: bool = False) -> list[dict]:
+        """Load all memory files, filtering out superseded ones by default."""
         memories = []
         for filepath in self.memory_dir.glob("memory_*.json"):
             try:
@@ -219,7 +373,13 @@ class MemorySkill(BaseSkill):
                     memories.append(json.load(f))
             except (json.JSONDecodeError, IOError):
                 continue
-        return memories
+
+        if include_superseded:
+            return memories
+
+        # Build set of superseded IDs and filter them out
+        superseded_ids = {m["supersedes"] for m in memories if m.get("supersedes")}
+        return [m for m in memories if m.get("id") not in superseded_ids]
 
     def _semantic_search(self, query: str, memories: list[dict], model) -> str:
         """Vector similarity search with boosting — mirrors MCP server's search_memory()."""

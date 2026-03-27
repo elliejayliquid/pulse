@@ -183,12 +183,20 @@ class JournalSkill(BaseSkill):
                                     "open_thread, follow_up, reflection"
                                 ),
                             },
+                            "why_it_mattered": {
+                                "type": "string",
+                                "description": (
+                                    "Why is this worth writing down? One sentence explaining "
+                                    "why future-you would care. If you can't answer this, "
+                                    "the entry probably isn't worth saving."
+                                ),
+                            },
                             "tags": {
                                 "type": "string",
                                 "description": "Comma-separated tags for searchability (optional)",
                             },
                         },
-                        "required": ["content", "entry_type"],
+                        "required": ["content", "entry_type", "why_it_mattered"],
                     },
                 },
             },
@@ -275,6 +283,7 @@ class JournalSkill(BaseSkill):
             return self._write_entry(
                 content=arguments.get("content", ""),
                 entry_type=arguments.get("entry_type", "reflection"),
+                why_it_mattered=arguments.get("why_it_mattered", ""),
                 tags=arguments.get("tags", ""),
             )
         elif tool_name == "read_journal":
@@ -324,10 +333,18 @@ class JournalSkill(BaseSkill):
                 continue
         return max(ids) + 1 if ids else 1
 
-    def _write_entry(self, content: str, entry_type: str, tags: str = "") -> str:
+    def _write_entry(self, content: str, entry_type: str,
+                     why_it_mattered: str = "", tags: str = "") -> str:
         """Create a new transient journal entry as markdown + companion memory."""
         if not content.strip():
             return "Cannot write empty journal entry."
+
+        if not why_it_mattered.strip():
+            return (
+                "Journal entry rejected — missing why_it_mattered. "
+                "If you can't explain why future-you would care, "
+                "the entry probably isn't worth saving."
+            )
 
         if entry_type not in VALID_ENTRY_TYPES:
             return (
@@ -343,6 +360,7 @@ class JournalSkill(BaseSkill):
         meta = {
             "date": now,
             "entry_type": entry_type,
+            "why_it_mattered": why_it_mattered.strip(),
             "tags": tag_list,
             "importance": 5,
             "resolved": False if entry_type in ("open_thread", "follow_up") else None,
@@ -455,10 +473,13 @@ class JournalSkill(BaseSkill):
         if len(date_str) > 16:
             date_str = date_str[:16]
 
+        why = entry.get("why_it_mattered", "")
+        why_str = f"\nWhy it mattered: {why}" if why else ""
+
         return (
             f"Entry {entry.get('id', '?')} ({entry.get('entry_type', '?')}{resolved_tag})\n"
             f"Date: {date_str}\n"
-            f"{tags_str}\n\n"
+            f"{tags_str}{why_str}\n\n"
             f"{entry.get('content', '')}"
         )
 
@@ -495,10 +516,54 @@ class JournalSkill(BaseSkill):
         return entries
 
     def load_recent_entries(self, limit: int = 5) -> list[dict]:
-        """Load the most recent transient entries (for heartbeat context)."""
+        """Load the most recent transient entries (simple recency, for latest.md)."""
         entries = self._load_transient_entries()
         entries.sort(key=lambda e: e.get("date", e.get("created_at", "")), reverse=True)
         return entries[:limit]
+
+    def load_active_entries(self, limit: int = 6) -> list[dict]:
+        """Load active journal entries using type-aware time windows.
+
+        - open_thread / follow_up (unresolved): always included
+        - dynamic / tone: last 2 days only
+        - everything else: last 3 days
+        - Capped at `limit` entries, newest first
+        """
+        entries = self._load_transient_entries()
+        now = datetime.now()
+        active = []
+
+        for entry in entries:
+            etype = entry.get("entry_type", "")
+            resolved = entry.get("resolved")
+
+            # Unresolved threads/follow-ups: always active
+            if etype in ("open_thread", "follow_up") and resolved is False:
+                active.append(entry)
+                continue
+
+            # Skip resolved entries
+            if resolved is True:
+                continue
+
+            # Parse entry date for age check
+            date_str = entry.get("date", entry.get("created_at", ""))
+            try:
+                entry_date = datetime.fromisoformat(date_str)
+                age_days = (now - entry_date).total_seconds() / 86400
+            except (ValueError, TypeError):
+                continue
+
+            # Dynamic/tone: 2-day window
+            if etype in ("dynamic", "tone") and age_days <= 2:
+                active.append(entry)
+            # Everything else: 3-day window
+            elif etype not in ("dynamic", "tone") and age_days <= 3:
+                active.append(entry)
+
+        # Sort newest first, cap at limit
+        active.sort(key=lambda e: e.get("date", e.get("created_at", "")), reverse=True)
+        return active[:limit]
 
     def _format_pinned_entry(self, entry: dict) -> str:
         """Format a pinned entry for display."""
