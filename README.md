@@ -17,7 +17,7 @@ Pulse gives your AI companion a life of its own. It runs in the background, lett
 - **Token tracking** — Daily usage logging when using cloud APIs (data/usage.json)
 - **Dev ticks** — Optional autonomous self-improvement: the companion can review and create its own skills on a git branch, with human approval
 - **Vision** — Optional image understanding via mmproj (model-dependent)
-- **Desktop notifications** — Windows toast notifications for proactive messages
+- **Desktop notifications** — Windows toast notifications for proactive messages (optional, Windows-only for now)
 - **Quiet hours** — No notifications while you sleep
 
 ## Architecture
@@ -45,7 +45,7 @@ skills/                   # Auto-discovered — just drop a .py file here
   dev.py                  # Autonomous skill creation (dev ticks)
 personas/                 # Per-persona config, identity, and data
   _template/              # Example persona — copy this to get started
-persona.json              # Default companion identity (overridden by persona)
+persona.yaml              # Default companion identity (overridden by persona)
 config.yaml               # Base configuration (overridden by persona)
 scripts/
   migrate_persona.py        # Set up a persona from existing data
@@ -105,21 +105,31 @@ provider:
 
 Supported provider types: `local` (default), `openai`, `openrouter`, `anthropic`, `custom` (any OpenAI-compatible endpoint). When using a cloud provider, llama-server is not started — embeddings for memory search still run locally.
 
-Edit `persona.json` to name your companion:
-```json
-{
-  "name": "YourCompanion",
-  "user_name": "YourName",
-  ...
-}
+Edit `persona.yaml` (or `persona.json`) to name your companion:
+```yaml
+name: YourCompanion
+user_name: YourName
+
+system_prompt: |
+  You are {name}, a local AI companion living on {user_name}'s machine.
+  Write your personality here, naturally, with normal line breaks.
+
+traits:
+  - warm
+  - curious
+
+relationship_context: >
+  Describe the relationship between {name} and {user_name}.
+
+voice_notes: Describe how this persona communicates.
 ```
 
-All `{name}` and `{user_name}` placeholders in the persona are resolved automatically.
+All `{name}` and `{user_name}` placeholders are resolved automatically. YAML is recommended for readability — JSON is also supported.
 
-### Telegram (is currently a requirement, will be expanded later)
+### Telegram (currently required, more channels planned)
 
 1. Create a bot via [@BotFather](https://t.me/botfather) on Telegram
-2. Create a `.env` file:
+2. Copy `.env.example` to `.env` and add your token:
    ```
    TELEGRAM_BOT_TOKEN=your_token_here
    ```
@@ -149,9 +159,9 @@ Pulse can host multiple companions, each with their own model, personality, data
 personas/
   nova/
     config.yaml       # overrides base config (only include what's different)
-    persona.json      # identity and personality
+    persona.yaml      # identity and personality (.json also supported)
     .env              # API keys, bot tokens
-    data/             # memories, journal, tasks, etc.
+    data/             # memories, journal, tasks, etc. (auto-created)
 ```
 
 **Setting up a persona:**
