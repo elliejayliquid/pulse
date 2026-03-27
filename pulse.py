@@ -291,6 +291,58 @@ async def main(config_path: str, persona_name: str | None = None):
         logger.info("Pulse stopped. Companion is sleeping.")
 
 
+def pick_persona(pulse_root: Path) -> str | None:
+    """Interactive persona picker — shown when no persona is specified."""
+    personas_dir = pulse_root / "personas"
+    if not personas_dir.is_dir():
+        return None
+
+    # Find persona directories (skip _template and hidden dirs)
+    personas = []
+    for d in sorted(personas_dir.iterdir()):
+        if d.is_dir() and not d.name.startswith(("_", ".")):
+            # Try to read the persona's display name
+            persona_json = d / "persona.json"
+            display_name = d.name
+            if persona_json.exists():
+                try:
+                    import json
+                    with open(persona_json, "r", encoding="utf-8") as f:
+                        display_name = json.load(f).get("name", d.name)
+                except Exception:
+                    pass
+            personas.append((d.name, display_name))
+
+    if not personas:
+        return None
+
+    if len(personas) == 1:
+        # Only one persona — use it automatically
+        name, display = personas[0]
+        print(f"  Found persona: {display} ({name})")
+        return name
+
+    print("  Available personas:\n")
+    for i, (name, display) in enumerate(personas, 1):
+        label = f"{display} ({name})" if display != name else name
+        print(f"    {i}. {label}")
+    print(f"    0. No persona (use base config)\n")
+
+    while True:
+        try:
+            choice = input("  Pick a persona [1]: ").strip()
+            if choice == "":
+                return personas[0][0]  # default to first
+            num = int(choice)
+            if num == 0:
+                return None
+            if 1 <= num <= len(personas):
+                return personas[num - 1][0]
+        except (ValueError, EOFError):
+            pass
+        print(f"  Please enter 0-{len(personas)}")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Pulse - AI companion heartbeat daemon")
     parser.add_argument(
@@ -305,4 +357,15 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    asyncio.run(main(args.config, persona_name=args.persona))
+    persona = args.persona
+    if persona is None:
+        # Check if active_persona is set in config before prompting
+        config_check = load_config(args.config)
+        if not config_check.get("active_persona"):
+            print()
+            picked = pick_persona(Path(__file__).parent.resolve())
+            if picked:
+                persona = picked
+                print()
+
+    asyncio.run(main(args.config, persona_name=persona))
