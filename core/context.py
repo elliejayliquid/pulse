@@ -15,6 +15,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+import yaml
+
 logger = logging.getLogger(__name__)
 
 # Embedding model — loaded once at startup via load_embedding_model()
@@ -182,12 +184,21 @@ class ContextManager:
         return "\n".join(lines)
 
     def _load_persona(self) -> dict:
-        """Load persona.json and resolve {name}/{user_name} placeholders."""
-        persona_path = self.paths.get("persona", "persona.json")
+        """Load persona file (.yaml or .json) and resolve placeholders."""
+        persona_path = Path(self.paths.get("persona", "persona.json"))
+
+        # Try .yaml variant first, fall back to original path
+        yaml_path = persona_path.with_suffix(".yaml")
+        if yaml_path.exists():
+            persona_path = yaml_path
+
         try:
             with open(persona_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError) as e:
+                if persona_path.suffix in (".yaml", ".yml"):
+                    data = yaml.safe_load(f)
+                else:
+                    data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError, yaml.YAMLError) as e:
             logger.error(f"Failed to load persona: {e}")
             return {"name": "Companion", "system_prompt": "You are a local AI companion."}
 
