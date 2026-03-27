@@ -1,7 +1,6 @@
-# Persona data directories contain personal memories, journals, etc.
 # Only the _template/ directory is tracked in git.
-*/data/
-*/.env
-
-# Keep the template
+# All real personas contain personal data — never commit them.
+*
+!.gitignore
 !_template/
+!_template/**
