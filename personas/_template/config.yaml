@@ -12,7 +12,7 @@
 #   interval_minutes: 45
 #
 # paths:
-#   nova_memory: "personas/my_persona/data/memories"
+#   memories: "personas/my_persona/data/memories"
 #   journal: "personas/my_persona/data/journal"
 #   tasks: "personas/my_persona/data/tasks.json"
 #   dev_journal: "personas/my_persona/data/dev_journal.json"

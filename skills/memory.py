@@ -28,7 +28,7 @@ class MemorySkill(BaseSkill):
     def __init__(self, config: dict):
         super().__init__(config)
         self.memory_dir = Path(
-            config.get("paths", {}).get("nova_memory", str(Path.home() / ".local-memory"))
+            config.get("paths", {}).get("memories", str(Path.home() / ".local-memory"))
         )
         self.memory_dir.mkdir(parents=True, exist_ok=True)
 

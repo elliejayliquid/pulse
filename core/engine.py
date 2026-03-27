@@ -283,7 +283,7 @@ class PulseEngine:
             if summary:
                 # Save to persistent memory for cross-session continuity
                 try:
-                    self.context.save_to_nova_memory(summary)
+                    self.context.save_to_memory(summary)
                 except Exception as e:
                     logger.warning(f"Memory persistence failed (non-fatal): {e}")
                 history = [{"role": "user", "content": f"[Context] Previous conversation summary: {summary}"},

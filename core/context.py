@@ -227,7 +227,7 @@ class ContextManager:
 
     def _load_memories(self, limit: int = 5) -> str:
         """Load recent and important memories."""
-        memory_dir = self.paths.get("nova_memory", "")
+        memory_dir = self.paths.get("memories", "")
         if not memory_dir or not Path(memory_dir).exists():
             return ""
 
@@ -319,7 +319,7 @@ class ContextManager:
         except IOError as e:
             logger.error(f"Failed to save conversation: {e}")
 
-    def save_to_nova_memory(self, summary: str, tags: str = "telegram_chat,chat_log") -> bool:
+    def save_to_memory(self, summary: str, tags: str = "telegram_chat,chat_log") -> bool:
         """Save a conversation summary to persistent memory.
 
         Writes a memory_XXX.json file to the companion's memory directory in the
@@ -334,7 +334,7 @@ class ContextManager:
         Returns:
             True if saved successfully, False otherwise.
         """
-        memory_dir = self.paths.get("nova_memory", "")
+        memory_dir = self.paths.get("memories", "")
         if not memory_dir:
             logger.warning("No memory path configured — can't persist summary.")
             return False

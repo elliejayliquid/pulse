@@ -89,11 +89,11 @@ def migrate(persona_name: str):
             (PULSE_ROOT / "config.yaml").read_text(encoding="utf-8")
         )
         current_paths = base_config.get("paths", {})
-        memory_path = current_paths.get("nova_memory", "")
+        memory_path = current_paths.get("memories", "")
 
         persona_config = {
             "paths": {
-                "nova_memory": memory_path,
+                "memories": memory_path,
                 "journal": str(data_dir / "journal"),
                 "tasks": str(data_dir / "tasks.json"),
                 "dev_journal": str(data_dir / "dev_journal.json"),

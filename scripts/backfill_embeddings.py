@@ -80,7 +80,7 @@ def main():
     if config_path.exists():
         with open(config_path, "r") as f:
             config = yaml.safe_load(f)
-        memory_dir = Path(config.get("paths", {}).get("nova_memory", ""))
+        memory_dir = Path(config.get("paths", {}).get("memories", ""))
     else:
         memory_dir = Path.home() / ".local-memory"
 

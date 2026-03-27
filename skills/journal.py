@@ -132,7 +132,7 @@ class JournalSkill(BaseSkill):
         self.entries_dir = self.journal_dir / "entries"
         self.identity_dir = self.journal_dir / "identity"
         self.memory_dir = Path(
-            config.get("paths", {}).get("nova_memory", str(Path.home() / ".local-memory"))
+            config.get("paths", {}).get("memories", str(Path.home() / ".local-memory"))
         )
 
         # Create directories

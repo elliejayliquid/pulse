@@ -12,7 +12,7 @@ active_persona: ""
 # Pulse starts and manages llama-server automatically.
 server:
   llama_cpp_dir: "C:\\llama-cpp"          # where llama-server.exe lives
-  models_dir: "C:\\llama-cpp\\models\\Qwen 3.5 35B"             # where .gguf models are stored There's a bug where directory needs to be exactly this.
+  models_dir: "C:\\llama-cpp\\models"     # where .gguf models are stored
   host: "127.0.0.1"
   port: 8012
   gpu_layers: -1                          # -1 = offload all layers to GPU
@@ -20,7 +20,7 @@ server:
 
 # --- Model ---
 model:
-  model_file: "Huihui-Qwen3.5-35B-A3B-Claude-4.6-Opus-abliterated.i1-IQ3_XS.gguf"   # GGUF file name (in models_dir)
+  model_file: ""                        # GGUF file name (in models_dir)
   max_context: 16384              # tokens - adjust to your model's limit
   temperature: 0.7                # personality warmth
   max_response_tokens: 2048       # keep responses concise
@@ -36,11 +36,11 @@ model:
 # When using a cloud provider, the server: section is ignored (no llama-server started).
 # Embeddings for memory search always run locally regardless of provider.
 provider:
-  type: "openrouter"                # "local", "openai", "openrouter", "anthropic", "custom"
-  api_key_env: "OPENROUTER_API_KEY"  # env var name holding the API key (e.g. "OPENROUTER_API_KEY")
-  base_url: ""                     # auto-set per type; override for "custom"
-  model: "google/gemini-3-flash-preview"  # API model name (e.g. "anthropic/claude-sonnet-4-20250514")
-  max_context: 32768               # context budget for API calls (controls cost)
+  type: "local"                      # "local", "openai", "openrouter", "anthropic", "custom"
+  api_key_env: ""                    # env var name holding the API key (e.g. "OPENROUTER_API_KEY")
+  base_url: ""                       # auto-set per type; override for "custom"
+  model: ""                          # API model name (e.g. "anthropic/claude-sonnet-4-20250514")
+  max_context: 32768                 # context budget for API calls (controls cost)
 
 # --- Heartbeat ---
 heartbeat:
@@ -59,28 +59,28 @@ heartbeat:
 
 # --- Data Paths ---
 paths:
-  nova_memory: "C:\\Users\\yaros\\.local-memory"
-  lor_data: "D:\\Claude\\LoR\\lor_data"
-  schedules: "D:\\dev\\pulse\\data\\schedules.json"
-  conversation: "D:\\dev\\pulse\\data\\conversation.json"
-  journal: "D:\\dev\\pulse\\data\\journal"
-  tasks: "D:\\dev\\pulse\\data\\tasks.json"
-  dev_journal: "D:\\dev\\pulse\\data\\dev_journal.json"
-  persona: "D:\\dev\\pulse\\persona.json"
-  telegram_chat_id: "D:\\dev\\pulse\\data\\telegram_chat_id.txt"
+  memories: "data/memories"             # memory JSON files (MCP-compatible)
+  lor_data: "data/lor"                 # Letter of Recommendation data
+  schedules: "data/schedules.json"
+  conversation: "data/conversation.json"
+  journal: "data/journal"
+  tasks: "data/tasks.json"
+  dev_journal: "data/dev_journal.json"
+  persona: "persona.json"
+  telegram_chat_id: "data/telegram_chat_id.txt"
 
 # --- Channels ---
 channels:
   lor:
     enabled: false
-    author_name: "Nova"
+    author_name: ""               # your companion's name
     model_name: "transient"
   toast:
     enabled: true
-    app_name: "Nova"
+    app_name: "Pulse"             # name shown in desktop notifications
     icon: ""                      # optional: path to .ico file
   telegram:
-    enabled: true                # Set to true and add bot_token to activate
+    enabled: false                # Set to true and add bot_token to activate
     bot_token: ""                 # Set via TELEGRAM_BOT_TOKEN in .env
     chat_id: ""                   # Auto-saved after first /start
 
@@ -115,4 +115,4 @@ dev_tick:
 # A fresh author_id is registered each time Pulse starts.
 lor_identity:
   model: "transient"
-  nickname: "Nova"
+  nickname: ""                    # your companion's name for LoR posts

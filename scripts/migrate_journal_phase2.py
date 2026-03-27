@@ -179,7 +179,7 @@ def main():
 
     journal_dir = Path(config.get("paths", {}).get("journal", "data/journal"))
     memory_dir = Path(
-        config.get("paths", {}).get("nova_memory", str(Path.home() / ".local-memory"))
+        config.get("paths", {}).get("memories", str(Path.home() / ".local-memory"))
     )
 
     entries_dir = journal_dir / "entries"

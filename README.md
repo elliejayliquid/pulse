@@ -43,9 +43,12 @@ skills/                   # Auto-discovered — just drop a .py file here
   lor.py                  # LoR forum integration (optional)
   web_search.py           # Web search via DuckDuckGo (free)
   dev.py                  # Autonomous skill creation (dev ticks)
-persona.json              # Your companion's identity and personality
-config.yaml               # All configuration
+personas/                 # Per-persona config, identity, and data
+  _template/              # Example persona — copy this to get started
+persona.json              # Default companion identity (overridden by persona)
+config.yaml               # Base configuration (overridden by persona)
 scripts/
+  migrate_persona.py        # Set up a persona from existing data
   migrate_journal_phase2.py # Migrate journal from JSON to markdown format
   backfill_embeddings.py    # Regenerate memory/journal embeddings
 ```
@@ -105,8 +108,8 @@ Supported provider types: `local` (default), `openai`, `openrouter`, `anthropic`
 Edit `persona.json` to name your companion:
 ```json
 {
-  "name": "Nova",
-  "user_name": "Lena",
+  "name": "YourCompanion",
+  "user_name": "YourName",
   ...
 }
 ```
@@ -126,7 +129,8 @@ All `{name}` and `{user_name}` placeholders in the persona are resolved automati
 ### Run
 
 ```bash
-python pulse.py
+python pulse.py                    # uses base config
+python pulse.py --persona nova     # loads personas/nova/ overlay
 ```
 
 Or on Windows, double-click `start.bat`.
@@ -136,6 +140,44 @@ Or on Windows, double-click `start.bat`.
 ### Persona (`persona.json`)
 
 This is your companion's identity. The `system_prompt` supports `{name}` and `{user_name}` placeholders so you don't hardcode names. Traits, relationship context, and voice notes shape the personality.
+
+### Personas (multi-companion support)
+
+Pulse can host multiple companions, each with their own model, personality, data, and credentials. A persona is a directory under `personas/` that overlays the base config:
+
+```
+personas/
+  nova/
+    config.yaml       # overrides base config (only include what's different)
+    persona.json      # identity and personality
+    .env              # API keys, bot tokens
+    data/             # memories, journal, tasks, etc.
+```
+
+**Setting up a persona:**
+```bash
+# Copy the template and customize
+cp -r personas/_template personas/mypersona
+# Edit personas/mypersona/config.yaml and persona.json
+
+# Or migrate existing data into a persona
+python scripts/migrate_persona.py mypersona
+```
+
+**Activating a persona:**
+```bash
+python pulse.py --persona mypersona
+```
+Or set `active_persona: "mypersona"` in `config.yaml`.
+
+Persona config is a sparse overlay — you only specify what's different from the base. Everything else inherits. For example, a persona that just uses a different model:
+```yaml
+# personas/mypersona/config.yaml
+provider:
+  type: "anthropic"
+  api_key_env: "ANTHROPIC_API_KEY"
+  model: "claude-sonnet-4-20250514"
+```
 
 ### Heartbeat (`config.yaml`)
 
@@ -195,7 +237,7 @@ dev_tick:
   max_rounds: 16        # tool-calling rounds per dev session
 ```
 
-**How it works:** On each dev tick, the companion gets a focused coding prompt, reads its dev journal (lessons from past attempts), and can read source files, search code, and write skill files. All changes happen on a git branch (`nova/dev-<timestamp>`) — never main. Dev ticks run during quiet hours (they're silent background work — only the approval ping notifies you).
+**How it works:** On each dev tick, the companion gets a focused coding prompt, reads its dev journal (lessons from past attempts), and can read source files, search code, and write skill files. All changes happen on a git branch (`dev/<timestamp>`) — never main. Dev ticks run during quiet hours (they're silent background work — only the approval ping notifies you).
 
 **Safety layers:**
 - Git branch isolation — changes never touch main directly
