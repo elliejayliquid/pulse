@@ -1,0 +1,24 @@
+# Persona config overlay — values here override the base config.yaml.
+# Only include keys you want to change. Everything else inherits from base.
+#
+# Example: to give this persona its own model and data paths:
+#
+# provider:
+#   type: "openrouter"
+#   api_key_env: "MY_PERSONA_API_KEY"
+#   model: "anthropic/claude-sonnet-4-20250514"
+#
+# heartbeat:
+#   interval_minutes: 45
+#
+# paths:
+#   nova_memory: "personas/my_persona/data/memories"
+#   journal: "personas/my_persona/data/journal"
+#   tasks: "personas/my_persona/data/tasks.json"
+#   dev_journal: "personas/my_persona/data/dev_journal.json"
+#   schedules: "personas/my_persona/data/schedules.json"
+#   conversation: "personas/my_persona/data/conversation.json"
+#
+# skills:
+#   lor:
+#     enabled: false

@@ -1,0 +1,10 @@
+{
+  "name": "Your Persona Name",
+  "tagline": "A short description of who this persona is",
+  "personality_traits": [
+    "trait_one",
+    "trait_two"
+  ],
+  "communication_style": "Describe how this persona communicates",
+  "system_prompt_prefix": "You are {name}. {tagline}."
+}

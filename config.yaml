@@ -1,6 +1,13 @@
 # Pulse Configuration
 # The heartbeat daemon for your local AI companion.
 
+# --- Active Persona ---
+# Set to a persona name (e.g. "nova") to load persona-specific config.
+# The persona directory lives at personas/<name>/ and can override any
+# config value below. CLI flag --persona takes priority over this.
+# Leave empty to run without a persona (uses this config as-is).
+active_persona: ""
+
 # --- llama.cpp Server ---
 # Pulse starts and manages llama-server automatically.
 server:

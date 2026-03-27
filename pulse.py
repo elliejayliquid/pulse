@@ -71,7 +71,69 @@ def load_config(path: str) -> dict:
         sys.exit(1)
 
 
-async def main(config_path: str):
+def deep_merge(base: dict, overlay: dict) -> dict:
+    """Recursively merge overlay into base. Overlay values win on conflict.
+
+    Dicts merge recursively; everything else (strings, lists, numbers)
+    is replaced outright by the overlay value.
+    """
+    merged = base.copy()
+    for key, value in overlay.items():
+        if key in merged and isinstance(merged[key], dict) and isinstance(value, dict):
+            merged[key] = deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def resolve_persona(config: dict, persona_name: str | None, pulse_root: Path) -> dict:
+    """Load and merge a persona's config overlay if one is active.
+
+    Resolution order:
+    1. --persona CLI flag (explicit)
+    2. active_persona key in base config (default)
+    3. None — no persona, use base config as-is
+
+    Returns the merged config.
+    """
+    name = persona_name or config.get("active_persona")
+    if not name:
+        return config
+
+    persona_dir = pulse_root / "personas" / name
+    if not persona_dir.is_dir():
+        logger.error(f"Persona directory not found: {persona_dir}")
+        sys.exit(1)
+
+    logger.info(f"Active persona: {name} ({persona_dir})")
+
+    # Load persona's .env if it exists (persona-specific API keys, etc.)
+    persona_env = persona_dir / ".env"
+    if persona_env.exists():
+        load_dotenv(persona_env, override=True)
+        logger.info(f"  Loaded persona .env: {persona_env}")
+
+    # Load and merge persona config overlay
+    persona_config_path = persona_dir / "config.yaml"
+    if persona_config_path.exists():
+        persona_config = load_config(str(persona_config_path))
+        config = deep_merge(config, persona_config)
+        logger.info(f"  Merged persona config: {persona_config_path}")
+
+    # Auto-set persona.json path if the persona has one
+    persona_json = persona_dir / "persona.json"
+    if persona_json.exists():
+        config.setdefault("paths", {})["persona"] = str(persona_json)
+        logger.info(f"  Using persona identity: {persona_json}")
+
+    # Store persona metadata for skills/context that need it
+    config["_persona_name"] = name
+    config["_persona_dir"] = str(persona_dir)
+
+    return config
+
+
+async def main(config_path: str, persona_name: str | None = None):
     """Initialize and run the Pulse daemon."""
     logger.info("=" * 50)
     logger.info("  Pulse - Proactive Local AI Companion")
@@ -82,13 +144,17 @@ async def main(config_path: str):
     config = load_config(config_path)
     logger.info(f"Config loaded from: {config_path}")
 
-    # Inject secrets from environment
+    # Inject pulse root directory for dev skill and engine
+    pulse_root = Path(__file__).parent.resolve()
+    config["_pulse_root"] = str(pulse_root)
+
+    # Resolve persona overlay (merges persona config over base)
+    config = resolve_persona(config, persona_name, pulse_root)
+
+    # Inject secrets from environment (after persona .env may have loaded)
     tg_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
     if tg_token:
         config.setdefault("channels", {}).setdefault("telegram", {})["bot_token"] = tg_token
-
-    # Inject pulse root directory for dev skill and engine
-    config["_pulse_root"] = str(Path(__file__).parent.resolve())
 
     # Load embedding model BEFORE llama-server — PyTorch's c10.dll can conflict
     # with CUDA DLLs on Windows if loaded after another CUDA process starts.
@@ -232,6 +298,11 @@ if __name__ == "__main__":
         default="config.yaml",
         help="Path to config file (default: config.yaml)"
     )
+    parser.add_argument(
+        "--persona", "-p",
+        default=None,
+        help="Persona to activate (e.g. 'nova'). Overrides active_persona in config."
+    )
     args = parser.parse_args()
 
-    asyncio.run(main(args.config))
+    asyncio.run(main(args.config, persona_name=args.persona))
