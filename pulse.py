@@ -115,15 +115,35 @@ def resolve_persona(config: dict, persona_name: str | None, pulse_root: Path) ->
 
     # Load and merge persona config overlay
     persona_config_path = persona_dir / "config.yaml"
+    persona_config = {}
     if persona_config_path.exists():
         persona_config = load_config(str(persona_config_path))
         config = deep_merge(config, persona_config)
         logger.info(f"  Merged persona config: {persona_config_path}")
 
+    # Auto-default data paths to persona directory.
+    # Any path not explicitly set in the persona's config.yaml gets
+    # pointed to personas/<name>/data/ — zero config for new personas.
+    persona_data = persona_dir / "data"
+    persona_paths = persona_config.get("paths", {})
+    default_paths = {
+        "memories": str(persona_data / "memories"),
+        "journal": str(persona_data / "journal"),
+        "tasks": str(persona_data / "tasks.json"),
+        "dev_journal": str(persona_data / "dev_journal.json"),
+        "schedules": str(persona_data / "schedules.json"),
+        "conversation": str(persona_data / "conversation.json"),
+        "telegram_chat_id": str(persona_data / "telegram_chat_id.txt"),
+    }
+    config.setdefault("paths", {})
+    for key, default in default_paths.items():
+        if key not in persona_paths:
+            config["paths"][key] = default
+
     # Auto-set persona.json path if the persona has one
     persona_json = persona_dir / "persona.json"
     if persona_json.exists():
-        config.setdefault("paths", {})["persona"] = str(persona_json)
+        config["paths"]["persona"] = str(persona_json)
         logger.info(f"  Using persona identity: {persona_json}")
 
     # Store persona metadata for skills/context that need it
