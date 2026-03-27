@@ -26,7 +26,7 @@ model:
   max_response_tokens: 2048       # keep responses concise
   frequency_penalty: 0.3          # discourage repeating the same words/topics
   presence_penalty: 0.2           # encourage topic variety
-  reasoning: true                # set true for thinking models (Qwen 3.x, DeepSeek)
+  reasoning: true                # local: --reasoning flag; cloud: sends reasoning API param
   max_tool_rounds: 8              # max tool-calling rounds per conversation/heartbeat turn
   mmproj_file: ""  # optional: vision projector GGUF (e.g. "mmproj-F16.gguf")
 

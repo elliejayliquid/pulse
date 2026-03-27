@@ -103,7 +103,8 @@ class LLMClient:
     def __init__(self, endpoint: str, model_name: str = "default",
                  temperature: float = 0.7, max_tokens: int = 1024,
                  frequency_penalty: float = 0.0, presence_penalty: float = 0.0,
-                 api_key: str = "", usage_tracker=None):
+                 api_key: str = "", usage_tracker=None,
+                 reasoning: bool = False, provider_type: str = "local"):
         self.client = OpenAI(
             base_url=endpoint,
             api_key=api_key or "not-needed",
@@ -116,6 +117,10 @@ class LLMClient:
         self._available = None
         self._usage = usage_tracker
         self._provider_name = ""  # set by engine for usage logging
+        # Build extra_body for cloud providers that support reasoning control
+        self._extra_body = {}
+        if provider_type != "local" and reasoning:
+            self._extra_body["reasoning"] = {"enabled": True}
 
     def _track(self, response):
         """Log token usage from an API response (no-op if no tracker)."""
@@ -157,6 +162,7 @@ class LLMClient:
                 max_tokens=self.max_tokens,
                 frequency_penalty=self.frequency_penalty,
                 presence_penalty=self.presence_penalty,
+                **({"extra_body": self._extra_body} if self._extra_body else {}),
             )
 
             self._track(response)
@@ -210,6 +216,7 @@ class LLMClient:
                     max_tokens=self.max_tokens,
                     frequency_penalty=self.frequency_penalty,
                     presence_penalty=self.presence_penalty,
+                    **({"extra_body": self._extra_body} if self._extra_body else {}),
                 )
 
                 self._track(response)
@@ -277,6 +284,7 @@ class LLMClient:
                 messages=msgs,
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
+                **({"extra_body": self._extra_body} if self._extra_body else {}),
             )
             self._track(response)
             text = response.choices[0].message.content or ""

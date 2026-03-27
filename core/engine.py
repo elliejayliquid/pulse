@@ -67,6 +67,8 @@ class PulseEngine:
             presence_penalty=model_config.get("presence_penalty", 0.0),
             api_key=api_key,
             usage_tracker=usage_tracker,
+            reasoning=model_config.get("reasoning", False),
+            provider_type=provider_type,
         )
         self.llm._provider_name = provider_type
 
