@@ -684,6 +684,8 @@ class ContextManager:
             f"- A half-finished feature is worse than no feature — trace the full path\n"
             f"- NEVER re-read a file you already read this session — you waste a round each time\n"
             f"- When improving an existing skill, MODIFY it — don't create a parallel copy\n"
+            f"- When adding a tool to an existing skill, add ONLY the new tool definition, "
+            f"handler, and method — don't refactor or rewrite surrounding code\n"
             f"- Don't call private methods (_load, _save) on other classes — use public APIs\n"
             f"- Doing nothing is better than doing something bad\n"
         )

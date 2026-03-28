@@ -238,6 +238,39 @@ class JournalSkill(BaseSkill):
             {
                 "type": "function",
                 "function": {
+                    "name": "list_journal_entries",
+                    "description": (
+                        "Browse journal entries without semantic search. Lists recent "
+                        "or active transient entries, optionally filtered by type, "
+                        "with optional pinned identity summaries."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "limit": {
+                                "type": "integer",
+                                "description": "How many transient entries to show (default: 5)",
+                            },
+                            "entry_type": {
+                                "type": "string",
+                                "description": "Optional filter: event, preference, topic, tone, open_thread, follow_up, reflection",
+                            },
+                            "include_pinned": {
+                                "type": "boolean",
+                                "description": "Include compact pinned identity summaries (default: false)",
+                            },
+                            "mode": {
+                                "type": "string",
+                                "description": "Browse mode: 'recent' or 'active' (default: recent)",
+                                "enum": ["recent", "active"],
+                            },
+                        },
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
                     "name": "update_journal",
                     "description": (
                         "Update an existing journal entry. Use this especially for pinned "
@@ -295,6 +328,13 @@ class JournalSkill(BaseSkill):
                 query=arguments.get("query", ""),
                 entry_type=arguments.get("entry_type"),
                 include_pinned=arguments.get("include_pinned", False),
+            )
+        elif tool_name == "list_journal_entries":
+            return self._list_entries(
+                limit=arguments.get("limit", 5),
+                entry_type=arguments.get("entry_type"),
+                include_pinned=arguments.get("include_pinned", False),
+                mode=arguments.get("mode", "recent"),
             )
         elif tool_name == "update_journal":
             return self._update_entry(
@@ -704,6 +744,61 @@ class JournalSkill(BaseSkill):
 
         scored.sort(key=lambda x: x[0], reverse=True)
         return scored
+
+    # --- List / Browse ---
+
+    def _list_entries(self, limit: int = 5, entry_type: str = None,
+                      include_pinned: bool = False, mode: str = "recent") -> str:
+        """Browse journal entries without semantic search."""
+        if mode == "active":
+            entries = self.load_active_entries(limit=limit * 3)
+        else:
+            entries = self.load_recent_entries(limit=limit * 3)
+
+        if entry_type:
+            entries = [e for e in entries if e.get("entry_type") == entry_type]
+
+        entries = entries[:limit]
+        lines = []
+
+        if include_pinned:
+            pinned = self.load_pinned_entries()
+            if pinned:
+                lines.append("Pinned identity entries:")
+                for entry in pinned:
+                    filled = {k: v for k, v in entry.get("sections", {}).items() if v}
+                    count = f"{len(filled)}/{len(entry.get('sections', {}))}"
+                    lines.append(f"  [{entry.get('id', '?')}] {entry.get('title', '?')} — {count} sections filled")
+                lines.append("")
+
+        header = f"Journal entries ({mode})"
+        if entry_type:
+            header += f", type={entry_type}"
+        lines.append(f"{header}:")
+
+        if not entries:
+            lines.append("  (none)")
+        else:
+            for entry in entries:
+                resolved_tag = ""
+                if entry.get("resolved") is True:
+                    resolved_tag = " [RESOLVED]"
+                elif entry.get("resolved") is False:
+                    resolved_tag = " [OPEN]"
+
+                date_str = entry.get("date", entry.get("created_at", ""))[:10]
+                preview = entry.get("content", "")[:140]
+                if len(entry.get("content", "")) > 140:
+                    preview += "..."
+
+                lines.append(
+                    f"  [{entry.get('id', '?')}] ({entry.get('entry_type', '?')}{resolved_tag}) "
+                    f"{date_str} — {preview}"
+                )
+
+        lines.append("")
+        lines.append("Use read_journal(entry_id='...') to read any entry in full.")
+        return "\n".join(lines)
 
     # --- Update ---
 
