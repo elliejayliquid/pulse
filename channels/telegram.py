@@ -341,8 +341,11 @@ class TelegramChannel(Channel):
             user_message = update.message.text
             logger.info(f"Telegram message from user: {user_message[:50]}...")
 
-            # Show typing indicator
-            await update.effective_chat.send_action("typing")
+            # Show typing indicator (non-critical, don't crash on timeout)
+            try:
+                await update.effective_chat.send_action("typing")
+            except Exception:
+                pass
 
             # Get response from companion via the engine
             reply, tools_used = await self._engine.handle_message(user_message, source="telegram")
@@ -393,8 +396,11 @@ class TelegramChannel(Channel):
 
             logger.info(f"Telegram photo from user ({photo.width}x{photo.height}, caption: {caption[:50]}...)")
 
-            # Show typing indicator
-            await update.effective_chat.send_action("typing")
+            # Show typing indicator (non-critical, don't crash on timeout)
+            try:
+                await update.effective_chat.send_action("typing")
+            except Exception:
+                pass
 
             # Download the photo as bytes
             file = await photo.get_file()

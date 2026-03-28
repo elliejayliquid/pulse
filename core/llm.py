@@ -119,8 +119,11 @@ class LLMClient:
         self._provider_name = ""  # set by engine for usage logging
         # Build extra_body for cloud providers that support reasoning control
         self._extra_body = {}
-        if provider_type != "local" and reasoning:
-            self._extra_body["reasoning"] = {"enabled": True}
+        if provider_type != "local":
+            if reasoning:
+                self._extra_body["reasoning"] = {"enabled": True}
+            else:
+                self._extra_body["reasoning"] = {"effort": "none"}
 
     def _track(self, response):
         """Log token usage from an API response (no-op if no tracker)."""
@@ -166,8 +169,9 @@ class LLMClient:
             )
 
             self._track(response)
+            finish = getattr(response.choices[0], "finish_reason", "unknown")
             text = response.choices[0].message.content or ""
-            logger.info(f"LLM response ({len(text)} chars)")
+            logger.info(f"LLM response ({len(text)} chars, finish={finish})")
             logger.debug(f"Raw response: {text[:200]}...")
 
             # Empty content = model spent all tokens on reasoning, treat as silent
@@ -220,13 +224,19 @@ class LLMClient:
                 )
 
                 self._track(response)
-                message = response.choices[0].message
+                choice = response.choices[0]
+                message = choice.message
                 text = message.content or ""
                 tool_calls = getattr(message, "tool_calls", None)
+                finish = getattr(choice, "finish_reason", "unknown")
+
+                # Debug: log full response when empty
+                if not text and not tool_calls:
+                    logger.warning(f"Empty response from LLM. Choice: {choice}")
 
                 # If no tool calls, this is the final response
                 if not tool_calls:
-                    logger.info(f"LLM final response ({len(text)} chars, round {round_num + 1})")
+                    logger.info(f"LLM final response ({len(text)} chars, round {round_num + 1}, finish={finish})")
                     cleaned = strip_think_tags(text)
                     return (cleaned if cleaned else None), tools_used
 

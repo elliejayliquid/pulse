@@ -6,6 +6,7 @@ python-dotenv>=1.0              # Load .env secrets
 win11toast>=0.34                # Windows desktop notifications (optional, Windows only)
 python-telegram-bot>=21.0       # Telegram bot (Phase 2)
 sentence-transformers>=2.0      # Memory embeddings
+numpy>=1.24                     # Vector operations for memory/journal search
 ddgs>=9.0                       # Web search skill (DuckDuckGo)
 
 # Note: plyer is an alternative to win11toast for cross-platform

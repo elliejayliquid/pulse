@@ -518,7 +518,19 @@ class ContextManager:
                 "Silence is fine, but it's an option, not a rule.\n"
             )
 
-        your_turn += "\nRespond in JSON format as specified in your instructions."
+        your_turn += (
+            "\nRespond in this JSON format:\n"
+            "{\n"
+            '  "thinking": "your internal reasoning (not shown to anyone)",\n'
+            '  "action": "notify | schedule | silent",\n'
+            '  "message": "what to say (if not silent)",\n'
+            '  "schedule": {\n'
+            '    "task": "what to do later",\n'
+            '    "when": "in 2 hours | daily 8:00 | 2026-03-01 15:00"\n'
+            "  }\n"
+            "}\n"
+            "Use plain text for speech and asterisks for actions. No bolding. No nested asterisks."
+        )
         context_parts.append(your_turn)
 
         return [
@@ -540,13 +552,14 @@ class ContextManager:
         """
         local_now = datetime.now()
 
-        # System prompt — modified for conversation mode (no JSON required)
+        # System prompt — persona + operational instructions for conversation mode
         persona = self.persona_data.get("system_prompt", "You are a local AI companion.")
-        # Strip the JSON instruction from the system prompt for chat mode
+        # Strip any heartbeat JSON instructions if baked into older persona files
         conv_system = persona.split("When responding, use this JSON format:")[0].strip()
         conv_system += (
             f"\n\nYou are now in a direct conversation with {self.user_name} via Telegram. "
-            "Just respond naturally — no JSON format needed. Be yourself.\n\n"
+            "Just respond naturally — no JSON format needed. Be yourself. "
+            "Use plain text for speech and asterisks for actions. No bolding. No nested asterisks.\n\n"
             "You have tools available (like saving memories, searching memories, setting reminders, "
             "checking the time). If you want to do something, USE the actual tool — don't just say "
             f"you did it. If you don't have a tool for something, be honest about that instead of "
