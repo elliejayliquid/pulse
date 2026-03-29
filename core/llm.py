@@ -68,11 +68,41 @@ class PulseResponse:
         # Try to extract JSON from the response
         try:
             # Handle responses that might have text before/after JSON
+            # Check for array first (some models return [{...}, {...}])
+            data = None
+            arr_start = cleaned.find("[")
             json_start = cleaned.find("{")
-            json_end = cleaned.rfind("}") + 1
-            if json_start >= 0 and json_end > json_start:
-                data = json.loads(cleaned[json_start:json_end])
-            else:
+            if arr_start >= 0 and (json_start < 0 or arr_start < json_start):
+                arr_end = cleaned.rfind("]") + 1
+                if arr_end > arr_start:
+                    try:
+                        items = json.loads(cleaned[arr_start:arr_end])
+                        if isinstance(items, list) and items:
+                            # Find the notify/action object (skip tool-like entries)
+                            data = None
+                            for item in reversed(items):
+                                if isinstance(item, dict) and (
+                                    "message" in item or "thinking" in item
+                                    or item.get("action") in ("notify", "schedule", "silent")
+                                ):
+                                    data = item
+                                    break
+                            if not data:
+                                data = items[-1]  # fallback to last item
+                            # Unwrap "args" wrapper if model used tool-call style
+                            if "args" in data and isinstance(data["args"], dict):
+                                data.update(data.pop("args"))
+                            logger.info(f"Parsed action from JSON array ({len(items)} items)")
+                    except json.JSONDecodeError:
+                        pass  # fall through to single-object parsing
+
+            if data is None:
+                if json_start >= 0:
+                    json_end = cleaned.rfind("}") + 1
+                    if json_end > json_start:
+                        data = json.loads(cleaned[json_start:json_end])
+
+            if data is None:
                 # No JSON found — treat entire response as a message
                 logger.warning("No JSON found in response, treating as notification")
                 resp.action = "notify"

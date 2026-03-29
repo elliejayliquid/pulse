@@ -776,7 +776,17 @@ class ContextManager:
                 "(e.g., search memories for relevant context, check the time).\n"
                 if has_tools else ""
             )
-            + "\nRespond in JSON format as specified in your instructions."
+            + "\nRespond in this JSON format:\n"
+            "{\n"
+            '  "thinking": "your internal reasoning (not shown to anyone)",\n'
+            '  "action": "notify | schedule | silent",\n'
+            '  "message": "what to say (if not silent)",\n'
+            '  "schedule": {\n'
+            '    "task": "what to do later",\n'
+            '    "when": "in 2 hours | daily 8:00 | 2026-03-01 15:00"\n'
+            "  }\n"
+            "}\n"
+            "Use plain text for speech and asterisks for actions. No bolding. No nested asterisks."
         )
 
         return [

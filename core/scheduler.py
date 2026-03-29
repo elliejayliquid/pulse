@@ -23,7 +23,14 @@ def _normalize_task(text: str) -> str:
     """Normalize task text for dedup comparison."""
     text = text.lower().strip()
     text = re.sub(r"[^\w\s]", "", text)  # strip punctuation/emoji
-    return re.sub(r"\s+", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    # Strip meta-framing prefixes ("remind lena about X" → "X")
+    text = re.sub(
+        r"^(remind|tell|ask|nudge|check with|ping|poke)\s+\w+\s+"
+        r"(about|to|that|regarding|re)\s+",
+        "", text
+    )
+    return text
 
 
 def _cosine_similarity(a, b) -> float:
