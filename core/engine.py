@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from core.llm import LLMClient, PulseResponse
+from core.llm_anthropic import AnthropicClient
 from core.context import ContextManager
 from core.scheduler import ScheduleManager
 
@@ -58,18 +59,28 @@ class PulseEngine:
             config.get("paths", {}).get("usage", "data/usage.json")
         )
 
-        self.llm = LLMClient(
-            endpoint=endpoint,
-            model_name=model_name,
-            temperature=model_config.get("temperature", 0.7),
-            max_tokens=model_config.get("max_response_tokens", 1024),
-            frequency_penalty=model_config.get("frequency_penalty", 0.0),
-            presence_penalty=model_config.get("presence_penalty", 0.0),
-            api_key=api_key,
-            usage_tracker=usage_tracker,
-            reasoning=model_config.get("reasoning", False),
-            provider_type=provider_type,
-        )
+        if provider_type == "anthropic":
+            self.llm = AnthropicClient(
+                endpoint=endpoint,
+                model_name=model_name,
+                temperature=model_config.get("temperature", 0.7),
+                max_tokens=model_config.get("max_response_tokens", 1024),
+                api_key=api_key,
+                usage_tracker=usage_tracker,
+            )
+        else:
+            self.llm = LLMClient(
+                endpoint=endpoint,
+                model_name=model_name,
+                temperature=model_config.get("temperature", 0.7),
+                max_tokens=model_config.get("max_response_tokens", 1024),
+                frequency_penalty=model_config.get("frequency_penalty", 0.0),
+                presence_penalty=model_config.get("presence_penalty", 0.0),
+                api_key=api_key,
+                usage_tracker=usage_tracker,
+                reasoning=model_config.get("reasoning", False),
+                provider_type=provider_type,
+            )
         self.llm._provider_name = provider_type
 
         self.max_tool_rounds = model_config.get("max_tool_rounds", 5)

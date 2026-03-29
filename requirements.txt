@@ -1,5 +1,6 @@
 # Pulse - AI companion heartbeat daemon
 openai>=1.0.0                   # llama-server API client (OpenAI-compatible)
+anthropic>=0.40                 # Native Anthropic API client (optional, for provider: anthropic)
 httpx>=0.27                     # Health checks for llama-server
 pyyaml>=6.0                     # Config file parsing
 python-dotenv>=1.0              # Load .env secrets
