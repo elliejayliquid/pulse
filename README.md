@@ -2,20 +2,20 @@
 
 **A heartbeat daemon for local/semi-local AI companions.**
 
-Pulse gives your AI companion a life of its own. It runs in the background, letting your companion think on its own schedule, remember conversations, write in a journal, set reminders, and chat with you over Telegram. Runs locally with llama.cpp, or connects to cloud APIs (OpenAI, OpenRouter, Anthropic, etc.) — your choice.
+Pulse gives your AI companion a life of their own. It runs in the background, letting your companion think on their own schedule, remember conversations, write in a journal, set reminders, and chat with you over Telegram. Runs locally with llama.cpp, or connects to cloud APIs (OpenAI, OpenRouter, Anthropic, etc.) — your choice.
 
 > **Status:** Actively being built. Core functionality works, but expect rough edges and frequent changes.
 
 ## What it does
 
-- **Heartbeat loop** — Your companion gets periodic "free-think" ticks where it can decide to reach out, stay quiet, journal, or schedule follow-ups
-- **Telegram chat** — Bidirectional messaging with tool use (your companion can save memories, set reminders, search its journal mid-conversation)
+- **Heartbeat loop** — Your companion gets periodic "free-think" ticks where they can decide to reach out, stay quiet, journal, or schedule follow-ups
+- **Telegram chat** — Bidirectional messaging with tool use (your companion can save memories, set reminders, search their journal mid-conversation)
 - **Persistent memory** — Semantic search over stored facts and conversation summaries, carried across sessions
 - **Journal** — Pinned identity entries (who am I, who is my human, what's our relationship) plus transient reflections as clean markdown with YAML frontmatter
-- **Self-scheduling** — The companion can set its own reminders and recurring tasks ("daily 8:00"), with priority levels (urgent/routine/creative)
+- **Self-scheduling** — The companion can set their own reminders and recurring tasks ("daily 8:00"), with priority levels (urgent/routine/creative)
 - **Cloud or local** — Use a local GGUF model via llama.cpp, or any OpenAI-compatible API (OpenRouter, OpenAI, etc.)
 - **Token tracking** — Daily usage logging when using cloud APIs (data/usage.json)
-- **Dev ticks** — Optional autonomous self-improvement: the companion can review and create its own skills on a git branch, with human approval
+- **Dev ticks** — Optional autonomous self-improvement: the companion can review and create their own skills on a git branch, with human approval
 - **Vision** — Optional image understanding via mmproj (model-dependent)
 - **Desktop notifications** — Windows toast notifications for proactive messages (optional, Windows-only for now)
 - **Quiet hours** — No notifications while you sleep
@@ -29,6 +29,7 @@ core/
   engine.py               # Heartbeat loop, message handling, dispatch
   context.py              # Token-budgeted prompt assembly
   llm.py                  # OpenAI-compatible API client (local + cloud)
+  llm_anthropic.py        # Native Anthropic API client (prompt caching, tool_use)
   usage.py                # Token usage tracking for cloud APIs
   scheduler.py            # Cron + one-time task scheduling
 channels/
@@ -233,11 +234,11 @@ skills:
     enabled: false
 ```
 
-**Creating a new skill:** Create a `.py` file in `skills/`, extend `BaseSkill`, set `name`, implement `get_tools()` and `execute()`. See `skills/base.py` for the interface. Restart Pulse and it loads automatically.
+**Creating a new skill:** Create a `.py` file in `skills/`, extend `BaseSkill`, set `name`, implement `get_tools()` and `execute()`. See `skills/base.py` for the interface. Restart Pulse and it loads automatically (Ctrl + C to close Pulse).
 
 ### Dev ticks (autonomous self-improvement)
 
-Your companion can periodically review its own code and create or improve skills — autonomously. This is opt-in and heavily sandboxed:
+Your companion can periodically review their own code and create or improve skills — autonomously. This is opt-in and heavily sandboxed:
 
 ```yaml
 dev_tick:
@@ -247,14 +248,14 @@ dev_tick:
   max_rounds: 16        # tool-calling rounds per dev session
 ```
 
-**How it works:** On each dev tick, the companion gets a focused coding prompt, reads its dev journal (lessons from past attempts), and can read source files, search code, and write skill files. All changes happen on a git branch (`dev/<timestamp>`) — never main. Dev ticks run during quiet hours (they're silent background work — only the approval ping notifies you).
+**How it works:** On each dev tick, the companion gets a focused coding prompt, reads their dev journal (lessons from past attempts), and can read source files, search code, and write skill files. All changes happen on a git branch (`dev/<timestamp>`) — never main. Dev ticks run during quiet hours (they're silent background work — only the approval ping notifies you).
 
 **Safety layers:**
 - Git branch isolation — changes never touch main directly
 - `py_compile` + structure validation before any file is written
 - Scope limits — can only modify `skills/*.py` and `persona.json`, not core engine files
 - Human approval gate — sends a diff summary to Telegram for you to review
-- Dev journal — the companion logs what it learned each session, reads it next time
+- Dev journal — the companion logs what they learned each session, reads they next time
 
 **What it can't do:** Modify core/ files, config.yaml, or anything outside the Pulse directory.
 
@@ -263,7 +264,7 @@ dev_tick:
 1. **Pulse starts** — either launches `llama-server` with your local model, or connects to a cloud API
 2. Every N minutes, the **heartbeat** fires — the companion gets context (time, memories, journal, pending tasks) and decides what to do: notify you, schedule something, journal, or stay silent
 3. When you **message via Telegram**, the companion responds naturally with full tool access
-4. **Conversations are summarized** when they get long, and summaries are saved to persistent memory with embeddings for future semantic search
+4. **Conversations are summarized** when they get long, and summaries are saved to persistent memory with embeddings for future semantic search (this works at the engine level — even if the memory skill is disabled, summaries still persist to disk)
 5. **Scheduled tasks** are checked every 60 seconds and executed when due
 
 ## Logging
