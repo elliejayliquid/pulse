@@ -134,6 +134,8 @@ def resolve_persona(config: dict, persona_name: str | None, pulse_root: Path) ->
         "schedules": str(persona_data / "schedules.json"),
         "conversation": str(persona_data / "conversation.json"),
         "telegram_chat_id": str(persona_data / "telegram_chat_id.txt"),
+        "action_log": str(persona_data / "action_log.json"),
+        "usage": str(persona_data / "usage.json"),
     }
     config.setdefault("paths", {})
     for key, default in default_paths.items():
