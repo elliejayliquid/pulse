@@ -95,6 +95,20 @@ class PulseEngine:
             if journal_skill:
                 self.context.set_journal_skill(journal_skill)
 
+            # Wire context-injectable skills (config: context.inject_skills)
+            inject_names = config.get("context", {}).get("inject_skills", [])
+            if inject_names:
+                inject_skills = []
+                for name in inject_names:
+                    skill = skill_registry.get_skill(name)
+                    if skill:
+                        inject_skills.append(skill)
+                        logger.info(f"Context injection: {name}")
+                    else:
+                        logger.warning(f"Context inject_skills: '{name}' not found, skipping")
+                if inject_skills:
+                    self.context.set_inject_skills(inject_skills)
+
         heartbeat_config = config.get("heartbeat", {})
         self.interval = heartbeat_config.get("interval_minutes", 120) * 60  # seconds
         self.quiet_start = heartbeat_config.get("quiet_hours_start", 23)
@@ -304,8 +318,12 @@ class PulseEngine:
                     self.context.save_to_memory(summary)
                 except Exception as e:
                     logger.warning(f"Memory persistence failed (non-fatal): {e}")
+                # Keep last 2 exchanges so the companion doesn't lose the
+                # most recent context right after summarization
+                recent_tail = history[-4:]
                 history = [{"role": "user", "content": f"[Context] Previous conversation summary: {summary}"},
-                           {"role": "assistant", "content": "Got it, I remember. Let's continue."}]
+                           {"role": "assistant", "content": "Got it, I remember. Let's continue."}
+                ] + recent_tail
             else:
                 # Summarization failed — trim history to prevent unbounded growth
                 logger.warning("Summarization failed — trimming conversation to last 10 messages.")

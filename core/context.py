@@ -84,6 +84,7 @@ class ContextManager:
         self.config = config
         self.paths = config.get("paths", {})
         self._journal_skill = None  # Set via set_journal_skill() after engine init
+        self._inject_skills = []   # Skills whose get_context() is injected into every prompt
 
         # Build budget: use explicit values from config if set,
         # otherwise derive from max_context using proportions
@@ -108,6 +109,28 @@ class ContextManager:
     def set_journal_skill(self, journal_skill):
         """Inject the JournalSkill so context can load pinned/recent entries."""
         self._journal_skill = journal_skill
+
+    def set_inject_skills(self, skills: list):
+        """Register skills whose get_context() output is injected into every prompt.
+
+        These are called before each heartbeat, task, and conversation prompt.
+        Configure via: context.inject_skills: ["skill_name", ...]
+        """
+        self._inject_skills = skills
+
+    def _load_injected_context(self) -> str:
+        """Collect context from all registered inject_skills."""
+        if not self._inject_skills:
+            return ""
+        blocks = []
+        for skill in self._inject_skills:
+            try:
+                ctx = skill.get_context()
+                if ctx:
+                    blocks.append(f"## {skill.name.title()} Context\n{ctx}")
+            except Exception as e:
+                logger.warning(f"Context injection from {skill.name} failed: {e}")
+        return "\n\n".join(blocks)
 
     def _load_journal_context(self) -> str:
         """Load pinned identity entries + recent transient entries for context."""
@@ -516,8 +539,16 @@ class ContextManager:
                 convo_lines.append(f"- {role}: {text}")
             convo_block = "\n".join(convo_lines)
 
+        # Custom skill context injection (e.g. external memory vaults)
+        injected_block = self._truncate_to_budget(
+            self._load_injected_context(),
+            self.budget.get("memories", 3000)
+        )
+
         # Assemble the user message with all context
         context_parts = [time_block]
+        if injected_block:
+            context_parts.append(injected_block)
         if journal_block:
             context_parts.append(journal_block)
         if convo_block:
@@ -628,8 +659,16 @@ class ContextManager:
             self.budget.get("memories", 2000)
         )
 
+        # Custom skill context injection (e.g. external memory vaults)
+        injected_block = self._truncate_to_budget(
+            self._load_injected_context(),
+            self.budget.get("memories", 2000)
+        )
+
         # Build a single system message (many models only support one system message)
         context_parts = [time_block]
+        if injected_block:
+            context_parts.append(injected_block)
         if journal_block:
             context_parts.append(journal_block)
         if memories_block:
@@ -773,10 +812,17 @@ class ContextManager:
             self.budget.get("memories", 2000)
         )
 
+        # Custom skill context injection
+        injected_block = self._truncate_to_budget(
+            self._load_injected_context(),
+            self.budget.get("memories", 2000)
+        )
+
         origin = task.get("origin", "companion")
 
         task_prompt = (
             f"## Current Time\n{time_str}\n\n"
+            f"{injected_block + chr(10) + chr(10) if injected_block else ''}"
             f"{memories_block}\n\n"
             f"## Task to Execute\n"
             f"You have a scheduled task to execute right now:\n"

@@ -50,6 +50,18 @@ class BaseSkill(ABC):
         }
         """
 
+    def get_context(self) -> str:
+        """Return context to inject into every prompt (optional).
+
+        Override this to provide always-on context — identity, journal,
+        knowledge base, etc. — that should be present in every heartbeat
+        and conversation prompt without requiring a tool call.
+
+        Used when the skill is listed in config: context.inject_skills.
+        Return empty string to inject nothing.
+        """
+        return ""
+
     @abstractmethod
     def execute(self, tool_name: str, arguments: dict) -> str:
         """Execute a tool call and return the result as a string.
