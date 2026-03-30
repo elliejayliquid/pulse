@@ -345,15 +345,25 @@ class PulseEngine:
             for m in history if m['role'] in ('user', 'assistant')
         )
 
+        # Scale summary length to conversation size
+        msg_count = len([m for m in history if m['role'] in ('user', 'assistant')])
+        if msg_count <= 10:
+            length_guide = "2-3 sentences"
+        elif msg_count <= 30:
+            length_guide = "4-6 sentences"
+        else:
+            length_guide = "a thorough paragraph (8-10 sentences)"
+
         summary_prompt = [
             {"role": "system", "content": (
                 "You are a summarizer. Do NOT continue the conversation. "
                 f"Do NOT respond as {ai_name}. Do NOT use emoji or roleplay. "
-                "Write a plain 2-3 sentence summary of what was discussed."
+                f"Write a plain summary in {length_guide}."
             )},
             {"role": "user", "content": (
-                f"Summarize this conversation in 2-3 plain sentences. "
-                f"Focus on: topics discussed, decisions made, emotional tone.\n\n"
+                f"Summarize this conversation in {length_guide}. "
+                f"Focus on: topics discussed, decisions made, emotional tone, "
+                f"and anything {ai_name} should remember for next time.\n\n"
                 f"{conversation_text}"
             )}
         ]
