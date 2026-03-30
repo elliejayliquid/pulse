@@ -41,16 +41,35 @@ logging.basicConfig(
     stream=sys.stdout,
 )
 
-# File handler — logs/pulse.log, rotates at 2MB, keeps last 3 files
+# File handler — set up after persona is resolved (see _setup_persona_logging)
 from logging.handlers import RotatingFileHandler
 _log_dir = Path(__file__).parent / "logs"
 _log_dir.mkdir(exist_ok=True)
+
+# Start with a shared pulse.log for pre-persona startup messages
 _file_handler = RotatingFileHandler(
     _log_dir / "pulse.log", maxBytes=2 * 1024 * 1024, backupCount=3, encoding="utf-8"
 )
 _file_handler.setFormatter(logging.Formatter(_log_format, datefmt=_log_datefmt))
 _file_handler.setLevel(logging.INFO)
 logging.getLogger().addHandler(_file_handler)
+
+
+def _setup_persona_logging(persona_name: str):
+    """Switch file logging to a per-persona log file (e.g. logs/nova.log)."""
+    global _file_handler
+    root = logging.getLogger()
+    root.removeHandler(_file_handler)
+    _file_handler.close()
+
+    _file_handler = RotatingFileHandler(
+        _log_dir / f"{persona_name}.log",
+        maxBytes=2 * 1024 * 1024, backupCount=3, encoding="utf-8"
+    )
+    _file_handler.setFormatter(logging.Formatter(_log_format, datefmt=_log_datefmt))
+    _file_handler.setLevel(logging.INFO)
+    root.addHandler(_file_handler)
+    logger.info(f"Logging to logs/{persona_name}.log")
 
 logger = logging.getLogger("pulse")
 
@@ -175,6 +194,11 @@ async def main(config_path: str, persona_name: str | None = None):
 
     # Resolve persona overlay (merges persona config over base)
     config = resolve_persona(config, persona_name, pulse_root)
+
+    # Switch to per-persona log file now that we know who we are
+    active_persona = config.get("_persona_name")
+    if active_persona:
+        _setup_persona_logging(active_persona)
 
     # Inject secrets from environment (after persona .env may have loaded)
     tg_token = os.getenv("TELEGRAM_BOT_TOKEN", "")

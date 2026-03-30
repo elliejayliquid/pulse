@@ -273,6 +273,7 @@ class PulseEngine:
         # If skills are available, use tool-calling mode; otherwise plain chat.
         tools_used = []
         tools = self.skill_registry.get_all_tools() if self.skill_registry else []
+        t0 = time.time()
         if tools:
             logger.info(f"Tool-calling mode: {len(tools)} tools available")
             reply, tools_used = await asyncio.to_thread(
@@ -282,6 +283,8 @@ class PulseEngine:
         else:
             response = await asyncio.to_thread(self.llm.chat, messages)
             reply = response.raw.strip() if response and response.raw else None
+        elapsed = time.time() - t0
+        logger.info(f"LLM {source} reply took {elapsed:.1f}s (tools: {', '.join(tools_used) if tools_used else 'none'})")
 
         if not reply:
             return None, tools_used
@@ -453,6 +456,7 @@ class PulseEngine:
             has_tools=bool(tools), skill_summary=skill_summary
         )
 
+        t0 = time.time()
         if tools:
             # Tool-calling mode: companion can use tools, then gives JSON decision
             logger.info(f"Heartbeat with {len(tools)} tools available")
@@ -460,8 +464,10 @@ class PulseEngine:
                 self.llm.chat_with_tools, messages, tools, self.skill_registry,
                 max_rounds=self.max_tool_rounds
             )
+            elapsed = time.time() - t0
             if tools_used:
                 logger.info(f"Heartbeat tools used: {', '.join(tools_used)}")
+            logger.info(f"Heartbeat tick completed in {elapsed:.1f}s")
             if text:
                 response = PulseResponse.from_llm_output(text)
                 await self._dispatch(response)
@@ -471,6 +477,8 @@ class PulseEngine:
         else:
             # Plain mode: no tools, just JSON response
             response = await asyncio.to_thread(self.llm.chat, messages)
+            elapsed = time.time() - t0
+            logger.info(f"Heartbeat tick completed in {elapsed:.1f}s")
             if response:
                 await self._dispatch(response)
                 self._log_action(response.action, summary=response.message)
