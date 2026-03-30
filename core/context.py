@@ -330,6 +330,53 @@ class ContextManager:
         except IOError as e:
             logger.error(f"Failed to save conversation: {e}")
 
+    def archive_conversation(self, messages: list[dict], summary: str = ""):
+        """Append a full conversation to the JSONL archive before it's summarized.
+
+        Each entry is one JSON line with metadata, participants, messages,
+        and an optional summary with embedding. The format is designed to be
+        compatible with future imports (ChatGPT logs, HeartlineChat, etc.).
+        """
+        archive_path = self.paths.get("conversation_archive", "")
+        if not archive_path:
+            logger.debug("No conversation_archive path — skipping archive.")
+            return
+
+        # Filter to actual conversation messages (skip context/summary injections)
+        real_messages = [
+            m for m in messages
+            if not (m.get("content", "").startswith("[Context]"))
+        ]
+        if len(real_messages) < 2:
+            return  # nothing worth archiving
+
+        now = datetime.now()
+
+        entry = {
+            "id": now.strftime("%Y-%m-%dT%H:%M:%S"),
+            "title": now.strftime("%Y-%m-%d"),
+            "participants": {
+                "user": self.user_name,
+                "assistant": self.ai_name,
+            },
+            "archived_at": now.isoformat(),
+            "message_count": len(real_messages),
+            "messages": real_messages,
+        }
+
+        if summary:
+            entry["summary"] = summary
+
+        try:
+            Path(archive_path).parent.mkdir(parents=True, exist_ok=True)
+            with open(archive_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            logger.info(
+                f"Archived conversation ({len(real_messages)} messages) → {archive_path}"
+            )
+        except IOError as e:
+            logger.error(f"Failed to archive conversation: {e}")
+
     def save_to_memory(self, summary: str, tags: str = "telegram_chat,chat_log") -> bool:
         """Save a conversation summary to persistent memory.
 

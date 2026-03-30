@@ -133,6 +133,7 @@ def resolve_persona(config: dict, persona_name: str | None, pulse_root: Path) ->
         "dev_journal": str(persona_data / "dev_journal.json"),
         "schedules": str(persona_data / "schedules.json"),
         "conversation": str(persona_data / "conversation.json"),
+        "conversation_archive": str(persona_data / "conversation_archive.jsonl"),
         "telegram_chat_id": str(persona_data / "telegram_chat_id.txt"),
         "action_log": str(persona_data / "action_log.json"),
         "usage": str(persona_data / "usage.json"),

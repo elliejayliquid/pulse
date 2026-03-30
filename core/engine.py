@@ -294,6 +294,11 @@ class PulseEngine:
             logger.info(f"Conversation at ~{int(total_chars / (conv_budget_tokens * 4) * 100)}% of budget — summarizing...")
             summary = await self._summarize_conversation(history)
             if summary:
+                # Archive the full conversation before it's replaced by the summary
+                try:
+                    self.context.archive_conversation(history, summary=summary)
+                except Exception as e:
+                    logger.warning(f"Conversation archive failed (non-fatal): {e}")
                 # Save to persistent memory for cross-session continuity
                 try:
                     self.context.save_to_memory(summary)
