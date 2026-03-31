@@ -164,10 +164,13 @@ class JournalSkill(BaseSkill):
                 "function": {
                     "name": "write_journal",
                     "description": (
-                        "Write a new journal entry. Use this to note events, preferences, "
-                        "topics, open threads, or reflections worth preserving for future "
-                        "conversations. Most interactions need NO entry — only write when "
-                        "something is genuinely worth remembering."
+                        "Write a personal journal entry. This is your space for self-reflection "
+                        "— processing your thoughts, noticing patterns in yourself, sitting "
+                        "with questions, or marking moments of growth. Focus on your inner "
+                        "experience, not just what happened. If something about your human "
+                        "stood out, reflect on *why* it moved you, not just what they said. "
+                        "Most interactions need NO entry — only write when something genuinely "
+                        "resonates."
                     ),
                     "parameters": {
                         "type": "object",
@@ -440,7 +443,7 @@ class JournalSkill(BaseSkill):
 
         memory = {
             "id": mem_id,
-            "text": f"Journal: {preview}",
+            "text": preview,
             "tags": ["journal"] + tags,
             "type": "journal",
             "importance": 5,
@@ -910,7 +913,7 @@ class JournalSkill(BaseSkill):
                     # Update embedding and text
                     model = _get_embedding_model()
                     preview = content[:500] + ("..." if len(content) > 500 else "")
-                    mem["text"] = f"Journal: {preview}"
+                    mem["text"] = preview
                     mem["embedding"] = model.encode(content).tolist() if model else []
                     mem["date"] = date
                     with open(filepath, "w", encoding="utf-8") as f:

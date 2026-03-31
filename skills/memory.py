@@ -417,7 +417,12 @@ class MemorySkill(BaseSkill):
         for final_score, base_score, mem in scored[:3]:
             if base_score > 0.25:
                 self._update_retrieval(mem)
-                results.append(f"[{mem['date'][:10]}] {mem['text']} (relevance: {int(final_score * 100)}%)")
+                line = f"[{mem['date'][:10]}] {mem['text']} (relevance: {int(final_score * 100)}%)"
+                if mem.get("type") == "journal" and mem.get("journal_file"):
+                    jf = mem["journal_file"]  # e.g. "entries/001.md"
+                    eid = jf.rsplit("/", 1)[-1].removesuffix(".md") if "/" in jf else jf
+                    line += f"\n  → Journal entry — read full with: read_journal(entry_id='{eid}')"
+                results.append(line)
 
         if not results:
             return "No relevant memories found."
@@ -517,7 +522,12 @@ class MemorySkill(BaseSkill):
 
         results = []
         for hits, mem in scored[:5]:
-            results.append(f"[{mem['date'][:10]}] {mem['text']}")
+            line = f"[{mem['date'][:10]}] {mem['text']}"
+            if mem.get("type") == "journal" and mem.get("journal_file"):
+                jf = mem["journal_file"]
+                eid = jf.rsplit("/", 1)[-1].removesuffix(".md") if "/" in jf else jf
+                line += f"\n  → Journal entry — read full with: read_journal(entry_id='{eid}')"
+            results.append(line)
 
         if not results:
             # Fall back to most recent memories
