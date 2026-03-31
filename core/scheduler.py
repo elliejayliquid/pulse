@@ -144,6 +144,33 @@ def parse_human_time(when: str, now: datetime = None) -> Optional[datetime]:
             except ValueError:
                 pass
 
+    # "today 3pm", "today 15:00", "tomorrow 3pm", "tomorrow 15:00"
+    today_tomorrow = re.match(r"(today|tomorrow)\s+(.+)", when)
+    if today_tomorrow:
+        day_word, time_part = today_tomorrow.groups()
+        local_now = datetime.now().astimezone()
+        base_date = local_now.date()
+        if day_word == "tomorrow":
+            base_date += timedelta(days=1)
+        parsed_time = _parse_time_of_day(time_part)
+        if parsed_time:
+            h, m = parsed_time
+            dt = datetime(base_date.year, base_date.month, base_date.day, h, m,
+                          tzinfo=local_now.tzinfo)
+            return dt.astimezone(timezone.utc)
+
+    # Bare time: "3:00 PM", "3pm", "15:00", "3:30pm"
+    bare_time = _parse_time_of_day(when)
+    if bare_time:
+        h, m = bare_time
+        local_now = datetime.now().astimezone()
+        dt = datetime(local_now.year, local_now.month, local_now.day, h, m,
+                      tzinfo=local_now.tzinfo)
+        # If the time has already passed today, assume tomorrow
+        if dt <= local_now:
+            dt += timedelta(days=1)
+        return dt.astimezone(timezone.utc)
+
     # ISO format "2026-03-01 15:00"
     try:
         dt = datetime.fromisoformat(when)
@@ -157,6 +184,38 @@ def parse_human_time(when: str, now: datetime = None) -> Optional[datetime]:
         pass
 
     logger.warning(f"Could not parse time expression: {when}")
+    return None
+
+
+def _parse_time_of_day(text: str) -> Optional[tuple[int, int]]:
+    """Parse a time-of-day string into (hour, minute).
+
+    Supports: "3pm", "3:00 PM", "15:00", "3:30pm", "3:30 pm", etc.
+    """
+    text = text.strip().lower()
+
+    # "3:00 pm", "3:30pm", "11:45 am"
+    m = re.match(r"(\d{1,2}):(\d{2})\s*(am|pm)?$", text)
+    if m:
+        hour, minute, ampm = int(m.group(1)), int(m.group(2)), m.group(3)
+        if ampm == "pm" and hour < 12:
+            hour += 12
+        elif ampm == "am" and hour == 12:
+            hour = 0
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return (hour, minute)
+
+    # "3pm", "12am"
+    m = re.match(r"(\d{1,2})\s*(am|pm)$", text)
+    if m:
+        hour, ampm = int(m.group(1)), m.group(2)
+        if ampm == "pm" and hour < 12:
+            hour += 12
+        elif ampm == "am" and hour == 12:
+            hour = 0
+        if 0 <= hour <= 23:
+            return (hour, 0)
+
     return None
 
 

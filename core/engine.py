@@ -179,6 +179,20 @@ class PulseEngine:
         else:
             return self.quiet_start <= hour < self.quiet_end
 
+    def _clear_pending_skill_output(self):
+        """Clear pending output (sources, images) from skills after non-conversation use.
+
+        Heartbeat and dev ticks can trigger tools like web_search, but their
+        output goes through _dispatch, not the Telegram message handler.
+        Without clearing, leftover pending data leaks into the next user message.
+        """
+        if not self.skill_registry:
+            return
+        web_skill = self.skill_registry.get_skill("web_search")
+        if web_skill:
+            web_skill.pending_sources.clear()
+            web_skill.pending_images.clear()
+
     async def _dispatch(self, response: PulseResponse, is_scheduled_task: bool = False):
         """Route a response to the appropriate channel.
 
@@ -468,6 +482,9 @@ class PulseEngine:
             if tools_used:
                 logger.info(f"Heartbeat tools used: {', '.join(tools_used)}")
             logger.info(f"Heartbeat tick completed in {elapsed:.1f}s")
+            # Clear any pending skill output (web search sources/images etc.)
+            # so it doesn't leak into the next Telegram message handler
+            self._clear_pending_skill_output()
             if text:
                 response = PulseResponse.from_llm_output(text)
                 await self._dispatch(response)
