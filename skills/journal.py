@@ -436,7 +436,7 @@ class JournalSkill(BaseSkill):
         mem_id = f"{self._get_next_memory_id():03d}"
 
         # Preview for the memory text field
-        preview = content[:200] + ("..." if len(content) > 200 else "")
+        preview = content[:500] + ("..." if len(content) > 500 else "")
 
         memory = {
             "id": mem_id,
@@ -909,7 +909,7 @@ class JournalSkill(BaseSkill):
                 if mem.get("type") == "journal" and mem.get("journal_file") == journal_file:
                     # Update embedding and text
                     model = _get_embedding_model()
-                    preview = content[:200] + ("..." if len(content) > 200 else "")
+                    preview = content[:500] + ("..." if len(content) > 500 else "")
                     mem["text"] = f"Journal: {preview}"
                     mem["embedding"] = model.encode(content).tolist() if model else []
                     mem["date"] = date
@@ -945,9 +945,7 @@ class JournalSkill(BaseSkill):
                 lines.append(f"### {entry.get('title', entry['id'])}")
                 for key, value in filled.items():
                     label = key.replace("_", " ").title()
-                    # Truncate long values for the overview
-                    preview = value[:150] + "..." if len(value) > 150 else value
-                    lines.append(f"- **{label}:** {preview}")
+                    lines.append(f"- **{label}:** {value}")
                 lines.append("")
 
         # 3 most recent transient entries
@@ -958,7 +956,7 @@ class JournalSkill(BaseSkill):
                 entry_id = entry.get("id", "?")
                 entry_type = entry.get("entry_type", "?")
                 date = entry.get("date", entry.get("created_at", "?"))[:10]
-                content_preview = entry.get("content", "")[:120]
+                content_preview = entry.get("content", "")[:500]
 
                 resolved_tag = ""
                 if entry.get("resolved") is True:

@@ -164,7 +164,7 @@ class ContextManager:
                 lines.append(
                     f"- [{date_str}] "
                     f"({entry.get('entry_type', '?')}{resolved_tag}) "
-                    f"{entry.get('content', '')[:120]}"
+                    f"{entry.get('content', '')[:500]}"
                 )
 
         if not lines:
