@@ -115,6 +115,8 @@ class TelegramChannel(Channel):
                 filters.VOICE,
                 self._on_voice
             ))
+            # Pre-download whisper components so first voice message is fast
+            asyncio.create_task(self._transcriber.ensure_ready())
             logger.info("Voice transcription enabled")
 
         # Error handler — catch network blips gracefully

@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 # Defaults
 DEFAULT_MODEL = "base"
-WHISPER_VERSION = "1.7.4"
+WHISPER_VERSION = "1.8.4"
 
 # Download URLs
 WHISPER_BIN_URL = (
