@@ -490,8 +490,8 @@ class TelegramChannel(Channel):
             except Exception:
                 pass
 
-            # Route to companion as if it were a text message
-            reply, tools_used = await self._engine.handle_message(text, source="telegram")
+            # Route to companion with voice hint so they know transcription may be imperfect
+            reply, tools_used = await self._engine.handle_message(f"🎙️ {text}", source="telegram")
 
             if reply:
                 if tools_used:
