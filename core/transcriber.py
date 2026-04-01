@@ -44,10 +44,8 @@ class Transcriber:
         self.model_name = voice_cfg.get("whisper_model", DEFAULT_MODEL)
         self.language = voice_cfg.get("language", "auto")
 
-        # Store everything under data/whisper/ (derive from memories path)
-        memories_dir = config.get("paths", {}).get("memories", "data/memories")
-        data_root = str(Path(memories_dir).parent)
-        self.data_dir = Path(data_root) / "whisper"
+        # Shared location — whisper binaries/models are identical across personas
+        self.data_dir = Path("data/whisper")
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
         self._ready = False
