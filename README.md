@@ -17,6 +17,7 @@ Pulse gives your AI companion a life of their own. It runs in the background, le
 - **Token tracking** — Daily usage logging when using cloud APIs (data/usage.json)
 - **Dev ticks** — Optional autonomous self-improvement: the companion can review and create their own skills on a git branch, with human approval
 - **Vision** — Optional image understanding via mmproj (model-dependent)
+- **Voice messages** — Send voice notes on Telegram; Pulse transcribes locally via whisper.cpp (auto-downloads everything on first use)
 - **Desktop notifications** — Windows toast notifications for proactive messages (optional, Windows-only for now)
 - **Quiet hours** — No notifications while you sleep
 
@@ -209,6 +210,26 @@ model:
   model_file: "your-model.gguf"
   mmproj_file: "mmproj-F16.gguf"   # vision projector
 ```
+
+### Voice messages (optional)
+
+Send voice notes to your companion on Telegram — they're transcribed locally using [whisper.cpp](https://github.com/ggml-org/whisper.cpp). On first use, Pulse auto-downloads whisper.cpp, the whisper model, and ffmpeg (~200MB total for the `base` model).
+
+```yaml
+voice:
+  enabled: true
+  whisper_model: "base"    # "tiny" (~75MB, fast), "base" (~148MB, good), "small" (~466MB, better)
+  language: "auto"         # or "en", "es", "fr", etc.
+```
+
+Available models (all run on CPU, no GPU required):
+| Model | Size | Speed | Quality |
+|-------|------|-------|---------|
+| tiny | ~75MB | Fastest | Basic — fine for clear speech |
+| base | ~148MB | Fast | Good — recommended default |
+| small | ~466MB | Moderate | Better — handles accents well |
+| medium | ~1.5GB | Slow | High — near human-level |
+| large-v3 | ~3GB | Slowest | Best — may not fit on Pi |
 
 ### Skills
 

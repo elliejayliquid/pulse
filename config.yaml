@@ -84,6 +84,15 @@ channels:
     bot_token: ""                 # Set via TELEGRAM_BOT_TOKEN in .env
     chat_id: ""                   # Auto-saved after first /start
 
+# --- Voice Transcription (optional) ---
+# Transcribe Telegram voice messages to text locally using whisper.cpp.
+# On first use, Pulse auto-downloads whisper.cpp, the model, and ffmpeg.
+# Everything is stored in data/whisper/ (~200MB for base model + ffmpeg).
+voice:
+  enabled: false                  # set true to accept voice messages
+  whisper_model: "base"           # "tiny", "base", "small", "medium", "large-v3"
+  language: "auto"                # "auto" to detect, or "en", "es", "fr", etc.
+
 # --- Skills (tool-calling for conversations) ---
 # Each skill gives the companion tools to use during Telegram chats.
 # Disable a skill to temporarily remove its tools.

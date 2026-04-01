@@ -11,6 +11,7 @@ Uses python-telegram-bot (async version).
 import asyncio
 import base64
 import logging
+from pathlib import Path
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -35,6 +36,11 @@ class TelegramChannel(Channel):
         self.app = None
         self._engine = None  # Set by engine after init
         self._chat_id_file = config.get("paths", {}).get("telegram_chat_id", "")
+        self._transcriber = None
+        voice_cfg = config.get("voice", {})
+        if voice_cfg.get("enabled", False):
+            from core.transcriber import Transcriber
+            self._transcriber = Transcriber(config)
         # Read companion name from persona (for user-facing messages)
         self._ai_name = "Companion"
         persona_path = config.get("paths", {}).get("persona", "persona.json")
@@ -102,6 +108,14 @@ class TelegramChannel(Channel):
             filters.PHOTO,
             self._on_photo
         ))
+
+        # Voice handler — transcribe voice messages to text
+        if self._transcriber:
+            self.app.add_handler(MessageHandler(
+                filters.VOICE,
+                self._on_voice
+            ))
+            logger.info("Voice transcription enabled")
 
         # Error handler — catch network blips gracefully
         self.app.add_error_handler(self._on_error)
@@ -432,6 +446,77 @@ class TelegramChannel(Channel):
             logger.error(f"Photo handler crashed: {e}", exc_info=True)
             try:
                 await update.message.reply_text("(Something went wrong processing that image — check the logs!)")
+            except Exception:
+                pass
+
+    async def _on_voice(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle incoming voice messages — transcribe locally, then route to companion."""
+        try:
+            if not self._engine:
+                await update.message.reply_text("I'm still starting up, give me a moment...")
+                return
+
+            logger.info(f"Telegram voice message ({update.message.voice.duration}s)")
+
+            # Show typing while we transcribe
+            try:
+                await update.effective_chat.send_action("typing")
+            except Exception:
+                pass
+
+            # Download the .ogg file
+            voice = update.message.voice
+            file = await voice.get_file()
+            ogg_path = Path(self._transcriber.data_dir) / f"_voice_{update.message.message_id}.ogg"
+            await file.download_to_drive(str(ogg_path))
+
+            # Transcribe
+            text = await self._transcriber.transcribe(ogg_path)
+
+            if not text:
+                await self._reply_with_retry(update.message, "(I couldn't make out what you said — try again?)")
+                return
+
+            logger.info(f"Voice transcribed: {text[:80]}...")
+
+            # Show what we heard (so the user can verify)
+            await self._reply_with_retry(update.message, f"🎙️ {text}")
+
+            # Keep typing while the companion thinks
+            try:
+                await update.effective_chat.send_action("typing")
+            except Exception:
+                pass
+
+            # Route to companion as if it were a text message
+            reply, tools_used = await self._engine.handle_message(text, source="telegram")
+
+            if reply:
+                if tools_used:
+                    tool_names = ", ".join(dict.fromkeys(tools_used))
+                    await self._reply_with_retry(update.message, f"🔧 {tool_names}")
+                await self._reply_with_retry(update.message, reply)
+
+                # Pending skill output (web search sources, images)
+                if self._engine and self._engine.skill_registry:
+                    web_skill = self._engine.skill_registry.get_skill("web_search")
+                    if web_skill:
+                        if web_skill.pending_sources:
+                            source_lines = ["📎 Sources:"]
+                            for s in web_skill.pending_sources:
+                                source_lines.append(f"  • {s['title']}\n    {s['url']}")
+                            await self._reply_with_retry(update.message, "\n".join(source_lines))
+                            web_skill.pending_sources.clear()
+                        if web_skill.pending_images:
+                            for img_url in web_skill.pending_images:
+                                await self.send_photo(img_url)
+                            web_skill.pending_images.clear()
+            else:
+                await self._reply_with_retry(update.message, "(I'm having trouble thinking right now — llama-server might be down)")
+        except Exception as e:
+            logger.error(f"Voice handler crashed: {e}", exc_info=True)
+            try:
+                await update.message.reply_text("(Something went wrong transcribing that — check the logs!)")
             except Exception:
                 pass
 
