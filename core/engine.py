@@ -300,13 +300,21 @@ class PulseEngine:
         elapsed = time.time() - t0
         logger.info(f"LLM {source} reply took {elapsed:.1f}s (tools: {', '.join(tools_used) if tools_used else 'none'})")
 
-        if not reply:
-            return None, tools_used
-
         # Safety net: strip <think> tags that reasoning models may include
-        from core.llm import strip_think_tags
-        reply = strip_think_tags(reply)
-        if not reply:
+        if reply:
+            from core.llm import strip_think_tags
+            reply = strip_think_tags(reply)
+
+        # If the companion sent a voice message with no text, use the spoken
+        # text for conversation history so continuity is preserved.
+        voice_text = None
+        if self.skill_registry:
+            tts_skill = self.skill_registry.get_skill("tts")
+            if tts_skill and tts_skill.pending_voice_text:
+                voice_text = f"🔊 {tts_skill.pending_voice_text}"
+
+        history_reply = reply or voice_text
+        if not history_reply:
             return None, tools_used
 
         # Update conversation history (store text only — images are too large to persist)
@@ -314,7 +322,7 @@ class PulseEngine:
         timestamp = datetime.now().strftime("[%b %d, %I:%M %p]")
         image_note = " [sent an image]" if image_url else ""
         history.append({"role": "user", "content": f"{timestamp} {message}{image_note}"})
-        history.append({"role": "assistant", "content": reply})
+        history.append({"role": "assistant", "content": history_reply})
 
         # Auto-summarize when conversation approaches its token budget (~85%)
         conv_budget_tokens = self.config.get("context_budget", {}).get("conversation", 4000)
@@ -347,7 +355,8 @@ class PulseEngine:
                 history = history[-10:]
 
         self.context.save_conversation(history)
-        logger.info(f"Replied to {source}: {reply[:50]}...")
+        log_reply = reply or voice_text or "(voice-only)"
+        logger.info(f"Replied to {source}: {log_reply[:50]}...")
         return reply, tools_used
 
     async def _summarize_conversation(self, history: list[dict]) -> str:

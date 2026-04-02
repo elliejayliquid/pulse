@@ -89,9 +89,17 @@ channels:
 # On first use, Pulse auto-downloads whisper.cpp, the model, and ffmpeg.
 # Everything is stored in data/whisper/ (~200MB for base model + ffmpeg).
 voice:
-  enabled: false                  # set true to accept voice messages
+  enabled: true                  # set true to accept voice messages
   whisper_model: "base"           # "tiny", "base", "small", "medium", "large-v3"
   language: "auto"                # "auto" to detect, or "en", "es", "fr", etc.
+
+# --- Text-to-Speech (optional) ---
+# Let the companion send voice messages via Qwen3-TTS VoiceDesign.
+# On first use, the model (~3.4GB) is downloaded from HuggingFace.
+# Requires CUDA GPU with enough VRAM alongside your LLM model.
+# voice_description defines the companion's voice identity.
+tts:
+  voice_description: ""           # e.g. "Warm young male, clear midrange, slightly playful"
 
 # --- Skills (tool-calling for conversations) ---
 # Each skill gives the companion tools to use during Telegram chats.
@@ -109,6 +117,8 @@ skills:
     enabled: false                 # post_to_lor, browse_lor, read_lor_thread
   dev:
     enabled: true                  # read_source, search_code, write_skill, list_skills, dev_journal
+  tts:
+    enabled: false                 # speak — send voice messages
 
 # --- Dev Tick (autonomous self-improvement) ---
 # The companion periodically reviews its own code and can create/improve skills.

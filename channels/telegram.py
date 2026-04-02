@@ -193,6 +193,55 @@ class TelegramChannel(Channel):
         except Exception as e:
             logger.warning(f"Failed to send photo: {e}")
 
+    async def _send_voice(self, message, ogg_path: Path):
+        """Send an OGG voice message and clean up the temp file."""
+        try:
+            with open(ogg_path, "rb") as f:
+                await message.reply_voice(voice=f)
+        except Exception as e:
+            logger.error(f"Failed to send voice message: {e}")
+        finally:
+            try:
+                ogg_path.unlink()
+            except Exception:
+                pass
+
+    async def _send_pending_skill_output(self, message, reply: str,
+                                         tools_used: list[str]) -> bool:
+        """Handle pending output from skills (TTS voice, web sources, images).
+
+        Returns True if voice was sent (meaning text reply should be suppressed).
+        """
+        if not self._engine or not self._engine.skill_registry:
+            return False
+
+        voice_sent = False
+
+        # TTS — send voice message instead of text
+        tts_skill = self._engine.skill_registry.get_skill("tts")
+        if tts_skill and tts_skill.pending_voice:
+            ogg_path = tts_skill.pending_voice
+            tts_skill.pending_voice = None
+            tts_skill.pending_voice_text = None
+            await self._send_voice(message, ogg_path)
+            voice_sent = True
+
+        # Web search — show sources and images
+        web_skill = self._engine.skill_registry.get_skill("web_search")
+        if web_skill:
+            if web_skill.pending_sources:
+                source_lines = ["📎 Sources:"]
+                for s in web_skill.pending_sources:
+                    source_lines.append(f"  • {s['title']}\n    {s['url']}")
+                await self._reply_with_retry(message, "\n".join(source_lines))
+                web_skill.pending_sources.clear()
+            if web_skill.pending_images:
+                for img_url in web_skill.pending_images:
+                    await self.send_photo(img_url)
+                web_skill.pending_images.clear()
+
+        return voice_sent
+
     async def shutdown(self):
         """Stop the Telegram bot gracefully."""
         if self.app:
@@ -366,31 +415,18 @@ class TelegramChannel(Channel):
             # Get response from companion via the engine
             reply, tools_used = await self._engine.handle_message(user_message, source="telegram")
 
+            # Check for pending voice/skill output
+            voice_sent = await self._send_pending_skill_output(
+                update.message, reply or "", tools_used
+            )
+
             if reply:
-                # Show which tools were used (transparency!)
-                if tools_used:
-                    tool_names = ", ".join(dict.fromkeys(tools_used))  # dedupe, preserve order
+                # Send text reply (even after voice — companion may want both)
+                if tools_used and not voice_sent:
+                    tool_names = ", ".join(dict.fromkeys(tools_used))
                     await self._reply_with_retry(update.message, f"🔧 {tool_names}")
                 await self._reply_with_retry(update.message, reply)
-
-                # Send any pending structured output from skills
-                if self._engine and self._engine.skill_registry:
-                    # Web search — show sources and images
-                    web_skill = self._engine.skill_registry.get_skill("web_search")
-                    if web_skill:
-                        # Show sources so the user can verify
-                        if web_skill.pending_sources:
-                            source_lines = ["📎 Sources:"]
-                            for s in web_skill.pending_sources:
-                                source_lines.append(f"  • {s['title']}\n    {s['url']}")
-                            await self._reply_with_retry(update.message, "\n".join(source_lines))
-                            web_skill.pending_sources.clear()
-                        # Send images inline
-                        if web_skill.pending_images:
-                            for img_url in web_skill.pending_images:
-                                await self.send_photo(img_url)
-                            web_skill.pending_images.clear()
-            else:
+            elif not voice_sent:
                 await self._reply_with_retry(update.message, "(I'm having trouble thinking right now — llama-server might be down)")
         except Exception as e:
             logger.error(f"Message handler crashed: {e}", exc_info=True)
@@ -433,12 +469,15 @@ class TelegramChannel(Channel):
                 caption, source="telegram", image_url=image_url
             )
 
+            voice_sent = await self._send_pending_skill_output(
+                update.message, reply or "", tools_used
+            )
             if reply:
-                if tools_used:
+                if tools_used and not voice_sent:
                     tool_names = ", ".join(dict.fromkeys(tools_used))
                     await self._reply_with_retry(update.message, f"🔧 {tool_names}")
                 await self._reply_with_retry(update.message, reply)
-            else:
+            elif not voice_sent:
                 await self._reply_with_retry(
                     update.message,
                     "(I can't process images right now — the model might not support vision, "
@@ -493,27 +532,15 @@ class TelegramChannel(Channel):
             # Route to companion with voice hint so they know transcription may be imperfect
             reply, tools_used = await self._engine.handle_message(f"🎙️ {text}", source="telegram")
 
+            voice_sent = await self._send_pending_skill_output(
+                update.message, reply or "", tools_used
+            )
             if reply:
-                if tools_used:
+                if tools_used and not voice_sent:
                     tool_names = ", ".join(dict.fromkeys(tools_used))
                     await self._reply_with_retry(update.message, f"🔧 {tool_names}")
                 await self._reply_with_retry(update.message, reply)
-
-                # Pending skill output (web search sources, images)
-                if self._engine and self._engine.skill_registry:
-                    web_skill = self._engine.skill_registry.get_skill("web_search")
-                    if web_skill:
-                        if web_skill.pending_sources:
-                            source_lines = ["📎 Sources:"]
-                            for s in web_skill.pending_sources:
-                                source_lines.append(f"  • {s['title']}\n    {s['url']}")
-                            await self._reply_with_retry(update.message, "\n".join(source_lines))
-                            web_skill.pending_sources.clear()
-                        if web_skill.pending_images:
-                            for img_url in web_skill.pending_images:
-                                await self.send_photo(img_url)
-                            web_skill.pending_images.clear()
-            else:
+            elif not voice_sent:
                 await self._reply_with_retry(update.message, "(I'm having trouble thinking right now — llama-server might be down)")
         except Exception as e:
             logger.error(f"Voice handler crashed: {e}", exc_info=True)
