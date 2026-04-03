@@ -2,12 +2,14 @@
 TTS skill — lets the companion send voice messages.
 
 The companion decides when to speak aloud instead of (or alongside) text.
-Uses Qwen3-TTS VoiceDesign to generate speech from a voice description
-defined in config, combined with per-message emotion/style.
+Supports two modes:
+  - **Design** (audition): generates speech from a voice description in config,
+    combined with per-message emotion.  Slightly different each time.
+  - **Clone** (production): reproduces a locked-in reference voice consistently.
+    Activated when voice_sample + voice_sample_text are set in config.
 
 The generated audio is queued as `pending_voice` — the Telegram channel
-picks it up and sends it as a voice message. The text is preserved in
-conversation context but NOT sent as a visible text message.
+picks it up and sends it as a voice message.
 """
 
 import logging
@@ -39,6 +41,23 @@ class TTSSkill(BaseSkill):
         self.pending_voice: Path | None = None  # OGG path for Telegram to send
         self.pending_voice_text: str | None = None  # text to log in conversation
 
+        # Clone mode: reference clip + transcript
+        voice_sample = tts_config.get("voice_sample", "")
+        self.voice_sample: Path | None = Path(voice_sample) if voice_sample else None
+        self.voice_sample_text: str | None = tts_config.get("voice_sample_text", "") or None
+
+        if self.voice_sample:
+            if not self.voice_sample.exists():
+                logger.warning(f"[TTS] voice_sample not found: {self.voice_sample}")
+                self.voice_sample = None
+                self.voice_sample_text = None
+            else:
+                logger.info(f"[TTS] Clone mode — reference: {self.voice_sample}")
+
+    @property
+    def clone_mode(self) -> bool:
+        return self.voice_sample is not None and self.voice_sample_text is not None
+
     def get_tools(self) -> list[dict]:
         return [
             {
@@ -51,7 +70,8 @@ class TTSSkill(BaseSkill):
                         "something playful, or a moment that deserves more than text. "
                         "The listener will ONLY hear your voice (no text shown), so make "
                         "sure your words carry the full meaning. Keep it concise — voice "
-                        "messages should feel spontaneous, not like a speech."
+                        "messages should feel spontaneous, not like a speech. "
+                        "You MUST call this function — never write [speak] as text."
                     ),
                     "parameters": {
                         "type": "object",
@@ -85,7 +105,7 @@ class TTSSkill(BaseSkill):
 
         emotion = arguments.get("emotion", "")
 
-        if not self.voice_description:
+        if not self.voice_description and not self.clone_mode:
             return "Voice not configured — add tts.voice_description to config."
 
         engine = _get_engine()
@@ -94,7 +114,13 @@ class TTSSkill(BaseSkill):
         # so asyncio.run() is safe here — no event loop in this thread.
         import asyncio
         try:
-            ogg_path = asyncio.run(engine.speak(text, self.voice_description, emotion))
+            ogg_path = asyncio.run(engine.speak(
+                text=text,
+                voice_description=self.voice_description,
+                emotion=emotion,
+                ref_audio_path=self.voice_sample,
+                ref_text=self.voice_sample_text,
+            ))
         except Exception as e:
             logger.error(f"[TTS] Generation failed: {e}", exc_info=True)
             return f"Voice generation failed: {e}"
@@ -103,5 +129,6 @@ class TTSSkill(BaseSkill):
         self.pending_voice = ogg_path
         self.pending_voice_text = text
 
-        logger.info(f"[TTS] Queued voice message: {text[:50]}...")
+        mode = "clone" if self.clone_mode else "design"
+        logger.info(f"[TTS/{mode}] Queued voice message: {text[:50]}...")
         return f"Voice message generated. The listener will hear you say: \"{text}\""

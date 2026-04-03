@@ -305,15 +305,19 @@ class PulseEngine:
             from core.llm import strip_think_tags
             reply = strip_think_tags(reply)
 
-        # If the companion sent a voice message with no text, use the spoken
-        # text for conversation history so continuity is preserved.
+        # Preserve spoken text in conversation history so the companion
+        # remembers what it said aloud.  When both voice and text exist,
+        # prepend the voice transcript so nothing is lost.
         voice_text = None
         if self.skill_registry:
             tts_skill = self.skill_registry.get_skill("tts")
             if tts_skill and tts_skill.pending_voice_text:
                 voice_text = f"🔊 {tts_skill.pending_voice_text}"
 
-        history_reply = reply or voice_text
+        if voice_text and reply:
+            history_reply = f"{voice_text}\n{reply}"
+        else:
+            history_reply = reply or voice_text
         if not history_reply:
             return None, tools_used
 

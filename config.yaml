@@ -100,6 +100,8 @@ voice:
 # voice_description defines the companion's voice identity.
 tts:
   voice_description: ""           # e.g. "Warm young male, clear midrange, slightly playful"
+  voice_sample: ""                # path to reference OGG/WAV — enables clone mode (consistent voice)
+  voice_sample_text: ""           # transcript of the reference clip (required for clone mode)
 
 # --- Skills (tool-calling for conversations) ---
 # Each skill gives the companion tools to use during Telegram chats.
