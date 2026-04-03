@@ -126,6 +126,9 @@ class PulseEngine:
         self._running = False
         self._stop_event = asyncio.Event()
 
+        # Activity tracking — heartbeat only fires after silence
+        self._last_activity = 0.0   # timestamp of last message exchange
+
         # Rate limiting — prevent the companion from flooding channels
         self._last_notify = 0       # timestamp of last notification
         self._notify_cooldown = heartbeat_config.get("notify_cooldown_minutes", 60) * 60  # default 1 hour
@@ -269,6 +272,9 @@ class PulseEngine:
         Returns:
             Tuple of (companion's response text, list of tools used). Text is None if LLM unavailable.
         """
+        # Reset heartbeat timer — conversation is active
+        self._last_activity = time.time()
+
         # is_available() is a sync HTTP call — run in thread to not block
         available = await asyncio.to_thread(self.llm.is_available)
         if not available:
@@ -673,6 +679,9 @@ class PulseEngine:
         else:
             logger.warning("LLM server is not available — will retry on each tick.")
 
+        # Start the silence clock — heartbeat fires after interval_minutes of no activity
+        self._last_activity = time.time()
+
         # Optional startup check-in
         if self.startup_checkin:
             logger.info("Running startup check-in...")
@@ -680,11 +689,9 @@ class PulseEngine:
             await self._do_heartbeat()
 
         # Main loop — wake up every 60s to check schedules,
-        # but only do a full heartbeat on the configured interval
+        # heartbeat fires only after enough silence (no messages exchanged)
         scheduler_interval = 60  # seconds — check for due tasks every minute
-        ticks_since_heartbeat = 0
         ticks_since_dev = 0
-        heartbeat_ticks = self.interval // scheduler_interval  # e.g., 30 for 30-min interval
         # Dev tick scheduling: either at a specific time or on an interval
         dev_ticks = 0
         dev_tick_ran_today = False
@@ -701,7 +708,6 @@ class PulseEngine:
             if not self._running:
                 break
 
-            ticks_since_heartbeat += 1
             if dev_ticks:
                 ticks_since_dev += 1
 
@@ -709,9 +715,10 @@ class PulseEngine:
                 # Always check for due tasks (fast — just reads a file)
                 await self._check_due_tasks()
 
-                # Full heartbeat on the configured interval
-                if ticks_since_heartbeat >= heartbeat_ticks:
-                    ticks_since_heartbeat = 0
+                # Heartbeat fires only after enough silence since last activity
+                silence = time.time() - self._last_activity
+                if silence >= self.interval:
+                    self._last_activity = time.time()  # reset so we don't fire every 60s
                     await self._do_heartbeat()
 
                 # Dev tick — scheduled time or interval

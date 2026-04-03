@@ -85,6 +85,7 @@ class TelegramChannel(Channel):
             Application.builder()
             .token(self.bot_token)
             .request(request)
+            .concurrent_updates(True)
             .build()
         )
 
