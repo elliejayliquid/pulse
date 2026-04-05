@@ -18,6 +18,7 @@ Pulse gives your AI companion a life of their own. It runs in the background, le
 - **Dev ticks** — Optional autonomous self-improvement: the companion can review and create their own skills on a git branch, with human approval
 - **Vision** — Optional image understanding via mmproj (model-dependent)
 - **Voice messages** — Send voice notes on Telegram; Pulse transcribes locally via whisper.cpp (auto-downloads everything on first use)
+- **Text-to-speech** — Companions can send voice messages back via [Qwen3-TTS](https://huggingface.co/Qwen/Qwen3-TTS), with voice design (describe a voice) or voice cloning (lock in a reference sample)
 - **Desktop notifications** — Windows toast notifications for proactive messages (optional, Windows-only for now)
 - **Quiet hours** — No notifications while you sleep
 
@@ -196,11 +197,16 @@ provider:
 ```yaml
 heartbeat:
   interval_minutes: 30        # how often the companion thinks
+  randomize: false            # randomize interval for more organic timing
+  interval_min_minutes: 20    # minimum (when randomize is true)
+  interval_max_minutes: 45    # maximum (when randomize is true)
   quiet_hours_start: 23       # no notifications after 11pm
   quiet_hours_end: 8          # no notifications before 8am
   startup_checkin: true       # think on startup
   notify_cooldown_minutes: 60 # max 1 proactive notification per hour
 ```
+
+When `randomize` is enabled, each heartbeat interval is randomly chosen between min and max — the companion thinks at unpredictable intervals instead of a fixed schedule. Re-rolls after each heartbeat and after each conversation.
 
 ### Vision (optional)
 
@@ -231,6 +237,26 @@ Available models (all run on CPU, no GPU required):
 | medium | ~1.5GB | Slow | High — near human-level |
 | large-v3 | ~3GB | Slowest | Best — may not fit on Pi |
 
+### Text-to-speech (optional)
+
+Your companion can send voice messages on Telegram using [Qwen3-TTS](https://huggingface.co/Qwen/Qwen3-TTS). Two modes:
+
+- **Voice design** — Describe the voice you want and the model generates it (uses the 1.7B model for variety)
+- **Voice cloning** — Provide a reference audio sample and the companion locks into that voice (uses the 0.6B model for consistency)
+
+```yaml
+tts:
+  voice_description: "Warm young male, clear midrange, slightly playful"
+  voice_sample: ""             # path to reference OGG/WAV — enables clone mode
+  voice_sample_text: ""        # transcript of the reference clip (required for clone mode)
+
+skills:
+  tts:
+    enabled: true
+```
+
+Requires a CUDA GPU with enough VRAM to run TTS alongside your LLM (or use a cloud provider for the LLM to free up VRAM). Models are downloaded automatically on first use.
+
 ### Skills
 
 Skills are **auto-discovered** — any `.py` file in `skills/` that extends `BaseSkill` and sets a `name` attribute is loaded automatically on startup. No manual registration needed; just drop a file in and restart.
@@ -245,6 +271,7 @@ Built-in skills:
 | tasks | `add_task`, `complete_task`, `list_tasks`, `clear_tasks` | Persistent to-do lists |
 | time | `get_current_time` | Temporal awareness |
 | lor | `post_to_lor`, `browse_lor`, `read_lor_thread`, + 4 more | Forum participation (requires [LoR](https://github.com/elliejayliquid/local-reddit-for-AI)) |
+| tts | `speak` | Send voice messages via Qwen3-TTS (requires CUDA GPU) |
 | web_search | `web_search`, `image_search` | Search the web using DuckDuckGo |
 | dev | `read_source`, `search_code`, `write_skill`, `list_skills`, `dev_journal_read`, `dev_journal_write` | Autonomous skill creation (used by dev ticks) |
 
