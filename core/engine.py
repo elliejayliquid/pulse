@@ -11,6 +11,7 @@ This is the main orchestrator. It:
 import asyncio
 import json
 import logging
+import random
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -110,7 +111,11 @@ class PulseEngine:
                     self.context.set_inject_skills(inject_skills)
 
         heartbeat_config = config.get("heartbeat", {})
-        self.interval = heartbeat_config.get("interval_minutes", 120) * 60  # seconds
+        self._heartbeat_randomize = heartbeat_config.get("randomize", False)
+        self._heartbeat_min = heartbeat_config.get("interval_min_minutes", 20) * 60
+        self._heartbeat_max = heartbeat_config.get("interval_max_minutes", 45) * 60
+        fixed_interval = heartbeat_config.get("interval_minutes", 120) * 60
+        self.interval = self._roll_heartbeat_interval(fixed_interval)
         self.quiet_start = heartbeat_config.get("quiet_hours_start", 23)
         self.quiet_end = heartbeat_config.get("quiet_hours_end", 8)
         self.startup_checkin = heartbeat_config.get("startup_checkin", True)
@@ -138,6 +143,18 @@ class PulseEngine:
             config.get("paths", {}).get("action_log", "data/action_log.json")
         )
         self._action_log_max = 20  # keep last 20 actions
+
+    def _roll_heartbeat_interval(self, fixed: int = 0) -> int:
+        """Pick the next heartbeat interval in seconds.
+
+        If randomize is enabled, returns a random value between min and max.
+        Otherwise returns the fixed interval.
+        """
+        if self._heartbeat_randomize:
+            interval = random.randint(self._heartbeat_min, self._heartbeat_max)
+            logger.info(f"Next heartbeat interval: {interval // 60} minutes")
+            return interval
+        return fixed or self.interval
 
     def _log_action(self, action: str, tools_used: list[str] = None, summary: str = ""):
         """Append an entry to the heartbeat action log (ring buffer)."""
@@ -272,8 +289,9 @@ class PulseEngine:
         Returns:
             Tuple of (companion's response text, list of tools used). Text is None if LLM unavailable.
         """
-        # Reset heartbeat timer — conversation is active
+        # Reset heartbeat timer — conversation is active, re-roll interval
         self._last_activity = time.time()
+        self.interval = self._roll_heartbeat_interval()
 
         # is_available() is a sync HTTP call — run in thread to not block
         available = await asyncio.to_thread(self.llm.is_available)
@@ -670,7 +688,10 @@ class PulseEngine:
         self._running = True
         self._stop_event.clear()
         logger.info("Pulse engine starting...")
-        logger.info(f"Heartbeat interval: {self.interval // 60} minutes")
+        if self._heartbeat_randomize:
+            logger.info(f"Heartbeat interval: {self._heartbeat_min // 60}-{self._heartbeat_max // 60} minutes (randomized)")
+        else:
+            logger.info(f"Heartbeat interval: {self.interval // 60} minutes")
         logger.info(f"Quiet hours: {self.quiet_start}:00 - {self.quiet_end}:00")
 
         # Check LLM server availability
@@ -720,6 +741,7 @@ class PulseEngine:
                 if silence >= self.interval:
                     self._last_activity = time.time()  # reset so we don't fire every 60s
                     await self._do_heartbeat()
+                    self.interval = self._roll_heartbeat_interval()
 
                 # Dev tick — scheduled time or interval
                 if self.dev_tick_enabled:
