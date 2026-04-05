@@ -41,7 +41,9 @@ class MemorySkill(BaseSkill):
                     "description": (
                         "Save a fact, preference, or important detail to your persistent memory. "
                         "Use this when your human tells you something worth remembering across sessions. "
-                        "Examples: 'Their favorite color is blue', 'Project deadline is March 5'."
+                        "Examples: 'Their favorite color is blue', 'Project deadline is March 5'. "
+                        "Keep the text clean — do NOT put tags or metadata in the text field, "
+                        "use the tags parameter instead."
                     ),
                     "parameters": {
                         "type": "object",

@@ -148,8 +148,16 @@ class LLMClient:
         self._usage = usage_tracker
         self._provider_name = ""  # set by engine for usage logging
         # Build extra_body for cloud providers that support reasoning control
+        # Only OpenRouter uses the reasoning meta-parameter; OpenAI handles
+        # reasoning natively per model and would reject unknown fields.
+        # OpenAI newer models (GPT-5.x, o-series) require max_completion_tokens
+        # instead of max_tokens. Other providers and local servers use max_tokens.
+        self._max_tokens_param = (
+            "max_completion_tokens" if provider_type == "openai"
+            else "max_tokens"
+        )
         self._extra_body = {}
-        if provider_type != "local":
+        if provider_type == "openrouter":
             if reasoning:
                 self._extra_body["reasoning"] = {"enabled": True}
             else:
@@ -164,6 +172,15 @@ class LLMClient:
                 provider=self._provider_name,
                 model=self.model_name,
             )
+            # Log prompt cache stats (OpenAI automatic caching)
+            details = getattr(response.usage, "prompt_tokens_details", None)
+            cached = getattr(details, "cached_tokens", 0) if details else 0
+            if cached:
+                logger.info(
+                    f"Prompt cache: {cached} cached of "
+                    f"{response.usage.prompt_tokens} prompt tokens "
+                    f"({cached * 100 // response.usage.prompt_tokens}% hit)"
+                )
 
     def is_available(self) -> bool:
         """Check if the LLM server is reachable."""
@@ -192,9 +209,9 @@ class LLMClient:
                 model=self.model_name,
                 messages=messages,
                 temperature=self.temperature,
-                max_tokens=self.max_tokens,
                 frequency_penalty=self.frequency_penalty,
                 presence_penalty=self.presence_penalty,
+                **{self._max_tokens_param: self.max_tokens},
                 **({"extra_body": self._extra_body} if self._extra_body else {}),
             )
 
@@ -247,9 +264,9 @@ class LLMClient:
                     messages=msgs,
                     tools=tools if tools else None,
                     temperature=self.temperature,
-                    max_tokens=self.max_tokens,
                     frequency_penalty=self.frequency_penalty,
                     presence_penalty=self.presence_penalty,
+                    **{self._max_tokens_param: self.max_tokens},
                     **({"extra_body": self._extra_body} if self._extra_body else {}),
                 )
 
@@ -323,7 +340,7 @@ class LLMClient:
                 model=self.model_name,
                 messages=msgs,
                 temperature=self.temperature,
-                max_tokens=self.max_tokens,
+                **{self._max_tokens_param: self.max_tokens},
                 **({"extra_body": self._extra_body} if self._extra_body else {}),
             )
             self._track(response)
