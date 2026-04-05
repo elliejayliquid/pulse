@@ -18,7 +18,7 @@ Pulse gives your AI companion a life of their own. It runs in the background, le
 - **Dev ticks** — Optional autonomous self-improvement: the companion can review and create their own skills on a git branch, with human approval
 - **Vision** — Optional image understanding via mmproj (model-dependent)
 - **Voice messages** — Send voice notes on Telegram; Pulse transcribes locally via whisper.cpp (auto-downloads everything on first use)
-- **Text-to-speech** — Companions can send voice messages back via [Qwen3-TTS](https://huggingface.co/Qwen/Qwen3-TTS), with voice design (describe a voice) or voice cloning (lock in a reference sample)
+- **Text-to-speech** — Companions can send voice messages back via [Qwen3-TTS](https://huggingface.co/collections/Qwen/qwen3-tts), with voice design (describe a voice) or voice cloning (lock in a reference sample)
 - **Desktop notifications** — Windows toast notifications for proactive messages (optional, Windows-only for now)
 - **Quiet hours** — No notifications while you sleep
 
@@ -43,6 +43,7 @@ skills/                   # Auto-discovered — just drop a .py file here
   schedule.py             # Set/update/delete reminders (one-time + recurring)
   tasks.py                # Persistent to-do lists
   time_skill.py           # Current date/time awareness
+  tts.py                  # Text to speech skill
   lor.py                  # LoR forum integration (optional)
   web_search.py           # Web search via DuckDuckGo (free)
   dev.py                  # Autonomous skill creation (dev ticks)
@@ -239,7 +240,7 @@ Available models (all run on CPU, no GPU required):
 
 ### Text-to-speech (optional)
 
-Your companion can send voice messages on Telegram using [Qwen3-TTS](https://huggingface.co/Qwen/Qwen3-TTS). Two modes:
+Your companion can send voice messages on Telegram using [Qwen3-TTS](https://huggingface.co/collections/Qwen/qwen3-tts). Two modes:
 
 - **Voice design** — Describe the voice you want and the model generates it (uses the 1.7B model for variety)
 - **Voice cloning** — Provide a reference audio sample and the companion locks into that voice (uses the 0.6B model for consistency)
