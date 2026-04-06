@@ -168,18 +168,25 @@ class TelegramChannel(Channel):
             logger.error(f"Telegram send failed: {e}")
 
     async def _reply_with_retry(self, message, text: str, retries: int = 3):
-        """Send a reply with retry on timeout."""
-        for attempt in range(1, retries + 1):
-            try:
-                await message.reply_text(text)
-                return True
-            except Exception as e:
-                if attempt < retries:
-                    logger.warning(f"Reply attempt {attempt}/{retries} failed ({e}), retrying in 3s...")
-                    await asyncio.sleep(3)
-                else:
-                    logger.error(f"Reply failed after {retries} attempts: {e}")
-                    return False
+        """Send a reply with retry on timeout.
+
+        Automatically splits messages that exceed Telegram's 4096-char limit.
+        """
+        # Split into chunks if needed (same approach as send())
+        chunks = [text[i:i+4000] for i in range(0, len(text), 4000)] if len(text) > 4000 else [text]
+        for chunk in chunks:
+            for attempt in range(1, retries + 1):
+                try:
+                    await message.reply_text(chunk)
+                    break
+                except Exception as e:
+                    if attempt < retries:
+                        logger.warning(f"Reply attempt {attempt}/{retries} failed ({e}), retrying in 3s...")
+                        await asyncio.sleep(3)
+                    else:
+                        logger.error(f"Reply failed after {retries} attempts: {e}")
+                        return False
+        return True
 
     async def send_photo(self, photo_url: str, caption: str = ""):
         """Send a photo to the user via Telegram (by URL)."""
