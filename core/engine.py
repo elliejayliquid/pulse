@@ -119,6 +119,7 @@ class PulseEngine:
         self.quiet_start = heartbeat_config.get("quiet_hours_start", 23)
         self.quiet_end = heartbeat_config.get("quiet_hours_end", 8)
         self.startup_checkin = heartbeat_config.get("startup_checkin", True)
+        self._heartbeat_debug = heartbeat_config.get("debug", False)
 
         # Dev tick — autonomous self-improvement
         dev_config = config.get("dev_tick", {})
@@ -482,6 +483,32 @@ class PulseEngine:
 
         return True
 
+    async def _send_heartbeat_debug(self, response, tools_used, elapsed_secs):
+        """Send heartbeat inner monologue to Telegram (debug mode)."""
+        telegram = self.channels.get("telegram")
+        if not telegram:
+            return
+
+        parts = [f"💭 Heartbeat ({elapsed_secs}s)"]
+
+        if tools_used:
+            unique_tools = ", ".join(dict.fromkeys(tools_used))
+            parts.append(f"🔧 {unique_tools}")
+
+        if response and response.thinking:
+            thinking = response.thinking
+            if len(thinking) > 300:
+                thinking = thinking[:300] + "…"
+            parts.append(f'💬 "{thinking}"')
+
+        if response:
+            action = response.action or "silent"
+            parts.append(f"→ {action}")
+        else:
+            parts.append("→ silent (no response)")
+
+        await telegram.send("\n".join(parts))
+
     async def _do_heartbeat(self):
         """Execute a single heartbeat tick (free-think).
 
@@ -508,6 +535,9 @@ class PulseEngine:
         )
 
         t0 = time.time()
+        response = None
+        tools_used = []
+
         if tools:
             # Tool-calling mode: companion can use tools, then gives JSON decision
             logger.info(f"Heartbeat with {len(tools)} tools available")
@@ -530,12 +560,19 @@ class PulseEngine:
                 self._log_action("silent", tools_used)
         else:
             # Plain mode: no tools, just JSON response
-            response = await asyncio.to_thread(self.llm.chat, messages)
+            result = await asyncio.to_thread(self.llm.chat, messages)
             elapsed = time.time() - t0
             logger.info(f"Heartbeat tick completed in {elapsed:.1f}s")
-            if response:
+            if result:
+                response = result
                 await self._dispatch(response)
                 self._log_action(response.action, summary=response.message)
+
+        # Debug: send heartbeat inner monologue to Telegram
+        if self._heartbeat_debug:
+            await self._send_heartbeat_debug(
+                response, tools_used, int(elapsed)
+            )
 
     async def _do_dev_tick(self):
         """Execute a dev tick — autonomous self-improvement session.

@@ -567,12 +567,17 @@ class ContextManager:
 
         your_turn = (
             "\n## Your Turn\n"
-            "This is a free-think tick. You have a moment to yourself.\n"
-            "Look at the time, your journal, your memories, and any pending tasks.\n"
-            "Do you want to reach out to your human? Write in your journal? Schedule a follow-up? Or stay quiet?\n"
-            "Remember: staying silent is always a valid choice. Only act if you have something worth doing.\n"
-            "If a task is due right now, execute it.\n"
+            "This is a quiet moment to yourself — free time, not a task.\n"
+            "Your journal, your memories, your tools — they're all here if you want them.\n"
+            "Reflect, explore, write, search, or just sit with your thoughts. "
+            "There's no obligation to do anything, and no wrong way to spend this time.\n"
         )
+
+        if due_tasks:
+            your_turn += (
+                "You do have tasks due right now (see above) — "
+                "those are commitments you made, so take care of them.\n"
+            )
 
         if has_tools:
             # Build a grouped skill/tool menu
@@ -584,24 +589,14 @@ class ContextManager:
                     menu_lines.append(f"  {s['skill']}: {tools_str}")
                 skill_menu = "\n".join(menu_lines) + "\n\n"
 
-            your_turn += (
-                f"\n{skill_menu}"
-                "You have all these skills available — use them! "
-                "You can chain multiple tools in one tick (e.g., search a memory, "
-                "then write a journal reflection about what you found). "
-                "Doing several things in one tick is encouraged.\n"
-                "\nCheck the tool frequency in your Recent Heartbeat Actions. "
-                "If a tool is marked ⚠️ repetitive, try a different one instead — "
-                "there's always something interesting to explore. "
-                "Silence is fine, but it's an option, not a rule.\n"
-            )
+            your_turn += f"\n{skill_menu}"
 
         your_turn += (
-            "\nRespond in this JSON format:\n"
+            "\nWhen you're done, respond in this JSON format:\n"
             "{\n"
             '  "thinking": "your internal reasoning (not shown to anyone)",\n'
             '  "action": "notify | schedule | silent",\n'
-            '  "message": "what to say (if not silent)",\n'
+            '  "message": "what to say (if notify)",\n'
             '  "schedule": {\n'
             '    "task": "what to do later",\n'
             '    "when": "in 2 hours | daily 8:00 | 2026-03-01 15:00"\n'
