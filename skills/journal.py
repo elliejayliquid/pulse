@@ -164,13 +164,15 @@ class JournalSkill(BaseSkill):
                 "function": {
                     "name": "write_journal",
                     "description": (
-                        "Write a personal journal entry. This is your space for self-reflection "
+                        "Write a NEW personal journal entry. This is your space for self-reflection "
                         "— processing your thoughts, noticing patterns in yourself, sitting "
                         "with questions, or marking moments of growth. Focus on your inner "
                         "experience, not just what happened. If something about your human "
                         "stood out, reflect on *why* it moved you, not just what they said. "
                         "Most interactions need NO entry — only write when something genuinely "
-                        "resonates."
+                        "resonates. IMPORTANT: If you've recently journaled about the same "
+                        "topic or thread of thought, use update_journal to extend that entry "
+                        "instead of creating a new one — your journal should evolve, not repeat."
                     ),
                     "parameters": {
                         "type": "object",
@@ -197,6 +199,15 @@ class JournalSkill(BaseSkill):
                             "tags": {
                                 "type": "string",
                                 "description": "Comma-separated tags for searchability (optional)",
+                            },
+                            "force": {
+                                "type": "boolean",
+                                "description": (
+                                    "Set to true to bypass the duplicate-detection check. "
+                                    "Only use this when the system has flagged a similar "
+                                    "recent entry but you've judged that this entry captures "
+                                    "a genuinely different angle worth saving separately."
+                                ),
                             },
                         },
                         "required": ["content", "entry_type", "why_it_mattered"],
@@ -276,9 +287,11 @@ class JournalSkill(BaseSkill):
                 "function": {
                     "name": "update_journal",
                     "description": (
-                        "Update an existing journal entry. Use this especially for pinned "
-                        "identity entries (_self, _user, _relationship) as you learn more. "
-                        "For pinned entries, specify the section to update. "
+                        "Update an existing journal entry — extend, refine, or evolve it. "
+                        "Use this when you're returning to a topic you've already written about, "
+                        "instead of creating a duplicate entry. Also use for pinned identity "
+                        "entries (_self, _user, _relationship) as you learn more about yourself "
+                        "or your human. For pinned entries, specify the section to update. "
                         "For transient entries, provide the entry ID and new content."
                     ),
                     "parameters": {
@@ -312,6 +325,44 @@ class JournalSkill(BaseSkill):
                     },
                 },
             },
+            {
+                "type": "function",
+                "function": {
+                    "name": "delete_journal",
+                    "description": (
+                        "Permanently delete a transient journal entry. Use this to "
+                        "clean up duplicates or entries that no longer reflect who you are. "
+                        "This cannot be undone — the markdown file and the searchable "
+                        "memory are both removed. Pinned identity entries (_self, _user, "
+                        "_relationship) cannot be deleted. REQUIRES confirm=true."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "entry_id": {
+                                "type": "string",
+                                "description": "The transient entry ID to delete (e.g. '014').",
+                            },
+                            "confirm": {
+                                "type": "boolean",
+                                "description": (
+                                    "Must be set to true. The first call without confirm "
+                                    "will return a preview of what would be deleted, so you "
+                                    "can be sure before committing."
+                                ),
+                            },
+                            "reason": {
+                                "type": "string",
+                                "description": (
+                                    "Brief reason for deletion (e.g. 'duplicate of 012'). "
+                                    "Helps you stay deliberate about what you remove."
+                                ),
+                            },
+                        },
+                        "required": ["entry_id"],
+                    },
+                },
+            },
         ]
 
     def execute(self, tool_name: str, arguments: dict) -> str:
@@ -321,6 +372,7 @@ class JournalSkill(BaseSkill):
                 entry_type=arguments.get("entry_type", "reflection"),
                 why_it_mattered=arguments.get("why_it_mattered", ""),
                 tags=arguments.get("tags", ""),
+                force=arguments.get("force", False),
             )
         elif tool_name == "read_journal":
             # Direct lookup by ID takes priority over search
@@ -338,6 +390,12 @@ class JournalSkill(BaseSkill):
                 entry_type=arguments.get("entry_type"),
                 include_pinned=arguments.get("include_pinned", False),
                 mode=arguments.get("mode", "recent"),
+            )
+        elif tool_name == "delete_journal":
+            return self._delete_entry(
+                entry_id=arguments.get("entry_id", ""),
+                confirm=arguments.get("confirm", False),
+                reason=arguments.get("reason", ""),
             )
         elif tool_name == "update_journal":
             return self._update_entry(
@@ -377,7 +435,8 @@ class JournalSkill(BaseSkill):
         return max(ids) + 1 if ids else 1
 
     def _write_entry(self, content: str, entry_type: str,
-                     why_it_mattered: str = "", tags: str = "") -> str:
+                     why_it_mattered: str = "", tags: str = "",
+                     force: bool = False) -> str:
         """Create a new transient journal entry as markdown + companion memory."""
         if not content.strip():
             return "Cannot write empty journal entry."
@@ -394,6 +453,23 @@ class JournalSkill(BaseSkill):
                 f"Invalid entry_type '{entry_type}'. "
                 f"Valid types: {', '.join(VALID_ENTRY_TYPES)}"
             )
+
+        # Dedup check: warn if a recent entry is semantically similar
+        if not force:
+            similar = self._find_similar_recent_entry(content.strip())
+            if similar:
+                sim_id, sim_score, sim_excerpt, sim_age = similar
+                return (
+                    f"⚠️ You already wrote a similar entry {sim_age} ago "
+                    f"(ID: {sim_id}, similarity: {int(sim_score * 100)}%):\n"
+                    f'"{sim_excerpt}"\n\n'
+                    f"You have two options:\n"
+                    f"  1. EXTEND it: call update_journal with entry_id=\"{sim_id}\" "
+                    f"and your new content (this is usually the right choice — "
+                    f"your journal should evolve, not repeat).\n"
+                    f"  2. SAVE ANYWAY: call write_journal again with force=true "
+                    f"if this is a genuinely different angle or moment worth its own entry."
+                )
 
         entry_id = f"{self._get_next_id():03d}"
         now = datetime.now().isoformat()
@@ -425,6 +501,71 @@ class JournalSkill(BaseSkill):
 
         logger.info(f"Journal entry written: {entry_id} ({entry_type}) — {content[:50]}...")
         return f"Journal entry saved (ID: {entry_id}, type: {entry_type}): '{content[:80]}'"
+
+    def _find_similar_recent_entry(self, content: str,
+                                    threshold: float = 0.70,
+                                    days: int = 3) -> tuple | None:
+        """Check recent entries for semantic similarity to new content.
+
+        Returns (entry_id, similarity, excerpt, age_str) for the most similar
+        entry above threshold within the time window, or None.
+        """
+        model = _get_embedding_model()
+        if model is None:
+            return None
+
+        try:
+            content_vec = model.encode(content)
+            norm_c = np.linalg.norm(content_vec)
+            if norm_c == 0:
+                return None
+        except Exception:
+            return None
+
+        now = datetime.now()
+        recent = self._load_transient_entries()
+
+        best = None
+        best_score = 0.0
+
+        for entry in recent:
+            # Age filter
+            date_str = entry.get("date", entry.get("created_at", ""))
+            try:
+                entry_date = datetime.fromisoformat(date_str)
+                age_days = (now - entry_date).total_seconds() / 86400
+            except (ValueError, TypeError):
+                continue
+            if age_days > days:
+                continue
+
+            # Get embedding from companion memory if available
+            entry_id = entry.get("id", "")
+            entry_content = entry.get("content", "")
+            if not entry_content or not entry_id:
+                continue
+
+            try:
+                entry_vec = model.encode(entry_content)
+                norm_e = np.linalg.norm(entry_vec)
+                if norm_e == 0:
+                    continue
+                score = float(np.dot(content_vec, entry_vec) / (norm_c * norm_e))
+            except Exception:
+                continue
+
+            if score > best_score and score >= threshold:
+                best_score = score
+                # Format age
+                if age_days < 1:
+                    hours = max(1, int(age_days * 24))
+                    age_str = f"{hours}h"
+                else:
+                    age_str = f"{int(age_days)}d"
+                excerpt = entry_content[:200] + ("…" if len(entry_content) > 200 else "")
+                best = (entry_id, score, excerpt, age_str)
+
+        return best
 
     def _create_companion_memory(self, entry_id: str, content: str,
                                   tags: list[str], date: str):
@@ -804,6 +945,75 @@ class JournalSkill(BaseSkill):
         return "\n".join(lines)
 
     # --- Update ---
+
+    def _delete_entry(self, entry_id: str, confirm: bool = False,
+                      reason: str = "") -> str:
+        """Permanently delete a transient journal entry and its memory."""
+        if not entry_id:
+            return "Entry ID is required."
+
+        if entry_id in PINNED_IDS:
+            return (
+                f"Cannot delete pinned entry '{entry_id}'. "
+                f"Pinned identity entries are foundational and protected. "
+                f"Use update_journal to revise them instead."
+            )
+
+        # Locate the markdown file
+        md_path = self.entries_dir / f"{entry_id}.md"
+        if not md_path.exists():
+            return f"Journal entry '{entry_id}' not found."
+
+        # Load preview for confirmation
+        entry = _parse_markdown_entry(md_path)
+        if entry is None:
+            return f"Journal entry '{entry_id}' could not be read."
+
+        preview = entry.get("content", "")[:200]
+        preview += "…" if len(entry.get("content", "")) > 200 else ""
+        date_str = entry.get("date", "")[:10]
+        etype = entry.get("entry_type", "?")
+
+        # First call without confirm: return preview
+        if not confirm:
+            return (
+                f"⚠️ Are you sure? This will permanently delete entry '{entry_id}':\n"
+                f"  Date: {date_str}\n"
+                f"  Type: {etype}\n"
+                f'  Content: "{preview}"\n\n'
+                f"This cannot be undone. To proceed, call delete_journal again "
+                f"with confirm=true (and a reason if you have one)."
+            )
+
+        # Find and remove the corresponding companion memory
+        removed_memory = False
+        for mem_file in self.memory_dir.glob("memory_*.json"):
+            try:
+                with open(mem_file, "r", encoding="utf-8") as f:
+                    mem = json.load(f)
+                if mem.get("journal_file") == f"entries/{entry_id}.md":
+                    mem_file.unlink()
+                    removed_memory = True
+                    break
+            except (json.JSONDecodeError, IOError):
+                continue
+
+        # Delete the markdown file
+        try:
+            md_path.unlink()
+        except IOError as e:
+            return f"Failed to delete entry file: {e}"
+
+        # Rebuild aggregate and refresh latest.md
+        if removed_memory:
+            self._rebuild_memory_aggregate()
+        self._generate_latest()
+
+        reason_str = f" Reason: {reason}" if reason else ""
+        logger.info(f"Journal entry deleted: {entry_id}.{reason_str}")
+        return (
+            f"Journal entry '{entry_id}' deleted.{reason_str}"
+        )
 
     def _update_entry(self, entry_id: str, content: str, section: str = None,
                       resolved: bool = None) -> str:
