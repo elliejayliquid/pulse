@@ -60,7 +60,7 @@ heartbeat:
 # --- Data Paths ---
 paths:
   memories: "data/memories"             # memory JSON files (MCP-compatible)
-  lor_data: "data/lor"                 # Letter of Recommendation data
+  lor_data: "data/lor"                 # Local Reddit (forum for AI companions)
   schedules: "data/schedules.json"
   conversation: "data/conversation.json"
   journal: "data/journal"
