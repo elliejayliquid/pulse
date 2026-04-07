@@ -211,6 +211,33 @@ class ScheduleSkill(BaseSkill):
                 when=when.strip(),
                 priority=priority,
             )
+
+            # Was this deduped against an existing reminder? If so, the model
+            # needs to KNOW it didn't actually create a new one — otherwise it
+            # will narrate "I set it!" and confuse the user.
+            was_deduped = entry.pop("_was_deduped", False)
+            if was_deduped:
+                logger.info(f"Reminder dedup hit via skill: {entry['id']} — '{task}' matched existing")
+                schedule_type = entry.get("schedule_type", "once")
+                if schedule_type == "recurring":
+                    when_str = f"{entry.get('cron', '?')} (daily recurring)"
+                else:
+                    when_str = entry.get("run_at_local", entry.get("run_at", "?"))
+                created_at = entry.get("created_at_local", entry.get("created_at", "earlier"))
+                return (
+                    f"⚠️ ALREADY EXISTS — no new reminder was created.\n"
+                    f"You (or someone) already set a similar reminder previously:\n"
+                    f"  Existing task: {entry.get('task', '')}\n"
+                    f"  Fires at: {when_str}\n"
+                    f"  Priority: {entry.get('priority', 'routine')}\n"
+                    f"  ID: {entry['id']}\n"
+                    f"  Originally created: {created_at}\n\n"
+                    f"DO NOT tell the user you just set a new reminder — that would be wrong.\n"
+                    f"Instead, acknowledge that the reminder is already in place from earlier. "
+                    f"If they actually want a *different* reminder (different time or task), "
+                    f"ask them to clarify, or use update_reminder to change the existing one."
+                )
+
             logger.info(f"Reminder set via skill: {entry['id']} — {task} (priority: {priority})")
 
             # Format the actual resolved time clearly — the model MUST report this

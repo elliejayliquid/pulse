@@ -325,7 +325,12 @@ class ScheduleManager:
                     f"Dedup: skipping '{task}' — similar to existing '{existing['task']}' "
                     f"({existing['id']})"
                 )
-                return existing  # return the existing entry instead
+                # Return a shallow copy with a transient flag so callers (e.g. the
+                # schedule skill) can tell the entry was deduped vs newly created.
+                # The flag is not persisted — only the copy carries it.
+                deduped = dict(existing)
+                deduped["_was_deduped"] = True
+                return deduped
 
         schedules.append(entry)
         self._save(schedules)

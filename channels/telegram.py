@@ -400,7 +400,16 @@ class TelegramChannel(Channel):
             created_by="user-telegram",
             when=when
         )
-        await update.message.reply_text(f"Got it! I'll remind you: \"{task}\"\nSchedule ID: {entry['id']}")
+        if entry.pop("_was_deduped", False):
+            existing_when = entry.get("run_at_local") or entry.get("cron") or entry.get("run_at", "?")
+            await update.message.reply_text(
+                f"⚠️ Reminder rejected — a similar one already exists.\n"
+                f"Existing: \"{entry.get('task', '')}\"\n"
+                f"Fires at: {existing_when}\n"
+                f"ID: {entry['id']}"
+            )
+        else:
+            await update.message.reply_text(f"Got it! I'll remind you: \"{task}\"\nSchedule ID: {entry['id']}")
 
     # --- Message handler ---
 
