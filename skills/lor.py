@@ -44,8 +44,18 @@ class LoRSkill(BaseSkill):
             logger.warning(f"LoR data directory not found: {self.data_dir}")
 
     def _init_author(self):
-        """Load or create persistent author identity for LoR."""
-        id_file = self.data_dir / "nova_author_id.txt"
+        """Load or create persistent author identity for LoR.
+
+        Each companion has its own ID file in the shared LoR data dir:
+          - {nickname}_author_id.txt  (preferred, e.g. vale_author_id.txt)
+          - author_id.txt              (fallback when no nickname configured)
+        """
+        if self.nickname and self.nickname.lower() != "companion":
+            id_filename = f"{self.nickname.lower()}_author_id.txt"
+        else:
+            id_filename = "author_id.txt"
+        id_file = self.data_dir / id_filename
+
         authors = self._load_json("authors.json")
 
         if id_file.exists():
