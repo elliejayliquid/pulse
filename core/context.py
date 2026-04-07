@@ -248,6 +248,34 @@ class ContextManager:
                 ]
         return data
 
+    def _compose_persona(self) -> str:
+        """Compose the full persona prompt from system_prompt + side fields.
+
+        Side fields (traits, relationship_context, voice_notes) are appended
+        in second person so the model actually receives them. Without this,
+        those YAML fields would be silently ignored — only system_prompt
+        was historically read.
+        """
+        parts = [self.persona_data.get("system_prompt", "You are a local AI companion.")]
+
+        traits = self.persona_data.get("traits")
+        if traits:
+            if isinstance(traits, list):
+                traits_str = "\n".join(f"- {t}" for t in traits)
+            else:
+                traits_str = str(traits).strip()
+            parts.append(f"## Your Traits\n{traits_str}")
+
+        rel = self.persona_data.get("relationship_context")
+        if rel and isinstance(rel, str):
+            parts.append(f"## Your Relationship with {self.user_name}\n{rel.strip()}")
+
+        voice = self.persona_data.get("voice_notes")
+        if voice and isinstance(voice, str):
+            parts.append(f"## Your Voice\n{voice.strip()}")
+
+        return "\n\n".join(parts)
+
     def _estimate_tokens(self, text: str) -> int:
         """Rough token count estimation."""
         return len(text) // self.CHARS_PER_TOKEN
@@ -486,7 +514,7 @@ class ContextManager:
         local_now = datetime.now()
 
         # System prompt (persona)
-        system = self.persona_data.get("system_prompt", "You are a local AI companion.")
+        system = self._compose_persona()
 
         # Time awareness
         time_block = (
@@ -626,7 +654,7 @@ class ContextManager:
         local_now = datetime.now()
 
         # System prompt — persona + operational instructions for conversation mode
-        persona = self.persona_data.get("system_prompt", "You are a local AI companion.")
+        persona = self._compose_persona()
         # Strip any heartbeat JSON instructions if baked into older persona files
         conv_system = persona.split("When responding, use this JSON format:")[0].strip()
         conv_system += (
@@ -796,7 +824,7 @@ class ContextManager:
         can decide whether the follow-up is still relevant. User-origin tasks
         always fire without negotiation.
         """
-        system = self.persona_data.get("system_prompt", "You are a local AI companion.")
+        system = self._compose_persona()
 
         local_now = datetime.now()
         time_str = local_now.strftime('%A, %B %d, %Y at %I:%M %p')

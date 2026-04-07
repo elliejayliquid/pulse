@@ -122,10 +122,12 @@ traits:
   - warm
   - curious
 
+# The fields below are appended to the system prompt at runtime,
+# so write them in SECOND PERSON ("you are", "you speak").
 relationship_context: >
-  Describe the relationship between {name} and {user_name}.
+  Describe your relationship with {user_name} from your point of view.
 
-voice_notes: Describe how this persona communicates.
+voice_notes: Describe how you communicate — tone, cadence, quirks.
 ```
 
 All `{name}` and `{user_name}` placeholders are resolved automatically. YAML is recommended for readability — JSON is also supported.

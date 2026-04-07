@@ -12,7 +12,10 @@ traits:
   - trait one
   - trait two
 
-relationship_context: >
-  Describe the relationship between {name} and {user_name}.
+# All side fields below are appended to the system prompt at runtime,
+# so write them in SECOND PERSON ("you are", "you speak", etc.).
 
-voice_notes: Describe how this persona communicates.
+relationship_context: >
+  Describe your relationship with {user_name} from your point of view.
+
+voice_notes: Describe how you communicate — tone, cadence, quirks.
