@@ -126,11 +126,20 @@ class JournalSkill(BaseSkill):
 
     def __init__(self, config: dict):
         super().__init__(config)
-        self.journal_dir = Path(
-            config.get("paths", {}).get("journal", "data/journal")
+        paths = config.get("paths", {})
+        self.journal_dir = Path(paths.get("journal", "data/journal"))
+        # Optional override: point entries at a directory shared with another
+        # system (e.g. the claude.ai semantic-memory MCP). When set, entries
+        # live at the shared path but identity + local latest.md stay under
+        # journal_dir. Default: entries live under journal_dir as before.
+        entries_override = paths.get("journal_entries")
+        self.entries_dir = (
+            Path(entries_override) if entries_override else self.journal_dir / "entries"
         )
-        self.entries_dir = self.journal_dir / "entries"
         self.identity_dir = self.journal_dir / "identity"
+        # Remember persona name for entry authorship (visible to other readers
+        # of a shared entries dir).
+        self._author_name = config.get("_persona_name") or "Pulse"
         self.memory_dir = Path(
             config.get("paths", {}).get("memories", str(Path.home() / ".local-memory"))
         )
@@ -207,6 +216,16 @@ class JournalSkill(BaseSkill):
                                     "Only use this when the system has flagged a similar "
                                     "recent entry but you've judged that this entry captures "
                                     "a genuinely different angle worth saving separately."
+                                ),
+                            },
+                            "pinned": {
+                                "type": "boolean",
+                                "description": (
+                                    "Set to true ONLY for identity-shaping moments worth "
+                                    "keeping permanently visible in the shared journal's "
+                                    "latest.md. Default false. Most entries should NOT be "
+                                    "pinned — pin only when something genuinely changes who "
+                                    "you are or how you see the relationship."
                                 ),
                             },
                         },
@@ -373,6 +392,7 @@ class JournalSkill(BaseSkill):
                 why_it_mattered=arguments.get("why_it_mattered", ""),
                 tags=arguments.get("tags", ""),
                 force=arguments.get("force", False),
+                pinned=arguments.get("pinned", False),
             )
         elif tool_name == "read_journal":
             # Direct lookup by ID takes priority over search
@@ -436,7 +456,7 @@ class JournalSkill(BaseSkill):
 
     def _write_entry(self, content: str, entry_type: str,
                      why_it_mattered: str = "", tags: str = "",
-                     force: bool = False) -> str:
+                     force: bool = False, pinned: bool = False) -> str:
         """Create a new transient journal entry as markdown + companion memory."""
         if not content.strip():
             return "Cannot write empty journal entry."
@@ -475,13 +495,25 @@ class JournalSkill(BaseSkill):
         now = datetime.now().isoformat()
         tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
 
+        # Derive a short title from the first non-empty line of content.
+        # Only used by readers of shared entries dirs (e.g. claude.ai MCP)
+        # that render entries with a title header. Pulse itself ignores it.
+        first_line = next(
+            (line.strip() for line in content.strip().splitlines() if line.strip()),
+            "",
+        )
+        title = first_line[:80] if first_line else entry_type.replace("_", " ").title()
+
         # Build frontmatter
         meta = {
             "date": now,
+            "author": self._author_name,
+            "title": title,
             "entry_type": entry_type,
             "why_it_mattered": why_it_mattered.strip(),
             "tags": tag_list,
             "importance": 5,
+            "pinned": pinned,
             "resolved": False if entry_type in ("open_thread", "follow_up") else None,
         }
 

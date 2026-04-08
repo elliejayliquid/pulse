@@ -68,6 +68,7 @@ class PulseEngine:
                 max_tokens=model_config.get("max_response_tokens", 1024),
                 api_key=api_key,
                 usage_tracker=usage_tracker,
+                cache_ttl=provider_config.get("cache_ttl", "5m"),
             )
         else:
             self.llm = LLMClient(
@@ -353,8 +354,10 @@ class PulseEngine:
         history.append({"role": "user", "content": f"{timestamp} {message}{image_note}"})
         history.append({"role": "assistant", "content": history_reply})
 
-        # Auto-summarize when conversation approaches its token budget (~85%)
-        conv_budget_tokens = self.config.get("context_budget", {}).get("conversation", 4000)
+        # Auto-summarize when conversation approaches its token budget (~85%).
+        # Read the budget from context.budget (auto-derived from max_context as
+        # a proportion, or pinned via config.context_budget.conversation).
+        conv_budget_tokens = self.context.budget.get("conversation", 4000)
         max_chars = int(conv_budget_tokens * 4 * 0.85)  # 4 chars/token, trigger at 85%
         total_chars = sum(len(m.get("content", "")) if isinstance(m.get("content"), str) else 100
                          for m in history)
@@ -372,9 +375,15 @@ class PulseEngine:
                     self.context.save_to_memory(summary)
                 except Exception as e:
                     logger.warning(f"Memory persistence failed (non-fatal): {e}")
-                # Keep last 2 exchanges so the companion doesn't lose the
-                # most recent context right after summarization
-                recent_tail = history[-4:]
+                # Keep the last N exchanges so the companion doesn't lose the
+                # most recent context right after summarization. Configurable
+                # via context_budget.recent_tail_exchanges (default: 2 exchanges
+                # = 4 messages). Verbose companions may want a larger tail.
+                tail_exchanges = self.config.get("context_budget", {}).get(
+                    "recent_tail_exchanges", 2
+                )
+                tail_messages = max(2, tail_exchanges * 2)
+                recent_tail = history[-tail_messages:]
                 history = [{"role": "user", "content": f"[Context] Previous conversation summary: {summary}"},
                            {"role": "assistant", "content": "Got it, I remember. Let's continue."}
                 ] + recent_tail
@@ -400,14 +409,21 @@ class PulseEngine:
             for m in history if m['role'] in ('user', 'assistant')
         )
 
-        # Scale summary length to conversation size
+        # Scale summary length to conversation size. The trigger threshold scales
+        # with the budget, so on a large window we'll be summarizing 80+ verbose
+        # messages — those need more breathing room than a single dense paragraph.
         msg_count = len([m for m in history if m['role'] in ('user', 'assistant')])
         if msg_count <= 10:
             length_guide = "2-3 sentences"
         elif msg_count <= 30:
             length_guide = "4-6 sentences"
-        else:
+        elif msg_count <= 60:
             length_guide = "a thorough paragraph (8-10 sentences)"
+        else:
+            length_guide = (
+                "2-3 paragraphs (15-20 sentences), preserving distinct moments, "
+                "shifts in tone, and emotional beats — not just topics covered"
+            )
 
         summary_prompt = [
             {"role": "system", "content": (

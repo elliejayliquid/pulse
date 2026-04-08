@@ -41,6 +41,12 @@ provider:
   base_url: ""                       # auto-set per type; override for "custom"
   model: ""                          # API model name (e.g. "anthropic/claude-sonnet-4-20250514")
   max_context: 32768                 # context budget for API calls (controls cost)
+  # Anthropic only: prompt cache TTL. "5m" (default) or "1h".
+  # 1h costs 2x to write vs 1.25x for 5m, but the cache survives longer
+  # gaps between calls. Pays off if a written cache is read at least one
+  # extra time before expiring — ideal for personas with heartbeats every
+  # ≤60 min, where most ticks would otherwise miss the 5-minute window.
+  cache_ttl: "5m"
 
 # --- Heartbeat ---
 heartbeat:
@@ -52,10 +58,22 @@ heartbeat:
   # Note: scheduled tasks bypass cooldowns
 
 # --- Context Budget (tokens) ---
-# Auto-derived from max_context as proportions (25% conversation, 18% memories, etc.)
-# Override individual values here to pin them instead:
+# Pulse auto-derives these from your model's max_context (above), so most
+# users never need to touch this section. Conversation history gets ~25% of
+# the window — when it fills up, Pulse summarizes older messages into a short
+# recap (saved to memory) and keeps the most recent exchanges intact, so the
+# companion doesn't lose continuity.
+#
+# You only need to override these if:
+#  - your companion is very verbose and summaries fire too often → pin a
+#    larger `conversation` value, OR bump `model.max_context` so the
+#    auto-derived 25% slice grows with it
+#  - you notice a "narrative cliff" right after a summary → increase
+#    `recent_tail_exchanges` to keep more raw history alongside the recap
+#
 # context_budget:
-#   conversation: 4000
+#   conversation: 16000           # pin conversation budget (tokens)
+#   recent_tail_exchanges: 2      # exchanges (user+assistant pairs) kept after summarization
 
 # --- Data Paths ---
 paths:
@@ -64,6 +82,11 @@ paths:
   schedules: "data/schedules.json"
   conversation: "data/conversation.json"
   journal: "data/journal"
+  # Optional: point journal entries at a directory shared with another system
+  # (e.g. the claude.ai semantic-memory MCP at D:/Claude/memories/journal/entries).
+  # When unset, entries live under {journal}/entries as normal. Identity files
+  # and the local latest.md always stay under {journal}, never shared.
+  # journal_entries: "D:/Claude/memories/journal/entries"
   tasks: "data/tasks.json"
   dev_journal: "data/dev_journal.json"
   persona: "persona.yaml"

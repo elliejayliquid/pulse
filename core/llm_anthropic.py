@@ -115,7 +115,8 @@ class AnthropicClient:
                  temperature: float = 0.7, max_tokens: int = 1024,
                  frequency_penalty: float = 0.0, presence_penalty: float = 0.0,
                  api_key: str = "", usage_tracker=None,
-                 reasoning: bool = False, provider_type: str = "anthropic"):
+                 reasoning: bool = False, provider_type: str = "anthropic",
+                 cache_ttl: str = "5m"):
         self.client = Anthropic(api_key=api_key)
         self.model_name = model_name
         self.temperature = temperature
@@ -124,6 +125,11 @@ class AnthropicClient:
         self._usage = usage_tracker
         self._provider_name = "anthropic"
         self._enable_caching = True  # prompt caching for cost savings
+        # Cache TTL: "5m" (default) or "1h". The 1h tier costs 2x to write
+        # vs 1.25x for 5m, but saves the rewrite cost across longer gaps.
+        # Pays off if a written cache is read at least one extra time —
+        # ideal for personas with heartbeat intervals ≤60 min.
+        self._cache_ttl = cache_ttl if cache_ttl in ("5m", "1h") else "5m"
 
     def _track(self, response):
         """Log token usage from an Anthropic API response."""
@@ -171,7 +177,10 @@ class AnthropicClient:
 
         block = {"type": "text", "text": system_text}
         if self._enable_caching:
-            block["cache_control"] = {"type": "ephemeral"}
+            cache_control = {"type": "ephemeral"}
+            if self._cache_ttl == "1h":
+                cache_control["ttl"] = "1h"
+            block["cache_control"] = cache_control
         return [block]
 
     def chat(self, messages: list[dict]) -> Optional[PulseResponse]:
