@@ -261,18 +261,38 @@ class TelegramChannel(Channel):
         except Exception as e:
             logger.warning(f"Failed to send photo: {e}")
 
-    async def _send_voice(self, message, ogg_path: Path):
-        """Send an OGG voice message and clean up the temp file."""
-        try:
-            with open(ogg_path, "rb") as f:
-                await message.reply_voice(voice=f)
-        except Exception as e:
-            logger.error(f"Failed to send voice message: {e}")
-        finally:
+    async def _send_voice(self, message, ogg_path: Path, retries: int = 3):
+        """Send an OGG voice message and clean up the temp file.
+
+        Telegram's media endpoint can be slow even for tiny files, so we
+        bump the write/read timeouts well above python-telegram-bot's
+        ~5s defaults and retry on failure (same pattern as text replies).
+        The OGG file is re-opened for each attempt because the file
+        handle is consumed by the upload.
+        """
+        for attempt in range(1, retries + 1):
             try:
-                ogg_path.unlink()
-            except Exception:
-                pass
+                with open(ogg_path, "rb") as f:
+                    await message.reply_voice(
+                        voice=f,
+                        read_timeout=30,
+                        write_timeout=60,
+                        connect_timeout=15,
+                        pool_timeout=15,
+                    )
+                break
+            except Exception as e:
+                if attempt < retries:
+                    logger.warning(
+                        f"Voice send attempt {attempt}/{retries} failed ({e}), retrying in 3s..."
+                    )
+                    await asyncio.sleep(3)
+                else:
+                    logger.error(f"Failed to send voice message after {retries} attempts: {e}")
+        try:
+            ogg_path.unlink()
+        except Exception:
+            pass
 
     async def _send_pending_skill_output(self, message, reply: str,
                                          tools_used: list[str]) -> bool:

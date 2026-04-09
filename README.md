@@ -260,6 +260,36 @@ skills:
 
 Requires a CUDA GPU with enough VRAM to run TTS alongside your LLM (or use a cloud provider for the LLM to free up VRAM). Models are downloaded automatically on first use.
 
+#### Faster TTS (optional, ~5–6× speedup)
+
+Pulse uses upstream `qwen-tts` by default. For dramatically faster generation on supported NVIDIA GPUs, you can also install [faster-qwen3-tts](https://github.com/andimarafioti/faster-qwen3-tts), which adds CUDA graph capture and a static KV cache. Pulse automatically detects it at startup and uses it if available — no config change needed. If it's not installed, or if loading fails for any reason, Pulse silently falls back to the upstream path so the feature stays alive.
+
+Real-world data point on an RTX 5060 Ti, clone mode, one paragraph: **~45–50s → ~10s.**
+
+```bash
+# 1. First, verify your CUDA torch is installed and working
+python -c "import torch; assert torch.cuda.is_available(), 'No CUDA torch detected'"
+
+# 2. Install faster-qwen3-tts
+pip install faster-qwen3-tts
+
+# 3. Verify your CUDA torch survived (see warning below)
+python -c "import torch; assert torch.cuda.is_available(), 'torch was downgraded to CPU!'"
+```
+
+> ⚠️ **Important**: This package depends on `torchaudio`, and pip may try to "helpfully" reinstall `torch` and `torchaudio` from the default PyPI index, which on most setups means a CPU-only build. If your second verification fails, reinstall your CUDA torch from the appropriate index — for example, for Blackwell (RTX 50xx) cards on CUDA 12.8: `pip install --pre --upgrade --force-reinstall torch torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128`. The cleanest way to avoid the trap is to install into a venv that already has matching `torch` + `torchaudio` from your CUDA index.
+
+On first startup after installing it, you'll see something like:
+
+```
+[TTS] Using faster-qwen3-tts (CUDA graphs) for clone model.
+[TTS] Loading clone model Qwen/Qwen3-TTS-12Hz-0.6B-Base...
+[TTS] Warming clone model (capturing CUDA graphs + caching voice prompt)...
+[TTS] Clone model ready (faster-qwen3-tts; graphs + prompt cached).
+```
+
+That warmup takes 30–90s on first start because CUDA graphs capture once. It happens in the background during Pulse startup, so it shouldn't block anything — and after that, every 🔊 generation runs at full speed.
+
 ### Skills
 
 Skills are **auto-discovered** — any `.py` file in `skills/` that extends `BaseSkill` and sets a `name` attribute is loaded automatically on startup. No manual registration needed; just drop a file in and restart.

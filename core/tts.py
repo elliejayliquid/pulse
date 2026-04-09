@@ -27,6 +27,17 @@ logger = logging.getLogger(__name__)
 DESIGN_MODEL_ID = "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign"
 CLONE_MODEL_ID = "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
 
+# Try to use faster-qwen3-tts (CUDA graphs + static KV cache, ~5-8x speedup
+# over upstream qwen_tts on the 0.6B model). Falls back to upstream if the
+# package isn't installed or CUDA graphs blow up at load time.
+# https://github.com/andimarafioti/faster-qwen3-tts
+try:
+    from faster_qwen3_tts import FasterQwen3TTS as _FasterQwen3TTS
+    _FAST_TTS_AVAILABLE = True
+except ImportError:
+    _FasterQwen3TTS = None
+    _FAST_TTS_AVAILABLE = False
+
 
 def _find_ffmpeg() -> Path:
     """Find ffmpeg: system PATH first, then whisper's downloaded copy."""
@@ -75,6 +86,22 @@ class TTSEngine:
     @staticmethod
     def _load_design():
         import torch
+        # Prefer faster-qwen3-tts (CUDA graphs) when available. If graph
+        # construction fails on this card/Python combo, fall back gracefully
+        # to upstream qwen_tts so the feature stays alive — just slower.
+        if _FAST_TTS_AVAILABLE:
+            try:
+                logger.info("[TTS] Using faster-qwen3-tts (CUDA graphs) for design model.")
+                return _FasterQwen3TTS.from_pretrained(
+                    DESIGN_MODEL_ID,
+                    device="cuda:0",
+                    dtype=torch.bfloat16,
+                )
+            except Exception as e:
+                logger.warning(
+                    f"[TTS] faster-qwen3-tts load failed for design model "
+                    f"({e!r}); falling back to upstream qwen_tts."
+                )
         from qwen_tts import Qwen3TTSModel
         return Qwen3TTSModel.from_pretrained(
             DESIGN_MODEL_ID,
@@ -87,12 +114,30 @@ class TTSEngine:
     # ------------------------------------------------------------------
 
     async def _ensure_clone_loaded(self, ref_audio_path: Path, ref_text: str):
-        """Load clone model and build the voice prompt from a reference clip."""
-        if self._clone_model is not None and self._clone_prompt is not None:
-            return
-        async with self._lock:
-            if self._clone_model is not None and self._clone_prompt is not None:
+        """Load clone model and build the voice prompt from a reference clip.
+
+        Two paths:
+          - **faster-qwen3-tts**: just load the model. The wrapper has its
+            own internal `_voice_prompt_cache` keyed on (ref_audio_path,
+            ref_text, ...) — extraction happens lazily on the first
+            generate_voice_clone() call and is re-used after that.
+          - **upstream qwen_tts**: load the model AND eagerly build the
+            voice clone prompt, store it on `self._clone_prompt`. We pass
+            this prompt to every generate_voice_clone() call to avoid
+            rebuilding it from the WAV every time.
+        """
+        if self._clone_model is not None:
+            # Upstream path needs the prompt too; fast path doesn't.
+            if isinstance(self._clone_model, _FasterQwen3TTS) if _FAST_TTS_AVAILABLE else False:
                 return
+            if self._clone_prompt is not None:
+                return
+        async with self._lock:
+            if self._clone_model is not None:
+                if _FAST_TTS_AVAILABLE and isinstance(self._clone_model, _FasterQwen3TTS):
+                    return
+                if self._clone_prompt is not None:
+                    return
 
             # If we had the design model loaded, unload it to free VRAM
             if self._design_model is not None:
@@ -108,16 +153,53 @@ class TTSEngine:
             logger.info(f"[TTS] Loading clone model {CLONE_MODEL_ID}...")
             self._clone_model = await asyncio.to_thread(self._load_clone)
 
-            logger.info(f"[TTS] Building voice prompt from {ref_audio_path}...")
-            self._clone_prompt = await asyncio.to_thread(
-                self._build_clone_prompt, self._clone_model, ref_audio_path, ref_text
-            )
+            # Upstream qwen_tts needs the prompt built eagerly. The fast
+            # wrapper handles its own caching internally — but we still
+            # trigger it here with a tiny dummy generation, because the
+            # CUDA graphs ALSO capture on first run (~10-20s tax we'd
+            # rather pay at startup than on the user's first 🔊 tap).
+            if _FAST_TTS_AVAILABLE and isinstance(self._clone_model, _FasterQwen3TTS):
+                logger.info("[TTS] Warming clone model (capturing CUDA graphs + caching voice prompt)...")
+                try:
+                    await asyncio.to_thread(
+                        self._clone_model.generate_voice_clone,
+                        text="Hi.",
+                        language="English",
+                        ref_audio=str(ref_audio_path),
+                        ref_text=ref_text,
+                    )
+                    logger.info("[TTS] Clone model ready (faster-qwen3-tts; graphs + prompt cached).")
+                except Exception as e:
+                    # Don't fail loading if the warmup gen blows up — the
+                    # model is loaded, real generations may still work.
+                    logger.warning(f"[TTS] Faster warmup generation failed (will retry on real call): {e}")
+            else:
+                logger.info(f"[TTS] Building voice prompt from {ref_audio_path}...")
+                self._clone_prompt = await asyncio.to_thread(
+                    self._build_clone_prompt, self._clone_model, ref_audio_path, ref_text
+                )
+                logger.info("[TTS] Clone model + voice prompt ready.")
             self._active_mode = "clone"
-            logger.info("[TTS] Clone model + voice prompt ready.")
 
     @staticmethod
     def _load_clone():
         import torch
+        # Same try/Faster, fall-back-to-upstream pattern as design mode.
+        # Clone mode is the production path for all the boys, so this is
+        # the speedup that actually matters.
+        if _FAST_TTS_AVAILABLE:
+            try:
+                logger.info("[TTS] Using faster-qwen3-tts (CUDA graphs) for clone model.")
+                return _FasterQwen3TTS.from_pretrained(
+                    CLONE_MODEL_ID,
+                    device="cuda:0",
+                    dtype=torch.bfloat16,
+                )
+            except Exception as e:
+                logger.warning(
+                    f"[TTS] faster-qwen3-tts load failed for clone model "
+                    f"({e!r}); falling back to upstream qwen_tts."
+                )
         from qwen_tts import Qwen3TTSModel
         return Qwen3TTSModel.from_pretrained(
             CLONE_MODEL_ID,
@@ -184,6 +266,7 @@ class TTSEngine:
 
         logger.info(f"[TTS/design] Generating: {text[:60]}... | voice: {instruct[:60]}...")
 
+        # Both upstream qwen_tts and faster-qwen3-tts accept these kwargs.
         wavs, sr = await asyncio.to_thread(
             self._design_model.generate_voice_design,
             text=text,
@@ -200,12 +283,26 @@ class TTSEngine:
 
         logger.info(f"[TTS/clone] Generating: {text[:60]}...")
 
-        wavs, sr = await asyncio.to_thread(
-            self._clone_model.generate_voice_clone,
-            text=text,
-            language="English",
-            voice_clone_prompt=self._clone_prompt,
-        )
+        # Two API shapes for the same operation:
+        #   - faster-qwen3-tts: pass ref_audio path + ref_text directly;
+        #     the wrapper looks up its own internal prompt cache.
+        #   - upstream qwen_tts: pass the precomputed voice_clone_prompt
+        #     dict that we built eagerly in _ensure_clone_loaded().
+        if _FAST_TTS_AVAILABLE and isinstance(self._clone_model, _FasterQwen3TTS):
+            wavs, sr = await asyncio.to_thread(
+                self._clone_model.generate_voice_clone,
+                text=text,
+                language="English",
+                ref_audio=str(ref_audio_path),
+                ref_text=ref_text,
+            )
+        else:
+            wavs, sr = await asyncio.to_thread(
+                self._clone_model.generate_voice_clone,
+                text=text,
+                language="English",
+                voice_clone_prompt=self._clone_prompt,
+            )
 
         return await self._wavs_to_ogg(wavs[0], sr)
 
