@@ -81,6 +81,7 @@ class PulseEngine:
                 api_key=api_key,
                 usage_tracker=usage_tracker,
                 reasoning=model_config.get("reasoning", False),
+                reasoning_effort=model_config.get("reasoning_effort", ""),
                 provider_type=provider_type,
             )
         self.llm._provider_name = provider_type
@@ -274,7 +275,7 @@ class PulseEngine:
                 logger.warning(f"Tried to schedule without a valid time: {e}")
 
     async def handle_message(self, message: str, source: str = "telegram",
-                            image_url: str = None) -> tuple[str, list[str]]:
+                            image_url: str = None) -> tuple[str, list[str], str]:
         """Handle an incoming message and return the companion's response.
 
         This is for bidirectional chat (Telegram, future voice, etc.).
@@ -289,7 +290,12 @@ class PulseEngine:
             image_url: Optional base64 data URI for an image (vision models)
 
         Returns:
-            Tuple of (companion's response text, list of tools used). Text is None if LLM unavailable.
+            Tuple of (companion's response text, list of tools used, reasoning).
+            `reasoning` is the captured chain of thought if the model exposed
+            any (via reasoning_content / reasoning fields / <think> tags),
+            otherwise an empty string. The channel decides whether to display
+            it (gated on per-persona model.show_reasoning config).
+            Text is None if LLM unavailable.
         """
         # Reset heartbeat timer — conversation is active, re-roll interval
         self._last_activity = time.time()
@@ -299,7 +305,7 @@ class PulseEngine:
         available = await asyncio.to_thread(self.llm.is_available)
         if not available:
             logger.warning(f"LLM server not available — can't respond to {source} message.")
-            return None, []
+            return None, [], ""
 
         # Load conversation history
         history = self.context._load_conversation()
@@ -326,6 +332,15 @@ class PulseEngine:
         elapsed = time.time() - t0
         logger.info(f"LLM {source} reply took {elapsed:.1f}s (tools: {', '.join(tools_used) if tools_used else 'none'})")
 
+        # Capture the model's reasoning if it exposed any. The LLM client
+        # populates `last_reasoning` from <think> tags / reasoning_content
+        # / reasoning fields after every call. We pass it back so the
+        # channel can decide whether to surface it (gated on per-persona
+        # model.show_reasoning config).
+        reasoning = getattr(self.llm, "last_reasoning", "") or ""
+        if reasoning:
+            logger.info(f"Reasoning captured: {len(reasoning)} chars — {reasoning[:120]!r}")
+
         # Safety net: strip <think> tags that reasoning models may include
         if reply:
             from core.llm import strip_think_tags
@@ -345,7 +360,7 @@ class PulseEngine:
         else:
             history_reply = reply or voice_text
         if not history_reply:
-            return None, tools_used
+            return None, tools_used, reasoning
 
         # Update conversation history (store text only — images are too large to persist)
         # Timestamps help the companion understand temporal flow
@@ -395,7 +410,7 @@ class PulseEngine:
         self.context.save_conversation(history)
         log_reply = reply or voice_text or "(voice-only)"
         logger.info(f"Replied to {source}: {log_reply[:50]}...")
-        return reply, tools_used
+        return reply, tools_used, reasoning
 
     async def _summarize_conversation(self, history: list[dict]) -> str:
         """Summarize the conversation so far (for context compression)."""

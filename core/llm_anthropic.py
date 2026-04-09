@@ -13,7 +13,7 @@ from typing import Optional
 
 from anthropic import Anthropic, APIConnectionError, APIStatusError
 
-from core.llm import PulseResponse, strip_think_tags
+from core.llm import PulseResponse, extract_think_content, strip_think_tags
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +131,13 @@ class AnthropicClient:
         # ideal for personas with heartbeat intervals ≤60 min.
         self._cache_ttl = cache_ttl if cache_ttl in ("5m", "1h") else "5m"
 
+        # Captured reasoning from the most recent call. Mirrors LLMClient's
+        # interface so the engine can read either client uniformly. For now
+        # we only capture from <think>...</think> tags in text content;
+        # native Anthropic thinking blocks (which require a separate
+        # request param + tool-loop passthrough) are a follow-up.
+        self.last_reasoning: str = ""
+
     def _track(self, response):
         """Log token usage from an Anthropic API response."""
         if self._usage and hasattr(response, "usage") and response.usage:
@@ -237,6 +244,9 @@ class AnthropicClient:
         system_text, anthropic_msgs = _convert_messages(messages)
         anthropic_tools = _openai_tools_to_anthropic(tools) if tools else []
         tools_used = []
+        # Reset captured reasoning per call so a previous chain of thought
+        # never leaks forward into the next reply.
+        self.last_reasoning = ""
 
         system_blocks = self._build_system_blocks(system_text)
 
@@ -268,6 +278,7 @@ class AnthropicClient:
                 # If no tool calls, this is the final response
                 if not tool_uses or stop == "end_turn":
                     logger.info(f"Anthropic final response ({len(text)} chars, round {round_num + 1}, stop={stop})")
+                    self.last_reasoning = extract_think_content(text)
                     cleaned = strip_think_tags(text)
                     return (cleaned if cleaned else None), tools_used
 

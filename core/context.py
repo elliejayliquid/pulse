@@ -888,11 +888,13 @@ class ContextManager:
             "\nChoose the appropriate action (notify to send your human a message, "
             "or use your tools to take other actions).\n"
             + (
-                "\nYou have tools available — use them if they'd help you execute this task "
-                "(e.g., search memories for relevant context, check the time).\n"
+                "\nYou have tools available — their definitions are attached to this turn. "
+                "If executing this task requires information you don't already have "
+                "(current events, recalling something, checking the time, etc.), call "
+                "the relevant tool FIRST, then respond in JSON once you have what you need.\n"
                 if has_tools else ""
             )
-            + "\nRespond in this JSON format:\n"
+            + "\nOnce you're ready, respond in this JSON format:\n"
             "{\n"
             '  "thinking": "your internal reasoning (not shown to anyone)",\n'
             '  "action": "notify | schedule | silent",\n'

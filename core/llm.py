@@ -20,6 +20,40 @@ from openai import OpenAI, APIConnectionError
 logger = logging.getLogger(__name__)
 
 
+def extract_think_content(text: str) -> str:
+    """Pull out the reasoning content from `<think>...</think>` blocks.
+
+    Mirror image of `strip_think_tags`: instead of removing the thinking
+    blocks, we collect them. Used to optionally show the model's chain
+    of thought to the user (e.g. in Telegram via expandable blockquote).
+
+    Returns the joined reasoning text, or "" if there's nothing to find.
+    Handles the same quirks as strip_think_tags: standard tags, partial
+    tags (cut off mid-think), missing opening tag, and plain-text
+    "Thinking Process:" blocks from LM Studio.
+    """
+    if not text:
+        return ""
+    parts: list[str] = []
+    # 1. Standard <think>...</think> tags
+    for m in re.finditer(r'<think>([\s\S]*?)</think>', text):
+        parts.append(m.group(1).strip())
+    # 2. Missing opening tag (LM Studio strips <think> but leaves </think>)
+    if not parts:
+        m = re.match(r'^([\s\S]*?)</think>', text)
+        if m:
+            parts.append(m.group(1).strip())
+    # 3. Plain-text "Thinking Process:" block
+    if not parts:
+        m = re.match(
+            r'^Thinking(?:\s+Process)?:\s*\n([\s\S]*?)(?=\n\{|\Z)',
+            text
+        )
+        if m:
+            parts.append(m.group(1).strip())
+    return "\n\n".join(p for p in parts if p)
+
+
 def strip_think_tags(text: str) -> str:
     """Remove thinking/reasoning blocks from model output.
 
@@ -134,7 +168,8 @@ class LLMClient:
                  temperature: float = 0.7, max_tokens: int = 1024,
                  frequency_penalty: float = 0.0, presence_penalty: float = 0.0,
                  api_key: str = "", usage_tracker=None,
-                 reasoning: bool = False, provider_type: str = "local"):
+                 reasoning: bool = False, reasoning_effort: str = "",
+                 provider_type: str = "local"):
         self.client = OpenAI(
             base_url=endpoint,
             api_key=api_key or "not-needed",
@@ -159,9 +194,50 @@ class LLMClient:
         self._extra_body = {}
         if provider_type == "openrouter":
             if reasoning:
-                self._extra_body["reasoning"] = {"enabled": True}
+                # OpenRouter: prefer explicit effort tier when set, else
+                # just enable reasoning at the default budget. Effort tiers
+                # are provider-agnostic: each backend maps low/medium/high
+                # to its own internal token budget. For models like Grok
+                # 4.1 Fast that ship with a small default budget, bumping
+                # this is the difference between a 200-char restatement
+                # and a real reasoning trace.
+                if reasoning_effort in ("low", "medium", "high"):
+                    self._extra_body["reasoning"] = {"effort": reasoning_effort}
+                else:
+                    self._extra_body["reasoning"] = {"enabled": True}
             else:
                 self._extra_body["reasoning"] = {"effort": "none"}
+
+        # Captured reasoning content from the most recent call. The engine
+        # reads this after each chat()/chat_with_tools() to optionally
+        # surface the model's chain of thought to the user. Empty string
+        # if the model didn't expose any reasoning. Sources we look at:
+        #   - <think>...</think> tags inside the response text
+        #   - non-standard `message.reasoning_content` (DeepSeek)
+        #   - non-standard `message.reasoning` (OpenRouter)
+        self.last_reasoning: str = ""
+
+    def _collect_reasoning(self, message, text: str) -> str:
+        """Pull reasoning from wherever the provider chose to put it.
+
+        Three sources, in priority order — first non-empty wins:
+          1. `message.reasoning_content` — DeepSeek's official API field
+          2. `message.reasoning` — OpenRouter's reasoning field (when
+             `extra_body.reasoning.enabled = true` was set)
+          3. `<think>...</think>` blocks inside the regular text content
+             — universal fallback for local thinking models (Qwen3-Thinking,
+             DeepSeek R1, GLM-Z1, etc.) that emit reasoning inline.
+
+        Returns "" if nothing was found.
+        """
+        # OpenAI SDK exposes unknown fields via the message object's __dict__
+        # or via getattr — both work because the SDK uses pydantic models
+        # that pass through extras.
+        for attr in ("reasoning_content", "reasoning"):
+            val = getattr(message, attr, None)
+            if val and isinstance(val, str) and val.strip():
+                return val.strip()
+        return extract_think_content(text)
 
     def _track(self, response):
         """Log token usage from an API response (no-op if no tracker)."""
@@ -204,6 +280,9 @@ class LLMClient:
         Returns:
             PulseResponse or None if LM Studio is unavailable
         """
+        # Reset captured reasoning at the start of each call so a previous
+        # call's chain of thought never leaks forward.
+        self.last_reasoning = ""
         try:
             response = self.client.chat.completions.create(
                 model=self.model_name,
@@ -217,7 +296,9 @@ class LLMClient:
 
             self._track(response)
             finish = getattr(response.choices[0], "finish_reason", "unknown")
-            text = response.choices[0].message.content or ""
+            message = response.choices[0].message
+            text = message.content or ""
+            self.last_reasoning = self._collect_reasoning(message, text)
             logger.info(f"LLM response ({len(text)} chars, finish={finish})")
             logger.debug(f"Raw response: {text[:200]}...")
 
@@ -256,6 +337,9 @@ class LLMClient:
         # Work on a copy so we don't mutate the caller's messages
         msgs = list(messages)
         tools_used = []
+        # Reset captured reasoning at the start of each call so a previous
+        # call's chain of thought never leaks forward.
+        self.last_reasoning = ""
 
         for round_num in range(max_rounds):
             try:
@@ -284,6 +368,7 @@ class LLMClient:
                 # If no tool calls, this is the final response
                 if not tool_calls:
                     logger.info(f"LLM final response ({len(text)} chars, round {round_num + 1}, finish={finish})")
+                    self.last_reasoning = self._collect_reasoning(message, text)
                     cleaned = strip_think_tags(text)
                     return (cleaned if cleaned else None), tools_used
 

@@ -13,6 +13,7 @@ import base64
 import logging
 from pathlib import Path
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -63,6 +64,11 @@ class TelegramChannel(Channel):
                 self._ai_name = json.load(f).get("name", "Companion")
         except Exception:
             pass
+        # Optional: surface the model's chain of thought as an expandable
+        # blockquote above the reply. Per-persona via model.show_reasoning.
+        # The engine extracts reasoning from <think> tags / reasoning_content
+        # / reasoning fields and hands it back through handle_message().
+        self._show_reasoning = bool(config.get("model", {}).get("show_reasoning", False))
 
     def set_engine(self, engine):
         """Connect the engine so incoming messages can trigger responses."""
@@ -214,6 +220,37 @@ class TelegramChannel(Channel):
                         logger.error(f"Reply failed after {retries} attempts: {e}")
                         return False
         return True
+
+    async def _send_reasoning(self, message, reasoning: str):
+        """Send the model's chain of thought as an expandable blockquote.
+
+        Telegram's expandable blockquote (added to Bot API in 2024) renders
+        a quoted block with the first few lines visible and a "Show more"
+        button — perfect for "here's my thinking, peek if you're curious."
+
+        We escape the reasoning text for HTML and wrap the whole thing in
+        `<blockquote expandable>...</blockquote>`. If anything goes wrong
+        (parse error, network), we swallow the failure — reasoning is a
+        nice-to-have, not worth interrupting the actual reply.
+        """
+        if not reasoning or not reasoning.strip():
+            return
+        # HTML escape — only `<`, `>`, `&` matter for Telegram HTML mode.
+        body = (
+            reasoning.replace("&", "&amp;")
+                     .replace("<", "&lt;")
+                     .replace(">", "&gt;")
+        )
+        # Telegram message limit is 4096 chars. Leave room for the wrapper
+        # tags and the 🧠 prefix; truncate gracefully if reasoning is huge.
+        max_body = 3900
+        if len(body) > max_body:
+            body = body[:max_body] + "\n…"
+        html = f"🧠 <blockquote expandable>{body}</blockquote>"
+        try:
+            await message.reply_text(html, parse_mode=ParseMode.HTML)
+        except Exception as e:
+            logger.warning(f"Failed to send reasoning blockquote: {e}")
 
     def _voice_markup(self):
         """Return the 🔊 inline button markup, or None if TTS isn't configured.
@@ -508,7 +545,7 @@ class TelegramChannel(Channel):
             typing_task = self._start_typing_loop(update.effective_chat)
             try:
                 # Get response from companion via the engine
-                reply, tools_used = await self._engine.handle_message(user_message, source="telegram")
+                reply, tools_used, reasoning = await self._engine.handle_message(user_message, source="telegram")
             finally:
                 typing_task.cancel()
 
@@ -516,6 +553,12 @@ class TelegramChannel(Channel):
             voice_sent = await self._send_pending_skill_output(
                 update.message, reply or "", tools_used
             )
+
+            # Optional: show the model's chain of thought before the reply.
+            # Goes out before the text so the user reads "thinking → answer"
+            # in natural top-to-bottom order.
+            if self._show_reasoning and reasoning:
+                await self._send_reasoning(update.message, reasoning)
 
             if reply:
                 # Send text reply (even after voice — companion may want both)
@@ -561,7 +604,7 @@ class TelegramChannel(Channel):
                 logger.info(f"Photo downloaded: {len(photo_bytes)} bytes, sending to LLM...")
 
                 # Get response from companion via the engine (with image)
-                reply, tools_used = await self._engine.handle_message(
+                reply, tools_used, reasoning = await self._engine.handle_message(
                     caption, source="telegram", image_url=image_url
                 )
             finally:
@@ -570,6 +613,8 @@ class TelegramChannel(Channel):
             voice_sent = await self._send_pending_skill_output(
                 update.message, reply or "", tools_used
             )
+            if self._show_reasoning and reasoning:
+                await self._send_reasoning(update.message, reasoning)
             if reply:
                 if tools_used and not voice_sent:
                     tool_names = ", ".join(dict.fromkeys(tools_used))
@@ -621,13 +666,15 @@ class TelegramChannel(Channel):
                 await self._reply_with_retry(update.message, f"🎙️ {text}")
 
                 # Route to companion with voice hint so they know transcription may be imperfect
-                reply, tools_used = await self._engine.handle_message(f"🎙️ {text}", source="telegram")
+                reply, tools_used, reasoning = await self._engine.handle_message(f"🎙️ {text}", source="telegram")
             finally:
                 typing_task.cancel()
 
             voice_sent = await self._send_pending_skill_output(
                 update.message, reply or "", tools_used
             )
+            if self._show_reasoning and reasoning:
+                await self._send_reasoning(update.message, reasoning)
             if reply:
                 if tools_used and not voice_sent:
                     tool_names = ", ".join(dict.fromkeys(tools_used))
