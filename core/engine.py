@@ -337,8 +337,8 @@ class PulseEngine:
         voice_text = None
         if self.skill_registry:
             tts_skill = self.skill_registry.get_skill("tts")
-            if tts_skill and tts_skill.pending_voice_text:
-                voice_text = f"🔊 {tts_skill.pending_voice_text}"
+            if tts_skill and tts_skill.pending_voices:
+                voice_text = "\n".join(f"🔊 {t}" for _, t in tts_skill.pending_voices)
 
         if voice_text and reply:
             history_reply = f"{voice_text}\n{reply}"
@@ -752,6 +752,14 @@ class PulseEngine:
             logger.info("LLM server is reachable!")
         else:
             logger.warning("LLM server is not available — will retry on each tick.")
+
+        # Warm up the TTS model in the background so the first voice generation
+        # (companion's speak tool OR Telegram 🔊 button) doesn't pay the cold
+        # start tax. Fire-and-forget — failures fall back to lazy loading.
+        if self.skill_registry:
+            tts_skill = self.skill_registry.get_skill("tts")
+            if tts_skill and hasattr(tts_skill, "warmup"):
+                asyncio.create_task(tts_skill.warmup())
 
         # Start the silence clock — heartbeat fires after interval_minutes of no activity
         self._last_activity = time.time()

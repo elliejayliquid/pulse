@@ -12,13 +12,21 @@ import asyncio
 import base64
 import logging
 from pathlib import Path
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
+    CallbackQueryHandler,
     ContextTypes,
     filters,
+)
+
+# Inline keyboard with a single 🔊 button — attached to assistant text
+# replies when TTS is configured, so the user can tap to convert any
+# message to a voice note on demand.
+_VOICE_BUTTON_MARKUP = InlineKeyboardMarkup(
+    [[InlineKeyboardButton("🔊", callback_data="tts")]]
 )
 
 from channels.base import Channel
@@ -34,6 +42,11 @@ class TelegramChannel(Channel):
         self.bot_token = tg_config.get("bot_token", "")
         self.chat_id = tg_config.get("chat_id", "")  # User's chat ID (set after first /start)
         self.app = None
+        # Set of message_ids currently being synthesized via the 🔊 button.
+        # Prevents concurrent synthesis on the same message (double-taps) while
+        # still allowing the user to re-tap *after* a take finishes — design
+        # mode produces a different voice each time, so re-rolls are legit.
+        self._tts_in_flight: set[int] = set()
         self._engine = None  # Set by engine after init
         self._chat_id_file = config.get("paths", {}).get("telegram_chat_id", "")
         self._transcriber = None
@@ -110,6 +123,9 @@ class TelegramChannel(Channel):
             self._on_photo
         ))
 
+        # Callback query handler — for inline buttons (e.g. 🔊 voice button)
+        self.app.add_handler(CallbackQueryHandler(self._on_callback))
+
         # Voice handler — transcribe voice messages to text
         if self._transcriber:
             self.app.add_handler(MessageHandler(
@@ -150,34 +166,45 @@ class TelegramChannel(Channel):
             return
 
         try:
+            # Attach 🔊 button to the LAST chunk only (so multi-chunk replies
+            # don't get a button on every continuation)
+            voice_markup = self._voice_markup()
             # Telegram has a 4096 char limit per message
             if len(message) > 4000:
-                # Split into chunks
-                for i in range(0, len(message), 4000):
+                chunks = [message[i:i+4000] for i in range(0, len(message), 4000)]
+                last_idx = len(chunks) - 1
+                for i, chunk in enumerate(chunks):
                     await self.app.bot.send_message(
                         chat_id=self.chat_id,
-                        text=message[i:i+4000]
+                        text=chunk,
+                        reply_markup=voice_markup if i == last_idx else None,
                     )
             else:
                 await self.app.bot.send_message(
                     chat_id=self.chat_id,
-                    text=message
+                    text=message,
+                    reply_markup=voice_markup,
                 )
             logger.info(f"Telegram message sent: {message[:50]}...")
         except Exception as e:
             logger.error(f"Telegram send failed: {e}")
 
-    async def _reply_with_retry(self, message, text: str, retries: int = 3):
+    async def _reply_with_retry(self, message, text: str, retries: int = 3,
+                                reply_markup=None):
         """Send a reply with retry on timeout.
 
         Automatically splits messages that exceed Telegram's 4096-char limit.
+        If `reply_markup` is provided, it's attached only to the LAST chunk
+        (so the inline button doesn't repeat on every continuation).
         """
         # Split into chunks if needed (same approach as send())
         chunks = [text[i:i+4000] for i in range(0, len(text), 4000)] if len(text) > 4000 else [text]
-        for chunk in chunks:
+        last_idx = len(chunks) - 1
+        for i, chunk in enumerate(chunks):
+            markup = reply_markup if i == last_idx else None
             for attempt in range(1, retries + 1):
                 try:
-                    await message.reply_text(chunk)
+                    await message.reply_text(chunk, reply_markup=markup)
                     break
                 except Exception as e:
                     if attempt < retries:
@@ -187,6 +214,39 @@ class TelegramChannel(Channel):
                         logger.error(f"Reply failed after {retries} attempts: {e}")
                         return False
         return True
+
+    def _voice_markup(self):
+        """Return the 🔊 inline button markup, or None if TTS isn't configured.
+
+        Used to gate the voice button on the assistant's text replies — no
+        point showing a button that wouldn't work.
+        """
+        if not self._engine or not self._engine.skill_registry:
+            return None
+        tts_skill = self._engine.skill_registry.get_skill("tts")
+        if not tts_skill or not getattr(tts_skill, "is_configured", False):
+            return None
+        return _VOICE_BUTTON_MARKUP
+
+    def _start_typing_loop(self, chat, action: str = "typing") -> asyncio.Task:
+        """Start a background task that re-sends a chat action every ~4s.
+
+        Telegram's chat actions auto-expire after ~5 seconds, so for any
+        operation that takes longer (LLM generation, TTS synthesis), we need
+        to refresh continuously or the indicator vanishes mid-thought.
+        Cancel the returned task in a finally block when the work is done.
+        """
+        async def _loop():
+            try:
+                while True:
+                    try:
+                        await chat.send_action(action)
+                    except Exception:
+                        pass
+                    await asyncio.sleep(4)
+            except asyncio.CancelledError:
+                pass
+        return asyncio.create_task(_loop())
 
     async def send_photo(self, photo_url: str, caption: str = ""):
         """Send a photo to the user via Telegram (by URL)."""
@@ -225,13 +285,14 @@ class TelegramChannel(Channel):
 
         voice_sent = False
 
-        # TTS — send voice message instead of text
+        # TTS — drain the voice queue in order. Multiple speak() calls in a
+        # single turn each become their own Telegram voice message.
         tts_skill = self._engine.skill_registry.get_skill("tts")
-        if tts_skill and tts_skill.pending_voice:
-            ogg_path = tts_skill.pending_voice
-            tts_skill.pending_voice = None
-            tts_skill.pending_voice_text = None
-            await self._send_voice(message, ogg_path)
+        if tts_skill and tts_skill.pending_voices:
+            queued = tts_skill.pending_voices
+            tts_skill.pending_voices = []
+            for ogg_path, _text in queued:
+                await self._send_voice(message, ogg_path)
             voice_sent = True
 
         # Web search — show sources and images
@@ -423,14 +484,13 @@ class TelegramChannel(Channel):
             user_message = update.message.text
             logger.info(f"Telegram message from user: {user_message[:50]}...")
 
-            # Show typing indicator (non-critical, don't crash on timeout)
+            # Keep typing indicator alive for the entire generation
+            typing_task = self._start_typing_loop(update.effective_chat)
             try:
-                await update.effective_chat.send_action("typing")
-            except Exception:
-                pass
-
-            # Get response from companion via the engine
-            reply, tools_used = await self._engine.handle_message(user_message, source="telegram")
+                # Get response from companion via the engine
+                reply, tools_used = await self._engine.handle_message(user_message, source="telegram")
+            finally:
+                typing_task.cancel()
 
             # Check for pending voice/skill output
             voice_sent = await self._send_pending_skill_output(
@@ -442,7 +502,9 @@ class TelegramChannel(Channel):
                 if tools_used and not voice_sent:
                     tool_names = ", ".join(dict.fromkeys(tools_used))
                     await self._reply_with_retry(update.message, f"🔧 {tool_names}")
-                await self._reply_with_retry(update.message, reply)
+                await self._reply_with_retry(
+                    update.message, reply, reply_markup=self._voice_markup()
+                )
             elif not voice_sent:
                 await self._reply_with_retry(update.message, "(I'm having trouble thinking right now — llama-server might be down)")
         except Exception as e:
@@ -465,26 +527,25 @@ class TelegramChannel(Channel):
 
             logger.info(f"Telegram photo from user ({photo.width}x{photo.height}, caption: {caption[:50]}...)")
 
-            # Show typing indicator (non-critical, don't crash on timeout)
+            # Keep typing indicator alive through download + generation
+            typing_task = self._start_typing_loop(update.effective_chat)
             try:
-                await update.effective_chat.send_action("typing")
-            except Exception:
-                pass
+                # Download the photo as bytes
+                file = await photo.get_file()
+                photo_bytes = await file.download_as_bytearray()
 
-            # Download the photo as bytes
-            file = await photo.get_file()
-            photo_bytes = await file.download_as_bytearray()
+                # Convert to base64 data URI
+                b64 = base64.b64encode(photo_bytes).decode("utf-8")
+                image_url = f"data:image/jpeg;base64,{b64}"
 
-            # Convert to base64 data URI
-            b64 = base64.b64encode(photo_bytes).decode("utf-8")
-            image_url = f"data:image/jpeg;base64,{b64}"
+                logger.info(f"Photo downloaded: {len(photo_bytes)} bytes, sending to LLM...")
 
-            logger.info(f"Photo downloaded: {len(photo_bytes)} bytes, sending to LLM...")
-
-            # Get response from companion via the engine (with image)
-            reply, tools_used = await self._engine.handle_message(
-                caption, source="telegram", image_url=image_url
-            )
+                # Get response from companion via the engine (with image)
+                reply, tools_used = await self._engine.handle_message(
+                    caption, source="telegram", image_url=image_url
+                )
+            finally:
+                typing_task.cancel()
 
             voice_sent = await self._send_pending_skill_output(
                 update.message, reply or "", tools_used
@@ -493,7 +554,9 @@ class TelegramChannel(Channel):
                 if tools_used and not voice_sent:
                     tool_names = ", ".join(dict.fromkeys(tools_used))
                     await self._reply_with_retry(update.message, f"🔧 {tool_names}")
-                await self._reply_with_retry(update.message, reply)
+                await self._reply_with_retry(
+                    update.message, reply, reply_markup=self._voice_markup()
+                )
             elif not voice_sent:
                 await self._reply_with_retry(
                     update.message,
@@ -516,38 +579,31 @@ class TelegramChannel(Channel):
 
             logger.info(f"Telegram voice message ({update.message.voice.duration}s)")
 
-            # Show typing while we transcribe
+            # Keep typing indicator alive through transcription + generation
+            typing_task = self._start_typing_loop(update.effective_chat)
             try:
-                await update.effective_chat.send_action("typing")
-            except Exception:
-                pass
+                # Download the .ogg file
+                voice = update.message.voice
+                file = await voice.get_file()
+                ogg_path = Path(self._transcriber.data_dir) / f"_voice_{update.message.message_id}.ogg"
+                await file.download_to_drive(str(ogg_path))
 
-            # Download the .ogg file
-            voice = update.message.voice
-            file = await voice.get_file()
-            ogg_path = Path(self._transcriber.data_dir) / f"_voice_{update.message.message_id}.ogg"
-            await file.download_to_drive(str(ogg_path))
+                # Transcribe
+                text = await self._transcriber.transcribe(ogg_path)
 
-            # Transcribe
-            text = await self._transcriber.transcribe(ogg_path)
+                if not text:
+                    await self._reply_with_retry(update.message, "(I couldn't make out what you said — try again?)")
+                    return
 
-            if not text:
-                await self._reply_with_retry(update.message, "(I couldn't make out what you said — try again?)")
-                return
+                logger.info(f"Voice transcribed: {text[:80]}...")
 
-            logger.info(f"Voice transcribed: {text[:80]}...")
+                # Show what we heard (so the user can verify)
+                await self._reply_with_retry(update.message, f"🎙️ {text}")
 
-            # Show what we heard (so the user can verify)
-            await self._reply_with_retry(update.message, f"🎙️ {text}")
-
-            # Keep typing while the companion thinks
-            try:
-                await update.effective_chat.send_action("typing")
-            except Exception:
-                pass
-
-            # Route to companion with voice hint so they know transcription may be imperfect
-            reply, tools_used = await self._engine.handle_message(f"🎙️ {text}", source="telegram")
+                # Route to companion with voice hint so they know transcription may be imperfect
+                reply, tools_used = await self._engine.handle_message(f"🎙️ {text}", source="telegram")
+            finally:
+                typing_task.cancel()
 
             voice_sent = await self._send_pending_skill_output(
                 update.message, reply or "", tools_used
@@ -556,7 +612,9 @@ class TelegramChannel(Channel):
                 if tools_used and not voice_sent:
                     tool_names = ", ".join(dict.fromkeys(tools_used))
                     await self._reply_with_retry(update.message, f"🔧 {tool_names}")
-                await self._reply_with_retry(update.message, reply)
+                await self._reply_with_retry(
+                    update.message, reply, reply_markup=self._voice_markup()
+                )
             elif not voice_sent:
                 await self._reply_with_retry(update.message, "(I'm having trouble thinking right now — llama-server might be down)")
         except Exception as e:
@@ -565,6 +623,83 @@ class TelegramChannel(Channel):
                 await update.message.reply_text("(Something went wrong transcribing that — check the logs!)")
             except Exception:
                 pass
+
+    async def _on_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle inline keyboard button taps.
+
+        Currently just the 🔊 voice button: when the user taps it on any
+        assistant text reply, we synthesize that text as a voice message
+        and reply-to the original. The original text stays put — Telegram
+        doesn't allow inserting messages above existing ones, so the voice
+        appears at the bottom with a "↳ replying to: ..." link instead.
+        """
+        query = update.callback_query
+        if not query:
+            return
+
+        # Acknowledge the tap so Telegram dismisses the loading spinner
+        try:
+            await query.answer()
+        except Exception:
+            pass
+
+        if query.data != "tts":
+            return
+
+        if not self._engine or not self._engine.skill_registry:
+            return
+
+        tts_skill = self._engine.skill_registry.get_skill("tts")
+        if not tts_skill or not getattr(tts_skill, "is_configured", False):
+            try:
+                await query.answer("Voice not configured", show_alert=True)
+            except Exception:
+                pass
+            return
+
+        if not query.message:
+            return
+        text = query.message.text
+        if not text:
+            return
+
+        # Reject double-taps while a synthesis for this message is already
+        # running. The user can re-tap freely once it finishes — that's a
+        # legit feature in design mode (each take is slightly different).
+        message_id = query.message.message_id
+        if message_id in self._tts_in_flight:
+            try:
+                await query.answer("Still generating the previous take...", show_alert=False)
+            except Exception:
+                pass
+            return
+
+        self._tts_in_flight.add(message_id)
+        logger.info(f"[TTS button] Generating voice for: {text[:60]}...")
+
+        try:
+            # Show "recording voice..." indicator while we synthesize
+            typing_task = self._start_typing_loop(query.message.chat, "record_voice")
+            try:
+                # synthesize() is sync (uses asyncio.run internally) — offload
+                # to a thread so it doesn't block the event loop during inference
+                ogg_path = await asyncio.to_thread(tts_skill.synthesize, text)
+            finally:
+                typing_task.cancel()
+
+            if not ogg_path:
+                try:
+                    await query.message.reply_text("(Voice generation failed — check the logs)")
+                except Exception:
+                    pass
+                return
+
+            # _send_voice replies to the message and unlinks the OGG when done.
+            # Replying to the original text gives us the "↳ replying to: ..."
+            # visual link even though the voice appears at the bottom of the chat.
+            await self._send_voice(query.message, ogg_path)
+        finally:
+            self._tts_in_flight.discard(message_id)
 
     # --- Error handler ---
 
