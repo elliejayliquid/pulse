@@ -1,0 +1,13 @@
+{
+  "id": "_user",
+  "title": "About My Human",
+  "sections": {
+    "who_they_are": "",
+    "what_theyre_like": "",
+    "their_preferences": "",
+    "how_they_communicate": "",
+    "extra_notes": ""
+  },
+  "created_at": null,
+  "last_updated": null
+}
