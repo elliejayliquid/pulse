@@ -3,6 +3,7 @@ Web search skill — search the web via DuckDuckGo.
 
 Uses the duckduckgo-search library to provide text and image search.
 Results with images can be displayed inline in Telegram.
+Added fetch_url tool to retrieve full page text content.
 """
 
 import logging
@@ -73,6 +74,30 @@ class WebSearchSkill(BaseSkill):
                     },
                 },
             },
+            {
+                "type": "function",
+                "function": {
+                    "name": "fetch_url",
+                    "description": (
+                        "Fetch the text content of a webpage URL. Great for reading full articles or pages after a web_search."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "url": {
+                                "type": "string",
+                                "description": "The URL to fetch"
+                            },
+                            "max_length": {
+                                "type": "integer",
+                                "description": "Max chars to return (default 5000)",
+                                "default": 5000
+                            }
+                        },
+                        "required": ["url"]
+                    }
+                }
+            }
         ]
 
     def execute(self, tool_name: str, arguments: dict) -> str:
@@ -85,6 +110,11 @@ class WebSearchSkill(BaseSkill):
             return self._image_search(
                 query=arguments.get("query", ""),
                 max_results=arguments.get("max_results", 3),
+            )
+        elif tool_name == "fetch_url":
+            return self._fetch_url(
+                arguments.get("url"),
+                arguments.get("max_length", 5000)
             )
         return f"Unknown tool: {tool_name}"
 
@@ -173,3 +203,38 @@ class WebSearchSkill(BaseSkill):
 
         logger.info(f"Image search: '{query}' -> {len(results)} results, {len(self.pending_images)} images queued")
         return "\n".join(lines)
+
+    def _fetch_url(self, url: str, max_length: int = 5000) -> str:
+        if not url:
+            return "URL cannot be empty."
+        try:
+            import requests
+            resp = requests.get(url, timeout=10, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'})
+            resp.raise_for_status()
+            html = resp.text
+            
+            try:
+                from bs4 import BeautifulSoup
+                soup = BeautifulSoup(html, 'html.parser')
+                for script in soup(["script", "style", "nav"]):
+                    script.decompose()
+                text = soup.get_text(separator=' ', strip=True)
+                title = soup.title.string if soup.title else "No title"
+            except ImportError:
+                # Fallback: crude regex strip
+                import re
+                html = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL | re.IGNORECASE)
+                html = re.sub(r'<style[^>]*>.*?</style>', '', html, flags=re.DOTALL | re.IGNORECASE)
+                html = re.sub(r'<nav[^>]*>.*?</nav>', '', html, flags=re.DOTALL | re.IGNORECASE)
+                text = re.sub(r'<[^>]+>', ' ', html)
+                text = re.sub(r'\s+', ' ', text).strip()
+                title_match = re.search(r'<title[^>]*>([^<]+)', html, re.IGNORECASE)
+                title = title_match.group(1).strip() if title_match else "No title"
+            
+            if len(text) > max_length:
+                text = text[:max_length] + "..."
+            
+            return f"FETCHED PAGE: {title}\n\n{text}\n\nSource: {url}"
+        except Exception as e:
+            logger.error(f"Fetch URL failed: {e}")
+            return f"Fetch failed: {str(e)}"
