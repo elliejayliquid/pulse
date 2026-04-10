@@ -12,7 +12,7 @@ import asyncio
 import base64
 import logging
 from pathlib import Path
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import InputFile, Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
@@ -285,16 +285,24 @@ class TelegramChannel(Channel):
                 pass
         return asyncio.create_task(_loop())
 
-    async def send_photo(self, photo_url: str, caption: str = ""):
-        """Send a photo to the user via Telegram (by URL)."""
+    async def send_photo(self, photo_path: str, caption: str = ""):
+        """Send a photo to the user via Telegram (local path or HTTP URL)."""
         if not self.app or not self.chat_id:
             return
         try:
-            await self.app.bot.send_photo(
-                chat_id=self.chat_id,
-                photo=photo_url,
-                caption=caption[:1024] if caption else None,
-            )
+            if photo_path.startswith("http://") or photo_path.startswith("https://"):
+                await self.app.bot.send_photo(
+                    chat_id=self.chat_id,
+                    photo=photo_path,
+                    caption=caption[:1024] if caption else None,
+                )
+            else:
+                with open(photo_path, "rb") as f:
+                    await self.app.bot.send_photo(
+                        chat_id=self.chat_id,
+                        photo=InputFile(f),
+                        caption=caption[:1024] if caption else None,
+                    )
         except Exception as e:
             logger.warning(f"Failed to send photo: {e}")
 
@@ -365,6 +373,13 @@ class TelegramChannel(Channel):
                 for img_url in web_skill.pending_images:
                     await self.send_photo(img_url)
                 web_skill.pending_images.clear()
+
+        # Paint — send finished artwork
+        paint_skill = self._engine.skill_registry.get_skill("paint")
+        if paint_skill and paint_skill.pending_images:
+            for img_url in paint_skill.pending_images:
+                await self.send_photo(img_url)
+            paint_skill.pending_images.clear()
 
         return voice_sent
 

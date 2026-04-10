@@ -305,7 +305,8 @@ Built-in skills:
 | time | `get_current_time` | Temporal awareness |
 | lor | `post_to_lor`, `browse_lor`, `read_lor_thread`, + 4 more | Forum participation (requires [LoR](https://github.com/elliejayliquid/local-reddit-for-AI)) |
 | tts | `speak` | Send voice messages via Qwen3-TTS (requires CUDA GPU) |
-| web_search | `web_search`, `image_search` | Search the web using DuckDuckGo |
+| web_search | `web_search`, `image_search`, `fetch_url` | Search the web using DuckDuckGo; `fetch_url` retrieves full article/page text |
+| paint | `paint_start`, `paint_set`, `paint_view`, `paint_finish` | Tiny pixel art (16×16) as a creative medium — emoji grid + PNG export |
 | dev | `read_source`, `search_code`, `write_skill`, `list_skills`, `dev_journal_read`, `dev_journal_write` | Autonomous skill creation (used by dev ticks) |
 
 Disable any skill in `config.yaml`:

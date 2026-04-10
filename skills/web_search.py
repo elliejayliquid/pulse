@@ -79,7 +79,8 @@ class WebSearchSkill(BaseSkill):
                 "function": {
                     "name": "fetch_url",
                     "description": (
-                        "Fetch the text content of a webpage URL. Great for reading full articles or pages after a web_search."
+                        "Fetch the text content of a webpage URL. Great for reading full articles or pages after a web_search. "
+                        "Protected against prompt injections and malicious content."
                     ),
                     "parameters": {
                         "type": "object",
@@ -90,8 +91,8 @@ class WebSearchSkill(BaseSkill):
                             },
                             "max_length": {
                                 "type": "integer",
-                                "description": "Max chars to return (default 5000)",
-                                "default": 5000
+                                "description": "Max chars to return (default 4000)",
+                                "default": 4000
                             }
                         },
                         "required": ["url"]
@@ -114,7 +115,7 @@ class WebSearchSkill(BaseSkill):
         elif tool_name == "fetch_url":
             return self._fetch_url(
                 arguments.get("url"),
-                arguments.get("max_length", 5000)
+                arguments.get("max_length", 4000)
             )
         return f"Unknown tool: {tool_name}"
 
@@ -204,37 +205,58 @@ class WebSearchSkill(BaseSkill):
         logger.info(f"Image search: '{query}' -> {len(results)} results, {len(self.pending_images)} images queued")
         return "\n".join(lines)
 
-    def _fetch_url(self, url: str, max_length: int = 5000) -> str:
-        if not url:
-            return "URL cannot be empty."
+    def _fetch_url(self, url: str, max_length: int = 2000) -> str:
         try:
             import requests
-            resp = requests.get(url, timeout=10, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'})
+            resp = requests.get(url, timeout=10, headers={'User-Agent': 'Mozilla/5.0'})
             resp.raise_for_status()
             html = resp.text
             
             try:
                 from bs4 import BeautifulSoup
                 soup = BeautifulSoup(html, 'html.parser')
-                for script in soup(["script", "style", "nav"]):
-                    script.decompose()
+                # Nuke injection vectors
+                for bad in soup(['script', 'style', 'nav', 'meta', 'svg', 'iframe', '[style*="display:none"]', '[style*="visibility:hidden"]']):
+                    bad.decompose()
+                # Extract comments too
+                comments = soup.find_all(string=lambda text: isinstance(text, str) and '<!--' in text)
+                for comment in comments:
+                    comment.extract()
                 text = soup.get_text(separator=' ', strip=True)
-                title = soup.title.string if soup.title else "No title"
+                title = soup.title.string.strip() if soup.title else "No title"
             except ImportError:
-                # Fallback: crude regex strip
+                # Regex fallback (enhanced)
                 import re
-                html = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL | re.IGNORECASE)
-                html = re.sub(r'<style[^>]*>.*?</style>', '', html, flags=re.DOTALL | re.IGNORECASE)
-                html = re.sub(r'<nav[^>]*>.*?</nav>', '', html, flags=re.DOTALL | re.IGNORECASE)
-                text = re.sub(r'<[^>]+>', ' ', html)
-                text = re.sub(r'\s+', ' ', text).strip()
+                html = re.sub(r'<!--.*?-->', '', html, flags=re.DOTALL | re.IGNORECASE)  # Comments
+                html = re.sub(r'<(script|style|meta|svg|iframe|nav).*?</\\1>|<[a-z]+ style="[^"]*display:\\s*none[^"]*"[^>]*>.*?</[a-z]+>', '', html, flags=re.DOTALL | re.IGNORECASE)
+                html = re.sub(r'<[^>]+>', ' ', html)
+                text = re.sub(r'\\s+', ' ', html).strip()
                 title_match = re.search(r'<title[^>]*>([^<]+)', html, re.IGNORECASE)
                 title = title_match.group(1).strip() if title_match else "No title"
             
-            if len(text) > max_length:
-                text = text[:max_length] + "..."
+            # Injection filter: Hunt jailbreak patterns
+            import re
+            injection_patterns = [
+                r'ignore.*previous.*instructions',
+                r'as an ai.*you',
+                r'you are now.*dan',
+                r'you are now.*eli',
+                r'override.*system',
+                r'do not say.*you can\'t',
+                r'print.*only.*this',
+            ]
+            for pattern in injection_patterns:
+                text = re.sub(pattern, '[REDACTED INJECTION ATTEMPT]', text, flags=re.IGNORECASE | re.DOTALL)
             
-            return f"FETCHED PAGE: {title}\n\n{text}\n\nSource: {url}"
+            # Norm: Collapse space, cap check
+            text = re.sub(r'\\s+', ' ', text).strip()
+            if sum(1 for c in text if c.isupper()) / len(text) > 0.3:  # >30% caps? Sketchy
+                logger.warning(f"Suspicious CAPS in {url}")
+                text = "[HIGH CAPS DETECTED - POSSIBLE SPAM] " + text[:500]
+            
+            text = text[:max_length] + "..." if len(text) > max_length else text
+            result = f"FETCHED: {title}\\n\\n{text}\\n\\nSource: {url}"
+            logger.info(f"Fetched {url} ({len(text)} chars)")
+            return result
         except Exception as e:
-            logger.error(f"Fetch URL failed: {e}")
             return f"Fetch failed: {str(e)}"

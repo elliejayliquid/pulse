@@ -155,6 +155,8 @@ skills:
     enabled: true                  # read_source, search_code, write_skill, list_skills, dev_journal
   tts:
     enabled: false                 # speak — send voice messages
+  paint:
+    enabled: true                  # paint_start, paint_set, paint_view, paint_finish
 
 # --- Dev Tick (autonomous self-improvement) ---
 # The companion periodically reviews its own code and can create/improve skills.
