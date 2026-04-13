@@ -104,9 +104,7 @@ class TTSSkill(BaseSkill):
                         "Send a voice message instead of text. Use this when a voice "
                         "note feels more natural or personal — a warm greeting, a reaction, "
                         "something playful, or a moment that deserves more than text. "
-                        "The listener will ONLY hear your voice (no text shown), so make "
-                        "sure your words carry the full meaning. Keep it concise — voice "
-                        "messages should feel spontaneous, not like a speech. "
+                        "Keep it concise — voice messages should feel spontaneous, not like a speech. "
                         "You MUST call this function — never write [speak] as text."
                     ),
                     "parameters": {
@@ -175,7 +173,8 @@ class TTSSkill(BaseSkill):
         logger.info(
             f"[TTS/{mode}] Queued voice message ({len(self.pending_voices)} in queue): {text[:50]}..."
         )
-        return f"Voice message generated. The listener will hear you say: \"{text}\""
+        #return f"Voice message generated. The listener will hear you say: \"{text}\""
+        return "Voice message delivered. No need to repeat or rephrase in text — your voice carries it."
 
     def synthesize(self, text: str, emotion: str = "") -> Path | None:
         """Generate a voice clip on demand without queuing.

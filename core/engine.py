@@ -243,23 +243,45 @@ class PulseEngine:
                     except Exception:
                         pass
 
+        # Paint — send any finished artwork and clear history info
+        paint_skill = self.skill_registry.get_skill("paint")
+        if paint_skill:
+            if paint_skill.pending_images:
+                queued = list(paint_skill.pending_images)
+                paint_skill.pending_images.clear()
+                if telegram and hasattr(telegram, "send_photo"):
+                    for img_path in queued:
+                        await telegram.send_photo(img_path)
+            if getattr(paint_skill, "pending_paint_info", None):
+                paint_skill.pending_paint_info.clear()
+
         # Web search — clear (not useful standalone)
         web_skill = self.skill_registry.get_skill("web_search")
         if web_skill:
             web_skill.pending_sources.clear()
             web_skill.pending_images.clear()
 
-    def _capture_pending_voice_text(self) -> str | None:
-        """Snapshot pending voice text before flush clears the queue.
+    def _capture_pending_skill_text(self) -> str | None:
+        """Snapshot pending voice/paint text before flush clears the queues.
 
-        Returns a '🔊 ...' string suitable for conversation history, or None.
+        Returns a string suitable for conversation history, or None.
         """
         if not self.skill_registry:
             return None
+        parts = []
+
+        # TTS — voice transcripts
         tts_skill = self.skill_registry.get_skill("tts")
         if tts_skill and tts_skill.pending_voices:
-            return "\n".join(f"🔊 {t}" for _, t in tts_skill.pending_voices)
-        return None
+            for _, text in tts_skill.pending_voices:
+                parts.append(f"🔊 {text}")
+
+        # Paint — painting titles/captions
+        paint_skill = self.skill_registry.get_skill("paint")
+        if paint_skill and getattr(paint_skill, "pending_paint_info", None):
+            parts.extend(paint_skill.pending_paint_info)
+
+        return "\n".join(parts) if parts else None
 
     def _save_heartbeat_to_history(self, voice_text: str | None,
                                    response: PulseResponse | None,
@@ -406,19 +428,15 @@ class PulseEngine:
             from core.llm import strip_think_tags
             reply = strip_think_tags(reply)
 
-        # Preserve spoken text in conversation history so the companion
-        # remembers what it said aloud.  When both voice and text exist,
-        # prepend the voice transcript so nothing is lost.
-        voice_text = None
-        if self.skill_registry:
-            tts_skill = self.skill_registry.get_skill("tts")
-            if tts_skill and tts_skill.pending_voices:
-                voice_text = "\n".join(f"🔊 {t}" for _, t in tts_skill.pending_voices)
+        # Preserve spoken text / paint info in conversation history so the
+        # companion remembers what it did.  When both skill output and text
+        # exist, prepend the skill output so nothing is lost.
+        skill_text = self._capture_pending_skill_text()
 
-        if voice_text and reply:
-            history_reply = f"{voice_text}\n{reply}"
+        if skill_text and reply:
+            history_reply = f"{skill_text}\n{reply}"
         else:
-            history_reply = reply or voice_text
+            history_reply = reply or skill_text
         if not history_reply:
             return None, tools_used, reasoning
 
@@ -468,7 +486,7 @@ class PulseEngine:
                 history = history[-10:]
 
         self.context.save_conversation(history)
-        log_reply = reply or voice_text or "(voice-only)"
+        log_reply = reply or skill_text or "(voice-only)"
         logger.info(f"Replied to {source}: {log_reply[:50]}...")
         return reply, tools_used, reasoning
 
@@ -561,7 +579,7 @@ class PulseEngine:
                     await self._dispatch(response)
 
             # Capture voice text BEFORE flushing (flush clears the queue)
-            voice_text = self._capture_pending_voice_text()
+            voice_text = self._capture_pending_skill_text()
 
             # Flush pending voices/images so they don't leak into the next
             # user message (same issue as heartbeats — speak tool queues audio
@@ -645,7 +663,7 @@ class PulseEngine:
             logger.info(f"Heartbeat tick completed in {elapsed:.1f}s")
 
             # Capture voice text BEFORE flushing (flush clears the queue)
-            voice_text = self._capture_pending_voice_text()
+            voice_text = self._capture_pending_skill_text()
 
             if text:
                 response = PulseResponse.from_llm_output(text)

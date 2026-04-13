@@ -59,6 +59,7 @@ class PaintSkill(BaseSkill):
         self.canvas_intent: str = ""
         self.paintings_dir = self._get_paintings_dir(config)
         self.pending_images: list[str] = []  # Image paths to send via Telegram after response
+        self.pending_paint_info: list[str] = []  # Title/caption for conversation history
 
     # ---------------------------------------------------------------------
     # Config helpers
@@ -422,6 +423,11 @@ class PaintSkill(BaseSkill):
             upscaled_img.save(upscaled_path, format="PNG")
             # Queue upscaled image for Telegram delivery
             self.pending_images.append(str(upscaled_path))
+            # Queue info for conversation history (so companion remembers painting)
+            info = f"🎨 '{title.strip()}'"
+            if caption.strip():
+                info += f" — {caption.strip()}"
+            self.pending_paint_info.append(info)
         except Exception as e:
             return f"Failed to save painting: {e}"
 
