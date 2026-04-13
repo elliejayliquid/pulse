@@ -17,9 +17,15 @@ logger = logging.getLogger(__name__)
 class UsageTracker:
     """Tracks daily token usage for cloud API providers."""
 
-    def __init__(self, path: str = "data/usage.json"):
+    def __init__(self, config: dict):
+        self.config = config
+        self._db = config.get("_db")
+        self._shared_db = config.get("_shared_db")
+        
+        path = config.get("paths", {}).get("usage", "data/usage.json")
         self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        if not self._db:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
 
     def record(self, prompt_tokens: int, completion_tokens: int,
                provider: str = "", model: str = ""):
@@ -28,6 +34,23 @@ class UsageTracker:
         Accumulates into the existing entry for today, or creates a new one.
         """
         today = datetime.now().strftime("%Y-%m-%d")
+        
+        db = self._shared_db or self._db
+        if db:
+            try:
+                db.record_usage(
+                    date=today,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    calls=1,
+                    provider=provider,
+                    model=model
+                )
+                return
+            except Exception as e:
+                logger.warning(f"Failed to record usage to DB: {e}")
+
+        # JSON Fallback
         log = self._load()
 
         # Find or create today's entry
@@ -59,7 +82,7 @@ class UsageTracker:
 
         self._save(log)
         logger.debug(
-            f"Usage: +{prompt_tokens}p/{completion_tokens}c tokens "
+            f"Usage (JSON): +{prompt_tokens}p/{completion_tokens}c tokens "
             f"(today total: {entry['prompt_tokens']}p/{entry['completion_tokens']}c, "
             f"{entry['calls']} calls)"
         )
@@ -67,6 +90,22 @@ class UsageTracker:
     def get_today(self) -> dict:
         """Get today's usage summary."""
         today = datetime.now().strftime("%Y-%m-%d")
+        
+        db = self._shared_db or self._db
+        if db:
+            rows = db.get_usage_today(today)
+            if rows:
+                # Merge multiple model entries for the "today summary"
+                summary = {
+                    "date": today,
+                    "prompt_tokens": sum(r["prompt_tokens"] for r in rows),
+                    "completion_tokens": sum(r["completion_tokens"] for r in rows),
+                    "calls": sum(r["calls"] for r in rows),
+                }
+                return summary
+            return {"date": today, "prompt_tokens": 0, "completion_tokens": 0, "calls": 0}
+
+        # JSON Fallback
         for item in self._load():
             if item.get("date") == today:
                 return item
@@ -74,6 +113,11 @@ class UsageTracker:
 
     def get_recent(self, days: int = 7) -> list[dict]:
         """Get usage for the last N days."""
+        db = self._shared_db or self._db
+        if db:
+            return db.get_usage_recent(days)
+            
+        # JSON Fallback
         log = self._load()
         return log[-days:] if len(log) > days else log
 

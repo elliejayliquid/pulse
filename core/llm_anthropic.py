@@ -151,9 +151,13 @@ class AnthropicClient:
             cache_read = getattr(response.usage, "cache_read_input_tokens", 0) or 0
             cache_create = getattr(response.usage, "cache_creation_input_tokens", 0) or 0
             if cache_read or cache_create:
+                # Anthropic's input_tokens excludes cached tokens, so total =
+                # input_tokens (uncached) + cache_read + cache_create
+                total = (response.usage.input_tokens or 0) + cache_read + cache_create
+                hit_pct = cache_read * 100 // total if total else 0
                 logger.info(
                     f"Prompt cache: {cache_read} read, {cache_create} created "
-                    f"(of {response.usage.input_tokens} input tokens)"
+                    f"of {total} total tokens ({hit_pct}% hit)"
                 )
 
     def is_available(self) -> bool:
