@@ -615,11 +615,11 @@ class TelegramChannel(Channel):
             if self._show_reasoning and reasoning:
                 await self._send_reasoning(update.message, reasoning)
 
+            if tools_used:
+                tool_names = ", ".join(dict.fromkeys(tools_used))
+                await self._reply_with_retry(update.message, f"🔧 {tool_names}")
             if reply:
                 # Send text reply (even after voice — companion may want both)
-                if tools_used and not voice_sent:
-                    tool_names = ", ".join(dict.fromkeys(tools_used))
-                    await self._reply_with_retry(update.message, f"🔧 {tool_names}")
                 await self._reply_with_retry(
                     update.message, reply, reply_markup=self._voice_markup()
                 )
@@ -670,10 +670,10 @@ class TelegramChannel(Channel):
             )
             if self._show_reasoning and reasoning:
                 await self._send_reasoning(update.message, reasoning)
+            if tools_used:
+                tool_names = ", ".join(dict.fromkeys(tools_used))
+                await self._reply_with_retry(update.message, f"🔧 {tool_names}")
             if reply:
-                if tools_used and not voice_sent:
-                    tool_names = ", ".join(dict.fromkeys(tools_used))
-                    await self._reply_with_retry(update.message, f"🔧 {tool_names}")
                 await self._reply_with_retry(
                     update.message, reply, reply_markup=self._voice_markup()
                 )
@@ -730,10 +730,10 @@ class TelegramChannel(Channel):
             )
             if self._show_reasoning and reasoning:
                 await self._send_reasoning(update.message, reasoning)
+            if tools_used:
+                tool_names = ", ".join(dict.fromkeys(tools_used))
+                await self._reply_with_retry(update.message, f"🔧 {tool_names}")
             if reply:
-                if tools_used and not voice_sent:
-                    tool_names = ", ".join(dict.fromkeys(tools_used))
-                    await self._reply_with_retry(update.message, f"🔧 {tool_names}")
                 await self._reply_with_retry(
                     update.message, reply, reply_markup=self._voice_markup()
                 )
