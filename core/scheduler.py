@@ -222,20 +222,34 @@ def _parse_time_of_day(text: str) -> Optional[tuple[int, int]]:
 class ScheduleManager:
     """Manages scheduled tasks and reminders."""
 
-    def __init__(self, schedules_path: str):
+    def __init__(self, config: dict):
+        self.config = config
+        self._db = config.get("_db")
+        self._shared_db = config.get("_shared_db")
+        
+        # Resolve legacy path for fallback
+        schedules_path = config.get("paths", {}).get("schedules", "data/schedules.json")
         self.path = Path(schedules_path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        if not self.path.exists():
-            self._save([])
+        
+        if not self._db:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            if not self.path.exists():
+                self._save_json([])
 
     def _load(self) -> list[dict]:
+        db = self._shared_db or self._db
+        if db:
+            return db.get_schedules(enabled_only=False)
+        return self._load_json()
+
+    def _load_json(self) -> list[dict]:
         try:
             with open(self.path, "r", encoding="utf-8") as f:
                 return json.load(f)
         except (json.JSONDecodeError, IOError):
             return []
 
-    def _save(self, schedules: list[dict]):
+    def _save_json(self, schedules: list[dict]):
         try:
             with open(self.path, "w", encoding="utf-8") as f:
                 json.dump(schedules, f, indent=2, ensure_ascii=False)
@@ -333,7 +347,12 @@ class ScheduleManager:
                 return deduped
 
         schedules.append(entry)
-        self._save(schedules)
+
+        db = self._shared_db or self._db
+        if db:
+            db.save_schedule(entry)
+        else:
+            self._save_json(schedules)
 
         logger.info(f"Schedule added: {entry['id']} — {task}")
         return entry
@@ -384,31 +403,45 @@ class ScheduleManager:
         to prevent stale tasks from polluting the companion's context.
         """
         schedules = self._load()
+        # Update the entry in the list and persistence
+        db = self._shared_db or self._db
         for s in schedules:
             if s["id"] == schedule_id:
                 if s.get("schedule_type") == "once":
                     s["completed"] = True
-                s["last_run"] = datetime.now(timezone.utc).isoformat()
+                now_iso = datetime.now(timezone.utc).isoformat()
+                s["last_run"] = now_iso
+                
+                if db:
+                    if s.get("schedule_type") == "once":
+                        db.mark_schedule_completed(schedule_id)
+                    db.update_schedule_last_run(schedule_id)
                 break
 
-        # Auto-purge: remove old completed one-time tasks (keep only the 5 most recent)
-        completed = [s for s in schedules if s.get("schedule_type") == "once" and s.get("completed")]
-        if len(completed) > 5:
-            # Sort by completion time, keep newest 5
-            completed.sort(key=lambda s: s.get("last_run", ""), reverse=True)
-            old_ids = {s["id"] for s in completed[5:]}
-            schedules = [s for s in schedules if s["id"] not in old_ids]
-            logger.info(f"Purged {len(old_ids)} old completed schedule(s)")
-
-        self._save(schedules)
+        if not db:
+            # Auto-purge: remove old completed one-time tasks (keep only the 5 most recent)
+            completed = [s for s in schedules if s.get("schedule_type") == "once" and s.get("completed")]
+            if len(completed) > 5:
+                # Sort by completion time, keep newest 5
+                completed.sort(key=lambda s: s.get("last_run", ""), reverse=True)
+                old_ids = {s["id"] for s in completed[5:]}
+                schedules = [s for s in schedules if s["id"] not in old_ids]
+                logger.info(f"Purged {len(old_ids)} old completed schedule(s)")
+            self._save_json(schedules)
 
     def remove(self, schedule_id: str) -> bool:
         """Remove a schedule entirely."""
-        schedules = self._load()
+        db = self._shared_db or self._db
+        if db:
+            return db.delete_schedule(schedule_id)
+
+        # Legacy JSON Fallback
+        schedules = self._load_json()
         original_len = len(schedules)
         schedules = [s for s in schedules if s["id"] != schedule_id]
+        
         if len(schedules) < original_len:
-            self._save(schedules)
+            self._save_json(schedules)
             return True
         return False
 
@@ -470,7 +503,12 @@ class ScheduleManager:
                     except ValueError:
                         pass
 
-        self._save(schedules)
+        db = self._shared_db or self._db
+        if db:
+            db.save_schedule(entry)
+        else:
+            self._save_json(schedules)
+            
         logger.info(f"Schedule updated: {entry['id']} — {entry.get('task', '')}")
         return entry
 

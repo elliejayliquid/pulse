@@ -437,11 +437,19 @@ class TelegramChannel(Channel):
         await update.message.reply_text("\n".join(status_lines))
 
     async def _cmd_quiet(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /quiet — acknowledge quiet mode request."""
-        await update.message.reply_text(
-            "Quiet mode — I'll stop proactive messages until you message me again."
-        )
-        # TODO: implement actual quiet toggle in engine
+        """Handle /quiet — toggle manual quiet mode (no heartbeats until next message)."""
+        if self._engine:
+            self._engine._manual_quiet = not self._engine._manual_quiet
+            if self._engine._manual_quiet:
+                await update.message.reply_text(
+                    "Quiet mode on — I'll stop proactive messages until you message me again."
+                )
+            else:
+                await update.message.reply_text(
+                    "Quiet mode off — heartbeats resumed!"
+                )
+        else:
+            await update.message.reply_text("Engine not connected.")
 
     async def _cmd_ping(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /ping — instant bot-alive check (no LLM needed)."""

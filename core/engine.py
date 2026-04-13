@@ -40,6 +40,8 @@ class PulseEngine:
         self.config = config
         self.channels = channels
         self.skill_registry = skill_registry
+        self.db = config.get("_db")
+        self.shared_db = config.get("_shared_db")
 
         # Initialize core components
         model_config = config.get("model", {})
@@ -56,9 +58,7 @@ class PulseEngine:
 
         # Token usage tracker (only meaningful for cloud APIs, but always safe)
         from core.usage import UsageTracker
-        usage_tracker = UsageTracker(
-            config.get("paths", {}).get("usage", "data/usage.json")
-        )
+        usage_tracker = UsageTracker(config)
 
         if provider_type == "anthropic":
             self.llm = AnthropicClient(
@@ -88,9 +88,7 @@ class PulseEngine:
 
         self.max_tool_rounds = model_config.get("max_tool_rounds", 5)
         self.context = ContextManager(config)
-        self.scheduler = ScheduleManager(
-            config.get("paths", {}).get("schedules", "data/schedules.json")
-        )
+        self.scheduler = ScheduleManager(config)
 
         # Wire journal skill into context manager (if available)
         if skill_registry:
@@ -136,10 +134,8 @@ class PulseEngine:
 
         # Activity tracking — heartbeat only fires after silence
         self._last_activity = 0.0   # timestamp of last message exchange
+        self._manual_quiet = False  # /quiet toggle — cleared on next user message
 
-        # Rate limiting — prevent the companion from flooding channels
-        self._last_notify = 0       # timestamp of last notification
-        self._notify_cooldown = heartbeat_config.get("notify_cooldown_minutes", 60) * 60  # default 1 hour
 
         # Action log — tracks what the companion does each heartbeat
         self._action_log_path = Path(
@@ -161,6 +157,16 @@ class PulseEngine:
 
     def _log_action(self, action: str, tools_used: list[str] = None, summary: str = ""):
         """Append an entry to the heartbeat action log (ring buffer)."""
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+        if self.db:
+            try:
+                self.db.save_action_log(timestamp, action, tools_used, summary)
+                return
+            except Exception as e:
+                logger.warning(f"Failed to log action to DB: {e}")
+
+        # Legacy JSON fallback
         log = []
         if self._action_log_path.exists():
             try:
@@ -170,7 +176,7 @@ class PulseEngine:
                 log = []
 
         log.append({
-            "time": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "time": timestamp,
             "action": action,
             "tools": tools_used or [],
             "summary": summary[:120],
@@ -194,7 +200,9 @@ class PulseEngine:
             pass  # Normal — timeout means we slept the full duration
 
     def _in_quiet_hours(self) -> bool:
-        """Check if we're in quiet hours."""
+        """Check if we're in quiet hours (clock-based or manual /quiet toggle)."""
+        if self._manual_quiet:
+            return True
         hour = datetime.now().hour
         if self.quiet_start > self.quiet_end:
             # Wraps around midnight (e.g., 23-8)
@@ -216,24 +224,13 @@ class PulseEngine:
             web_skill.pending_sources.clear()
             web_skill.pending_images.clear()
 
-    async def _dispatch(self, response: PulseResponse, is_scheduled_task: bool = False):
-        """Route a response to the appropriate channel.
-
-        Rate limits apply to free-think ticks but NOT to scheduled tasks
-        (those were explicitly requested, so they should always go through).
-        """
-        now = time.time()
-
+    async def _dispatch(self, response: PulseResponse):
+        """Route a response to the appropriate channel."""
         if response.action == "silent":
             logger.info("Companion chose to stay silent.")
             return
 
         if response.action == "notify":
-            # Rate limit notifications (unless it's a scheduled task)
-            if not is_scheduled_task and (now - self._last_notify) < self._notify_cooldown:
-                mins_left = int((self._notify_cooldown - (now - self._last_notify)) / 60)
-                logger.info(f"Notification rate-limited ({mins_left}m cooldown remaining). Skipping.")
-                return
             # Send via toast AND Telegram (if available)
             sent = False
             telegram = self.channels.get("telegram")
@@ -245,7 +242,6 @@ class PulseEngine:
                 await toast.send(response.message)
                 sent = True
             if sent:
-                self._last_notify = now
                 logger.info(f"Notification sent: {response.message[:50]}...")
             else:
                 logger.info(f"[No notification channels] {response.message[:80]}...")
@@ -300,6 +296,10 @@ class PulseEngine:
         # Reset heartbeat timer — conversation is active, re-roll interval
         self._last_activity = time.time()
         self.interval = self._roll_heartbeat_interval()
+        # Clear manual quiet mode — user is talking, companion wakes up
+        if self._manual_quiet:
+            self._manual_quiet = False
+            logger.info("Manual quiet mode cleared — user sent a message.")
 
         # is_available() is a sync HTTP call — run in thread to not block
         available = await asyncio.to_thread(self.llm.is_available)
@@ -494,11 +494,11 @@ class PulseEngine:
                     logger.info(f"Task tools used: {', '.join(tools_used)}")
                 if text:
                     response = PulseResponse.from_llm_output(text)
-                    await self._dispatch(response, is_scheduled_task=True)
+                    await self._dispatch(response)
             else:
                 response = await asyncio.to_thread(self.llm.chat, messages)
                 if response:
-                    await self._dispatch(response, is_scheduled_task=True)
+                    await self._dispatch(response)
 
             # Log the notification into conversation history so the companion
             # remembers what it sent (and replies make sense in context)
@@ -561,6 +561,7 @@ class PulseEngine:
         # Free-think tick — companion decides what to do
         tools = self.skill_registry.get_all_tools() if self.skill_registry else []
         skill_summary = self.skill_registry.get_skill_summary() if self.skill_registry else []
+
         messages = self.context.build_heartbeat_prompt(
             has_tools=bool(tools), skill_summary=skill_summary
         )

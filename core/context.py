@@ -11,6 +11,7 @@ so the companion remembers chats across sessions.
 import json
 import logging
 import glob
+import struct
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -86,6 +87,11 @@ class ContextManager:
         self._journal_skill = None  # Set via set_journal_skill() after engine init
         self._inject_skills = []   # Skills whose get_context() is injected into every prompt
 
+        # Database references (set in pulse.py during startup)
+        self._db = config.get("_db")           # persona DB (conversations, schedules, etc.)
+        self._shared_db = config.get("_shared_db")  # shared DB (memories, journals — or same as _db)
+        self._active_session_id = None          # cached active conversation session
+
         # Build budget: use explicit values from config if set,
         # otherwise derive from max_context using proportions
         # Use provider.max_context for cloud APIs, model.max_context for local
@@ -117,6 +123,25 @@ class ContextManager:
         Configure via: context.inject_skills: ["skill_name", ...]
         """
         self._inject_skills = skills
+
+    def _ensure_active_session(self) -> str | None:
+        """Get or create the active conversation session. Returns session ID."""
+        if not self._db:
+            return None
+        # Check if cached session is still valid
+        if self._active_session_id:
+            return self._active_session_id
+        # Look for an existing unclosed session in the DB
+        session = self._db.get_active_session()
+        if session:
+            self._active_session_id = session["id"]
+        else:
+            # Create a new session
+            session_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            self._db.create_session(session_id)
+            self._active_session_id = session_id
+            logger.info(f"Created new conversation session: {session_id}")
+        return self._active_session_id
 
     def _load_injected_context(self) -> str:
         """Collect context from all registered inject_skills."""
@@ -288,7 +313,36 @@ class ContextManager:
         return text[:max_chars] + "\n... (truncated)"
 
     def _load_memories(self, limit: int = 5) -> str:
-        """Load recent and important memories."""
+        """Load recent and important memories from DB (or JSON fallback)."""
+        # DB path — use shared DB (memories are shared for Claude personas)
+        db = self._shared_db or self._db
+        if db:
+            memories = db.get_all_memories()
+            if not memories:
+                return ""
+
+            session_logs = sorted(
+                [m for m in memories if m.get("type") == "session_log"],
+                key=lambda x: x.get("date", ""),
+                reverse=True
+            )
+            facts = [m for m in memories if m.get("type") == "fact"]
+
+            lines = ["## Recent Memories"]
+            if session_logs:
+                latest = session_logs[0]
+                lines.append(f"\nLast session ({latest.get('date', 'unknown')[:10]}):")
+                lines.append(latest.get("text", ""))
+            if facts:
+                lines.append("\nStored facts:")
+                for fact in facts:
+                    tags = fact.get("tags", [])
+                    tag_str = f" [{', '.join(tags)}]" if tags else ""
+                    lines.append(f"- {fact.get('text', '')}{tag_str}")
+
+            return "\n".join(lines) if len(lines) > 1 else ""
+
+        # JSON fallback
         memory_dir = self.paths.get("memories", "")
         if not memory_dir or not Path(memory_dir).exists():
             return ""
@@ -305,7 +359,6 @@ class ContextManager:
         if not memories:
             return ""
 
-        # Sort: session_logs first (most recent), then facts
         session_logs = sorted(
             [m for m in memories if m.get("type") == "session_log"],
             key=lambda x: x.get("date", ""),
@@ -314,14 +367,10 @@ class ContextManager:
         facts = [m for m in memories if m.get("type") == "fact"]
 
         lines = ["## Recent Memories"]
-
-        # Most recent session log (the "what happened last time")
         if session_logs:
             latest = session_logs[0]
             lines.append(f"\nLast session ({latest.get('date', 'unknown')[:10]}):")
             lines.append(latest.get("text", ""))
-
-        # All facts (these are compact and important)
         if facts:
             lines.append("\nStored facts:")
             for fact in facts:
@@ -358,11 +407,18 @@ class ContextManager:
         return "\n".join(lines)
 
     def _load_conversation(self) -> list[dict]:
-        """Load conversation history."""
+        """Load conversation history from DB (or JSON fallback)."""
+        if self._db:
+            session_id = self._ensure_active_session()
+            if session_id:
+                rows = self._db.get_messages(session_id)
+                return [{"role": r["role"], "content": r["content"]} for r in rows]
+            return []
+
+        # JSON fallback
         conv_path = self.paths.get("conversation", "")
         if not conv_path or not Path(conv_path).exists():
             return []
-
         try:
             with open(conv_path, "r", encoding="utf-8") as f:
                 return json.load(f)
@@ -370,7 +426,43 @@ class ContextManager:
             return []
 
     def save_conversation(self, messages: list[dict]):
-        """Save conversation history."""
+        """Save conversation history to DB (or JSON fallback).
+
+        Smart diff: appends only new messages when the list grew (normal case),
+        or clears and re-inserts when the list shrank (post-summarization trim).
+        """
+        if self._db:
+            session_id = self._ensure_active_session()
+            if not session_id:
+                return
+            existing = self._db.get_messages(session_id)
+            existing_count = len(existing)
+            if len(messages) >= existing_count:
+                # Normal case: append only new messages
+                for msg in messages[existing_count:]:
+                    content = msg.get("content", "")
+                    if isinstance(content, list):
+                        content = " ".join(
+                            p.get("text", "") for p in content if p.get("type") == "text"
+                        )
+                    is_summary = isinstance(content, str) and content.startswith("[Context]")
+                    self._db.save_message(session_id, msg["role"], content,
+                                          is_summary=is_summary)
+            else:
+                # History was trimmed (summarization fallback) — clear and reinsert
+                self._db.clear_session_messages(session_id)
+                for msg in messages:
+                    content = msg.get("content", "")
+                    if isinstance(content, list):
+                        content = " ".join(
+                            p.get("text", "") for p in content if p.get("type") == "text"
+                        )
+                    is_summary = isinstance(content, str) and content.startswith("[Context]")
+                    self._db.save_message(session_id, msg["role"], content,
+                                          is_summary=is_summary)
+            return
+
+        # JSON fallback
         conv_path = self.paths.get("conversation", "")
         if not conv_path:
             return
@@ -382,27 +474,43 @@ class ContextManager:
             logger.error(f"Failed to save conversation: {e}")
 
     def archive_conversation(self, messages: list[dict], summary: str = ""):
-        """Append a full conversation to the JSONL archive before it's summarized.
+        """Archive the current conversation session.
 
-        Each entry is one JSON line with metadata, participants, messages,
-        and an optional summary with embedding. The format is designed to be
-        compatible with future imports (ChatGPT logs, HeartlineChat, etc.).
+        DB mode: closes the active session (with summary) and creates a new one.
+        All messages are already in the DB — no data copy needed.
+
+        JSON fallback: appends to the JSONL archive file.
         """
+        if self._db:
+            # Close current session with summary
+            if self._active_session_id:
+                msg_count = len(self._db.get_messages(self._active_session_id))
+                self._db.close_session(self._active_session_id, summary=summary)
+                logger.info(
+                    f"Closed session {self._active_session_id} "
+                    f"({msg_count} messages, summary: {len(summary)} chars)"
+                )
+            # Create a new session for the continuation
+            new_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            self._db.create_session(new_id)
+            self._active_session_id = new_id
+            logger.info(f"Created new session: {new_id}")
+            return
+
+        # JSON fallback — append to JSONL archive
         archive_path = self.paths.get("conversation_archive", "")
         if not archive_path:
             logger.debug("No conversation_archive path — skipping archive.")
             return
 
-        # Filter to actual conversation messages (skip context/summary injections)
         real_messages = [
             m for m in messages
             if not (m.get("content", "").startswith("[Context]"))
         ]
         if len(real_messages) < 2:
-            return  # nothing worth archiving
+            return
 
         now = datetime.now()
-
         entry = {
             "id": now.strftime("%Y-%m-%dT%H:%M:%S"),
             "title": now.strftime("%Y-%m-%d"),
@@ -414,7 +522,6 @@ class ContextManager:
             "message_count": len(real_messages),
             "messages": real_messages,
         }
-
         if summary:
             entry["summary"] = summary
 
@@ -431,10 +538,8 @@ class ContextManager:
     def save_to_memory(self, summary: str, tags: str = "telegram_chat,chat_log") -> bool:
         """Save a conversation summary to persistent memory.
 
-        Writes a memory_XXX.json file to the companion's memory directory in the
-        same format the MCP memory server uses — including embeddings from the
-        same all-MiniLM-L6-v2 model. These memories are findable via semantic
-        search in future sessions.
+        DB mode: inserts into the memories table (shared DB for Claude personas).
+        JSON fallback: writes memory_XXX.json to the memory directory.
 
         Args:
             summary: The conversation summary text to persist.
@@ -443,6 +548,30 @@ class ContextManager:
         Returns:
             True if saved successfully, False otherwise.
         """
+        # Compute embedding (used by both DB and JSON paths)
+        model = _get_embedding_model()
+        embedding_vec = None
+        if model is None:
+            logger.warning("Embedding model not available — saving memory without embedding.")
+        else:
+            embedding_vec = model.encode(summary).tolist()
+
+        tag_list = [t.strip() for t in tags.split(",")]
+
+        # DB path — use shared DB (memories are shared for Claude personas)
+        db = self._shared_db or self._db
+        if db:
+            embedding_bytes = None
+            if embedding_vec:
+                embedding_bytes = struct.pack(f"{len(embedding_vec)}f", *embedding_vec)
+            mem_id = db.save_memory(
+                text=summary, tags=tag_list, type="session_log",
+                importance=10, embedding=embedding_bytes
+            )
+            logger.info(f"Conversation summary saved to DB memory (ID: {mem_id})")
+            return True
+
+        # JSON fallback
         memory_dir = self.paths.get("memories", "")
         if not memory_dir:
             logger.warning("No memory path configured — can't persist summary.")
@@ -452,15 +581,6 @@ class ContextManager:
         if not memory_path.exists():
             memory_path.mkdir(parents=True, exist_ok=True)
 
-        # Get the embedding model (lazy-loaded)
-        model = _get_embedding_model()
-        if model is None:
-            logger.warning("Embedding model not available — saving memory without embedding.")
-            embedding = []
-        else:
-            embedding = model.encode(summary).tolist()
-
-        # Determine next ID (same logic as memory_server.py)
         existing = list(memory_path.glob("memory_*.json"))
         if existing:
             ids = []
@@ -473,25 +593,24 @@ class ContextManager:
         else:
             next_id = 1
 
-        mem_id = f"{next_id:03d}"
-
+        mem_id_str = f"{next_id:03d}"
         memory = {
-            "id": mem_id,
+            "id": mem_id_str,
             "text": summary,
-            "tags": [t.strip() for t in tags.split(",")],
+            "tags": tag_list,
             "type": "session_log",
             "importance": 10,
             "retrieval_count": 0,
             "last_accessed": None,
             "date": datetime.now().isoformat(),
-            "embedding": embedding,
+            "embedding": embedding_vec or [],
         }
 
-        mem_file = memory_path / f"memory_{mem_id}.json"
+        mem_file = memory_path / f"memory_{mem_id_str}.json"
         try:
             with open(mem_file, "w", encoding="utf-8") as f:
                 json.dump(memory, f, indent=2)
-            logger.info(f"Conversation summary saved to memory: {mem_file.name} (ID: {mem_id})")
+            logger.info(f"Conversation summary saved to memory: {mem_file.name} (ID: {mem_id_str})")
             return True
         except IOError as e:
             logger.error(f"Failed to save memory file: {e}")
@@ -509,6 +628,7 @@ class ContextManager:
         Args:
             due_tasks: Tasks that are due right now (if any).
             has_tools: Whether tools (skills) are available for this tick.
+            skill_summary: Grouped tool list for the menu.
         """
         now = datetime.now(timezone.utc)
         local_now = datetime.now()

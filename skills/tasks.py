@@ -88,6 +88,60 @@ class TasksSkill(BaseSkill):
         ]
 
     def execute(self, tool_name: str, arguments: dict) -> str:
+        db = self.config.get("_shared_db") or self.config.get("_db")
+
+        if db:
+            if tool_name == "add_task":
+                description = arguments["task"]
+                list_name = arguments.get("list_name", "Daily")
+                
+                # Dedup: check if a similar pending task already exists in DB
+                pending = db.get_tasks(completed=False)
+                for existing in pending:
+                    if self._tasks_similar(description, existing["description"]):
+                        return (
+                            f"Similar task already exists: [{existing['id']}] "
+                            f"{existing['description']} — not adding duplicate."
+                        )
+                
+                task_id = db.add_task(description, list_name)
+                return f"Task added: [{task_id}] {description}"
+
+            elif tool_name == "complete_task":
+                task_id = arguments["task_id"]
+                tasks = db.get_tasks()
+                target = next((t for t in tasks if t["id"] == task_id), None)
+                if not target:
+                    return f"Task with ID {task_id} not found."
+                
+                if target["completed"]:
+                    return f"Task {task_id} is already completed."
+                
+                db.complete_task(task_id)
+                return f"Task completed: {target['description']}."
+
+            elif tool_name == "list_tasks":
+                show_completed = arguments.get("show_completed", False)
+                tasks = db.get_tasks(completed=None if show_completed else False)
+
+                if not tasks:
+                    return "The task list is empty."
+
+                output = "Current Tasks:\n"
+                for t in tasks:
+                    status = "[x]" if t["completed"] else "[ ]"
+                    output += f"{t['id']}. {status} {t['description']} ({t['list']})\n"
+                return output
+
+            elif tool_name == "clear_tasks":
+                # DB doesn't really need "repacking" IDs since it's an autoincrement PK,
+                # but we'll follow the logical intent: remove completed tasks.
+                completed = db.get_tasks(completed=True)
+                for t in completed:
+                    db.delete_task(t["id"])
+                return f"Cleared {len(completed)} completed task(s)."
+
+        # --- JSON Fallback ---
         data = self._read_tasks()
 
         # Ensure migration for old storage format if needed

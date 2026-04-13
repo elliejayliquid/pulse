@@ -175,6 +175,18 @@ def resolve_persona(config: dict, persona_name: str | None, pulse_root: Path) ->
     config["_persona_name"] = name
     config["_persona_dir"] = str(persona_dir)
 
+    # Database path — per-persona SQLite file
+    config["paths"]["database"] = str(persona_data / f"{name}.db")
+
+    # Shared database — if memories path points outside persona data dir,
+    # a shared.db lives alongside the shared memory files (Claude personas).
+    memories_path = Path(config["paths"].get("memories", ""))
+    if memories_path.is_absolute() and not str(memories_path).startswith(str(persona_data)):
+        shared_db = memories_path / "shared.db"
+        if shared_db.exists():
+            config["paths"]["shared_database"] = str(shared_db)
+            logger.info(f"  Shared database: {shared_db}")
+
     return config
 
 
@@ -205,6 +217,23 @@ async def main(config_path: str, persona_name: str | None = None):
     tg_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
     if tg_token:
         config.setdefault("channels", {}).setdefault("telegram", {})["bot_token"] = tg_token
+
+    # Open per-persona database (SQLite)
+    db = None
+    shared_db = None
+    db_path = config.get("paths", {}).get("database")
+    if db_path:
+        from core.db import PulseDatabase
+        db = PulseDatabase(Path(db_path))
+        config["_db"] = db
+
+        # Shared database for Claude personas (memories/journals)
+        shared_db_path = config.get("paths", {}).get("shared_database")
+        if shared_db_path:
+            shared_db = PulseDatabase(Path(shared_db_path))
+            config["_shared_db"] = shared_db
+        else:
+            config["_shared_db"] = db  # local personas: shared == persona DB
 
     # Load embedding model BEFORE llama-server — PyTorch's c10.dll can conflict
     # with CUDA DLLs on Windows if loaded after another CUDA process starts.
@@ -347,6 +376,11 @@ async def main(config_path: str, persona_name: str | None = None):
         # Stop the server if we started one (waits for in-flight inference)
         if server:
             await server.stop()
+        # Close databases
+        if shared_db and shared_db is not db:
+            shared_db.close()
+        if db:
+            db.close()
         logger.info("Pulse stopped. Companion is sleeping.")
 
 
