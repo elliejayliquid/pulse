@@ -122,9 +122,12 @@ class PaintSkill(BaseSkill):
                     "name": "paint_set",
                     "description": (
                         "Place colored cells on the canvas. "
-                        "Accepts three formats: (1) single cell as {\"x\": 0, \"y\": 0, \"color\": \"red\"}, "
-                        "(2) a list of such cells, or (3) a row string like \"red,red,blue\" for y=0. "
-                        "Use paint_view() after to see what you placed."
+                        "PREFERRED: pass the full grid as a multiline string — one row per line, "
+                        "colors comma-separated. This lets you paint the entire canvas in ONE call. "
+                        "Example for 4x4: cells=\"red,red,blue,blue\\ngreen,green,white,white\\n...\". "
+                        "Also accepts: a single row string, a JSON list of {x,y,color} dicts, "
+                        "or individual x/y/color params for touch-ups. "
+                        "Use paint_view() after to check your work."
                     ),
                     "parameters": {
                         "type": "object",
@@ -132,23 +135,24 @@ class PaintSkill(BaseSkill):
                             "cells": {
                                 "type": "string",
                                 "description": (
-                                    "Cells to paint. JSON string: single dict, list of dicts, "
-                                    "or row string \"c1,c2,...\" for one row. "
+                                    "Cells to paint. Best: full grid as multiline string "
+                                    "(one comma-separated row per line, 16 lines for 16x16). "
+                                    "Also: single row \"c1,c2,...\", or JSON [{\"x\":0,\"y\":0,\"color\":\"red\"},...]. "
                                     "Colors: " + ", ".join(PALETTE.keys()) + ". "
-                                    "Use \"clear\" to erase a cell."
+                                    "Use \"clear\" to erase a cell, \"empty\" to skip."
                                 ),
                             },
                             "x": {
                                 "type": "integer",
-                                "description": "X coordinate (0 = left). Use with y and color.",
+                                "description": "X coordinate (0 = left). For single-cell touch-ups.",
                             },
                             "y": {
                                 "type": "integer",
-                                "description": "Y coordinate (0 = top). Use with x and color.",
+                                "description": "Y coordinate (0 = top). For single-cell touch-ups.",
                             },
                             "color": {
                                 "type": "string",
-                                "description": "Color name from the palette.",
+                                "description": "Color name. For single-cell touch-ups.",
                             },
                         },
                     },
@@ -229,13 +233,23 @@ class PaintSkill(BaseSkill):
         self.canvas_height = height
         self.canvas_intent = intent
 
+        palette_list = ", ".join(PALETTE.keys())
         lines = [
             f"Canvas opened: {width}x{height}",
             f"Intent: {intent}" if intent else "",
             "",
             self._render_grid(),
             "",
-            "Paint with paint_set(), then paint_view() to see your work.",
+            f"Palette: {palette_list}",
+            "",
+            "HOW TO PAINT:",
+            "1. Plan your full image mentally — decide every pixel's color.",
+            f"2. Paint the ENTIRE grid in ONE call using paint_set with a multiline string:",
+            f"   paint_set(cells=\"row0color,row0color,...\\nrow1color,row1color,...\\n...\")",
+            f"   That's {height} lines of {width} comma-separated color names.",
+            "3. Call paint_view() to see what you made.",
+            "4. Use paint_set(x=, y=, color=) for individual touch-ups.",
+            "5. When happy, paint_finish(title=...).",
         ]
         return "\n".join(line for line in lines if line)
 
@@ -252,12 +266,16 @@ class PaintSkill(BaseSkill):
                 return msg
             placed = 1
 
-        # --- Format 2: JSON cells string ---
+        # --- Format 2: JSON cells string or grid/row string ---
         elif cells:
+            # Multiline = full grid (one row per line)
+            if "\n" in cells:
+                return self._paint_grid(cells)
+
             try:
                 parsed = json.loads(cells)
             except json.JSONDecodeError:
-                # --- Format 3: row string "red,blue,green" ---
+                # --- Format 3: single row string "red,blue,green" ---
                 return self._paint_row(cells)
 
             if isinstance(parsed, dict):
@@ -315,6 +333,34 @@ class PaintSkill(BaseSkill):
                 return msg
 
         return f"Painted row at y={open_y} ({len(colors)} cells)."
+
+    def _paint_grid(self, grid_string: str) -> str:
+        """Paint the full canvas from a multiline string (one comma-separated row per line).
+
+        Each line maps to y=0, y=1, ... — the model can paint the entire 16x16
+        canvas in a single tool call instead of one cell/row at a time.
+        """
+        lines = [line.strip() for line in grid_string.strip().split("\n") if line.strip()]
+        placed = 0
+        skipped = 0
+        for y, line in enumerate(lines):
+            if y >= self.canvas_height:
+                break
+            colors = [c.strip().lower() for c in line.split(",") if c.strip()]
+            for x, color_name in enumerate(colors):
+                if x >= self.canvas_width:
+                    break
+                if color_name in ("empty", "clear", ""):
+                    continue
+                ok, msg = self._place_cell(x, y, color_name)
+                if ok:
+                    placed += 1
+                else:
+                    skipped += 1
+        result = f"Painted {placed} cells across {min(len(lines), self.canvas_height)} rows."
+        if skipped:
+            result += f" ({skipped} cells skipped — invalid color or out of bounds.)"
+        return result
 
     def _place_cell(self, x: int, y: int, color_name: str) -> tuple[bool, str]:
         """Place a single cell. color_name='clear' removes it."""
