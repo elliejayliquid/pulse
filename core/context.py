@@ -199,17 +199,34 @@ class ContextManager:
 
     def _load_action_log(self) -> str:
         """Load recent heartbeat actions for self-regulation."""
-        if not self._action_log_path.exists():
-            return ""
-        try:
-            with open(self._action_log_path, "r", encoding="utf-8") as f:
-                log = json.load(f)
-        except (json.JSONDecodeError, IOError):
-            return ""
-        if not log:
+        recent = None
+
+        # DB-primary: read from SQLite if available
+        if self._db:
+            try:
+                rows = self._db.get_action_log(limit=10)
+                if rows:
+                    # DB returns newest-first; reverse to chronological order
+                    recent = list(reversed(rows))
+            except Exception:
+                pass
+
+        # JSON fallback
+        if recent is None:
+            if not self._action_log_path.exists():
+                return ""
+            try:
+                with open(self._action_log_path, "r", encoding="utf-8") as f:
+                    log = json.load(f)
+            except (json.JSONDecodeError, IOError):
+                return ""
+            if not log:
+                return ""
+            recent = log[-10:]
+
+        if not recent:
             return ""
 
-        recent = log[-10:]
         lines = ["## Recent Heartbeat Actions"]
         for entry in recent:
             tools_str = f" [tools: {', '.join(entry['tools'])}]" if entry.get("tools") else ""
@@ -381,16 +398,27 @@ class ContextManager:
         return "\n".join(lines)
 
     def _load_schedules(self) -> str:
-        """Load pending schedules and reminders."""
-        sched_path = self.paths.get("schedules", "")
-        if not sched_path or not Path(sched_path).exists():
-            return ""
+        """Load pending schedules and reminders from DB (or JSON fallback)."""
+        schedules = None
 
-        try:
-            with open(sched_path, "r", encoding="utf-8") as f:
-                schedules = json.load(f)
-        except (json.JSONDecodeError, IOError):
-            return ""
+        # DB-primary: read from SQLite via the same DB the scheduler writes to
+        db = self._shared_db or self._db
+        if db:
+            try:
+                schedules = db.get_schedules(enabled_only=True)
+            except Exception:
+                pass
+
+        # JSON fallback
+        if schedules is None:
+            sched_path = self.paths.get("schedules", "")
+            if not sched_path or not Path(sched_path).exists():
+                return ""
+            try:
+                with open(sched_path, "r", encoding="utf-8") as f:
+                    schedules = json.load(f)
+            except (json.JSONDecodeError, IOError):
+                return ""
 
         active = [s for s in schedules if s.get("enabled", True) and not s.get("completed", False)]
         if not active:
@@ -861,20 +889,33 @@ class ContextManager:
         time_str = local_now.strftime('%A, %B %d, %Y at %I:%M %p')
 
         # Load dev journal summary for context
-        dev_journal_path = Path(self.config.get("_pulse_root", ".")) / "data" / "dev_journal.json"
         journal_summary = ""
-        if dev_journal_path.exists():
+        if self._db:
             try:
-                import json as _json
-                with open(dev_journal_path, "r", encoding="utf-8") as f:
-                    entries = _json.load(f)
+                entries = self._db.get_dev_journal(limit=5)
                 if entries:
-                    recent = entries[-5:]
+                    # DB returns newest-first; reverse to chronological
+                    entries = list(reversed(entries))
                     journal_summary = "\n".join(
-                        f"  [{e.get('time', '?')}] {e.get('entry', '')}" for e in recent
+                        f"  [{e.get('time', '?')}] {e.get('entry', '')}" for e in entries
                     )
             except Exception:
                 pass
+        if not journal_summary:
+            # JSON fallback
+            dev_journal_path = Path(self.config.get("_pulse_root", ".")) / "data" / "dev_journal.json"
+            if dev_journal_path.exists():
+                try:
+                    import json as _json
+                    with open(dev_journal_path, "r", encoding="utf-8") as f:
+                        entries = _json.load(f)
+                    if entries:
+                        recent = entries[-5:]
+                        journal_summary = "\n".join(
+                            f"  [{e.get('time', '?')}] {e.get('entry', '')}" for e in recent
+                        )
+                except Exception:
+                    pass
 
         system = (
             f"You are {self.ai_name}, and right now you're in DEV MODE.\n\n"
