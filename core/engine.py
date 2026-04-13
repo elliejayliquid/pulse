@@ -210,15 +210,40 @@ class PulseEngine:
         else:
             return self.quiet_start <= hour < self.quiet_end
 
-    def _clear_pending_skill_output(self):
-        """Clear pending output (sources, images) from skills after non-conversation use.
+    async def _flush_pending_skill_output(self):
+        """Send or clear pending output from skills after non-conversation use.
 
-        Heartbeat and dev ticks can trigger tools like web_search, but their
-        output goes through _dispatch, not the Telegram message handler.
-        Without clearing, leftover pending data leaks into the next user message.
+        Heartbeat and scheduled tasks can trigger tools like speak or web_search,
+        but their output goes through _dispatch (text only), not the Telegram
+        message handler.  Without flushing, pending voices accumulate in the
+        queue and leak into the next user message — the user gets a stale
+        heartbeat voice mixed into a conversation reply.
+
+        Voice messages are sent directly to the chat.  Web search sources/images
+        are cleared (they don't make sense standalone without conversation context).
         """
         if not self.skill_registry:
             return
+
+        telegram = self.channels.get("telegram")
+
+        # TTS — send any queued voice messages
+        tts_skill = self.skill_registry.get_skill("tts")
+        if tts_skill and tts_skill.pending_voices:
+            queued = tts_skill.pending_voices
+            tts_skill.pending_voices = []
+            if telegram and hasattr(telegram, "send_voice_file"):
+                for ogg_path, _text in queued:
+                    await telegram.send_voice_file(ogg_path)
+            else:
+                # No telegram channel — clean up temp files
+                for ogg_path, _text in queued:
+                    try:
+                        ogg_path.unlink()
+                    except Exception:
+                        pass
+
+        # Web search — clear (not useful standalone)
         web_skill = self.skill_registry.get_skill("web_search")
         if web_skill:
             web_skill.pending_sources.clear()
@@ -500,6 +525,11 @@ class PulseEngine:
                 if response:
                     await self._dispatch(response)
 
+            # Flush pending voices/images so they don't leak into the next
+            # user message (same issue as heartbeats — speak tool queues audio
+            # but _dispatch only sends text)
+            await self._flush_pending_skill_output()
+
             # Log the notification into conversation history so the companion
             # remembers what it sent (and replies make sense in context)
             if response and response.action == "notify" and response.message:
@@ -581,9 +611,8 @@ class PulseEngine:
             if tools_used:
                 logger.info(f"Heartbeat tools used: {', '.join(tools_used)}")
             logger.info(f"Heartbeat tick completed in {elapsed:.1f}s")
-            # Clear any pending skill output (web search sources/images etc.)
-            # so it doesn't leak into the next Telegram message handler
-            self._clear_pending_skill_output()
+            # Flush pending skill output — send voices, clear web search leftovers
+            await self._flush_pending_skill_output()
             if text:
                 response = PulseResponse.from_llm_output(text)
                 await self._dispatch(response)

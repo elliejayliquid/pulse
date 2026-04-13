@@ -195,6 +195,38 @@ class TelegramChannel(Channel):
         except Exception as e:
             logger.error(f"Telegram send failed: {e}")
 
+    async def send_voice_file(self, ogg_path: Path):
+        """Send a voice message directly to the chat (no incoming message to reply to).
+
+        Used by the engine for proactive voice messages (heartbeat, scheduled
+        tasks) where there's no user message to attach a reply to.
+        """
+        if not self.app or not self.chat_id:
+            logger.warning("Telegram: no chat_id yet. User needs to /start the bot first.")
+            return
+        for attempt in range(1, 4):
+            try:
+                with open(ogg_path, "rb") as f:
+                    await self.app.bot.send_voice(
+                        chat_id=self.chat_id,
+                        voice=f,
+                        read_timeout=30,
+                        write_timeout=60,
+                        connect_timeout=15,
+                        pool_timeout=15,
+                    )
+                break
+            except Exception as e:
+                if attempt < 3:
+                    logger.warning(f"Voice send attempt {attempt}/3 failed ({e}), retrying in 3s...")
+                    await asyncio.sleep(3)
+                else:
+                    logger.error(f"Failed to send voice message after 3 attempts: {e}")
+        try:
+            ogg_path.unlink()
+        except Exception:
+            pass
+
     async def _reply_with_retry(self, message, text: str, retries: int = 3,
                                 reply_markup=None):
         """Send a reply with retry on timeout.
