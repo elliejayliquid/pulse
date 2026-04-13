@@ -249,6 +249,41 @@ class PulseEngine:
             web_skill.pending_sources.clear()
             web_skill.pending_images.clear()
 
+    def _capture_pending_voice_text(self) -> str | None:
+        """Snapshot pending voice text before flush clears the queue.
+
+        Returns a '🔊 ...' string suitable for conversation history, or None.
+        """
+        if not self.skill_registry:
+            return None
+        tts_skill = self.skill_registry.get_skill("tts")
+        if tts_skill and tts_skill.pending_voices:
+            return "\n".join(f"🔊 {t}" for _, t in tts_skill.pending_voices)
+        return None
+
+    def _save_heartbeat_to_history(self, voice_text: str | None,
+                                   response: PulseResponse | None,
+                                   prefix: str = "[Heartbeat] "):
+        """Save what the companion said during a heartbeat/task to conversation history.
+
+        Without this, the companion forgets what it said aloud (or as a
+        notification) and repeats itself on the next tick.
+        """
+        parts = []
+        if voice_text:
+            parts.append(voice_text)
+        if response and response.action == "notify" and response.message:
+            parts.append(f"{prefix}{response.message}")
+        if not parts:
+            return
+
+        history = self.context._load_conversation()
+        history.append({
+            "role": "assistant",
+            "content": "\n".join(parts)
+        })
+        self.context.save_conversation(history)
+
     async def _dispatch(self, response: PulseResponse):
         """Route a response to the appropriate channel."""
         if response.action == "silent":
@@ -525,20 +560,17 @@ class PulseEngine:
                 if response:
                     await self._dispatch(response)
 
+            # Capture voice text BEFORE flushing (flush clears the queue)
+            voice_text = self._capture_pending_voice_text()
+
             # Flush pending voices/images so they don't leak into the next
             # user message (same issue as heartbeats — speak tool queues audio
             # but _dispatch only sends text)
             await self._flush_pending_skill_output()
 
-            # Log the notification into conversation history so the companion
-            # remembers what it sent (and replies make sense in context)
-            if response and response.action == "notify" and response.message:
-                history = self.context._load_conversation()
-                history.append({
-                    "role": "assistant",
-                    "content": f"[Scheduled reminder] {response.message}"
-                })
-                self.context.save_conversation(history)
+            # Log the notification + voice into conversation history so the
+            # companion remembers what it said
+            self._save_heartbeat_to_history(voice_text, response, prefix="[Scheduled reminder] ")
 
             self.scheduler.mark_completed(task["id"])
 
@@ -611,14 +643,23 @@ class PulseEngine:
             if tools_used:
                 logger.info(f"Heartbeat tools used: {', '.join(tools_used)}")
             logger.info(f"Heartbeat tick completed in {elapsed:.1f}s")
-            # Flush pending skill output — send voices, clear web search leftovers
-            await self._flush_pending_skill_output()
+
+            # Capture voice text BEFORE flushing (flush clears the queue)
+            voice_text = self._capture_pending_voice_text()
+
             if text:
                 response = PulseResponse.from_llm_output(text)
                 await self._dispatch(response)
                 self._log_action(response.action, tools_used, response.message)
             else:
                 self._log_action("silent", tools_used)
+
+            # Flush pending skill output — send voices, clear web search leftovers
+            await self._flush_pending_skill_output()
+
+            # Save voice (and notification text) to conversation history so the
+            # companion remembers what it said — prevents repeating itself
+            self._save_heartbeat_to_history(voice_text, response)
         else:
             # Plain mode: no tools, just JSON response
             result = await asyncio.to_thread(self.llm.chat, messages)
