@@ -10,11 +10,11 @@ Pulse gives your AI companion a life of their own. It runs in the background, le
 
 - **Heartbeat loop** — Your companion gets periodic "free-think" ticks where they can decide to reach out, stay quiet, journal, or schedule follow-ups
 - **Telegram chat** — Bidirectional messaging with tool use (your companion can save memories, set reminders, search their journal mid-conversation)
-- **Persistent memory** — Semantic search over stored facts and conversation summaries, carried across sessions
+- **Persistent memory** — Semantic search over stored facts and conversation summaries, stored in per-persona SQLite databases
 - **Journal** — Pinned identity entries (who am I, who is my human, what's our relationship) plus transient reflections as clean markdown with YAML frontmatter
 - **Self-scheduling** — The companion can set their own reminders and recurring tasks ("daily 8:00"), with priority levels (urgent/routine/creative)
 - **Cloud or local** — Use a local GGUF model via llama.cpp, or any OpenAI-compatible API (OpenRouter, OpenAI, etc.)
-- **Token tracking** — Daily usage logging when using cloud APIs (data/usage.json)
+- **Token tracking** — Daily usage logging when using cloud APIs
 - **Dev ticks** — Optional autonomous self-improvement: the companion can review and create their own skills on a git branch, with human approval
 - **Vision** — Optional image understanding via mmproj (model-dependent)
 - **Voice messages** — Send voice notes on Telegram; Pulse transcribes locally via whisper.cpp (auto-downloads everything on first use)
@@ -32,6 +32,7 @@ core/
   context.py              # Token-budgeted prompt assembly
   llm.py                  # OpenAI-compatible API client (local + cloud)
   llm_anthropic.py        # Native Anthropic API client (prompt caching, tool_use)
+  db.py                   # Per-persona SQLite database (WAL mode)
   usage.py                # Token usage tracking for cloud APIs
   scheduler.py            # Cron + one-time task scheduling
 channels/
@@ -53,6 +54,7 @@ persona.yaml              # Default companion identity (overridden by persona)
 config.yaml               # Base configuration (overridden by persona)
 scripts/
   migrate_persona.py        # Set up a persona from existing data
+  migrate_json_to_db.py     # Migrate persona JSON files to SQLite
   migrate_journal_phase2.py # Migrate journal from JSON to markdown format
   backfill_embeddings.py    # Regenerate memory/journal embeddings
 ```
@@ -195,6 +197,19 @@ provider:
   model: "claude-sonnet-4-20250514"
 ```
 
+### Storage
+
+Each persona stores its data in a SQLite database (`personas/<name>/data/<name>.db`) with WAL mode for safe concurrent access. Conversations, memories, journal entries, schedules, tasks, and usage stats all live in this single file. JSON files are still supported as a fallback — if no database exists, Pulse reads and writes JSON as before.
+
+**Migrating from JSON to SQLite:**
+```bash
+python scripts/migrate_json_to_db.py --persona nova          # migrate a persona
+python scripts/migrate_json_to_db.py --persona nova --dry-run # preview what would be migrated
+python scripts/migrate_json_to_db.py --shared D:/path/to/shared/memories  # migrate a shared memory dir
+```
+
+Original JSON files are kept as backups — they're not deleted.
+
 ### Heartbeat (`config.yaml`)
 
 ```yaml
@@ -206,7 +221,6 @@ heartbeat:
   quiet_hours_start: 23       # no notifications after 11pm
   quiet_hours_end: 8          # no notifications before 8am
   startup_checkin: true       # think on startup
-  notify_cooldown_minutes: 60 # max 1 proactive notification per hour
 ```
 
 When `randomize` is enabled, each heartbeat interval is randomly chosen between min and max — the companion thinks at unpredictable intervals instead of a fixed schedule. Re-rolls after each heartbeat and after each conversation.
@@ -346,7 +360,7 @@ dev_tick:
 1. **Pulse starts** — either launches `llama-server` with your local model, or connects to a cloud API
 2. Every N minutes, the **heartbeat** fires — the companion gets context (time, memories, journal, pending tasks) and decides what to do: notify you, schedule something, journal, or stay silent
 3. When you **message via Telegram**, the companion responds naturally with full tool access
-4. **Conversations are summarized** when they get long, and summaries are saved to persistent memory with embeddings for future semantic search (this works at the engine level — even if the memory skill is disabled, summaries still persist to disk)
+4. **Conversations are summarized** when they get long, and summaries are saved to persistent memory with embeddings for future semantic search (this works at the engine level — even if the memory skill is disabled, summaries still persist to the database)
 5. **Scheduled tasks** are checked every 60 seconds and executed when due
 
 ## Logging
