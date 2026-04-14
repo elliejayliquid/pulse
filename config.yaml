@@ -26,6 +26,12 @@ model:
   max_response_tokens: 2048       # keep responses concise
   frequency_penalty: 0.3          # discourage repeating the same words/topics
   presence_penalty: 0.2           # encourage topic variety
+  top_p: 1.0                      # nucleus sampling: consider tokens up to this cumulative
+                                  # probability. 1.0 = no filtering (default). Lower values
+                                  # (e.g. 0.95) trim the long tail; useful when combined with
+                                  # higher temperature to add variety without going off-rails.
+                                  # Note: Gemini models ignore frequency/presence penalties
+                                  # — use temperature + top_p instead.
   reasoning: false                # local: --reasoning flag; cloud: sends reasoning API param
   reasoning_effort: ""            # OpenRouter only: "low" | "medium" | "high" | "" (default).
                                   # Maps to each backend's internal reasoning token budget.

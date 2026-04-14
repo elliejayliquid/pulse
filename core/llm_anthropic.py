@@ -114,6 +114,7 @@ class AnthropicClient:
     def __init__(self, endpoint: str, model_name: str = "claude-sonnet-4-20250514",
                  temperature: float = 0.7, max_tokens: int = 1024,
                  frequency_penalty: float = 0.0, presence_penalty: float = 0.0,
+                 top_p: float = 1.0,
                  api_key: str = "", usage_tracker=None,
                  reasoning: bool = False, provider_type: str = "anthropic",
                  cache_ttl: str = "5m"):
@@ -121,6 +122,9 @@ class AnthropicClient:
         self.model_name = model_name
         self.temperature = temperature
         self.max_tokens = max_tokens
+        # Anthropic recommends altering either temperature or top_p, not both.
+        # We only forward top_p when it's been explicitly set (non-default).
+        self.top_p = top_p
         self._available = None
         self._usage = usage_tracker
         self._provider_name = "anthropic"
@@ -202,13 +206,16 @@ class AnthropicClient:
         try:
             system_text, anthropic_msgs = _convert_messages(messages)
 
-            response = self.client.messages.create(
+            create_kwargs = dict(
                 model=self.model_name,
                 max_tokens=self.max_tokens,
                 system=self._build_system_blocks(system_text),
                 messages=anthropic_msgs,
                 temperature=self.temperature,
             )
+            if self.top_p < 1.0:
+                create_kwargs["top_p"] = self.top_p
+            response = self.client.messages.create(**create_kwargs)
 
             self._track(response)
             stop = response.stop_reason or "unknown"
@@ -256,7 +263,7 @@ class AnthropicClient:
 
         for round_num in range(max_rounds):
             try:
-                response = self.client.messages.create(
+                create_kwargs = dict(
                     model=self.model_name,
                     max_tokens=self.max_tokens,
                     system=system_blocks,
@@ -264,6 +271,9 @@ class AnthropicClient:
                     tools=anthropic_tools if anthropic_tools else None,
                     temperature=self.temperature,
                 )
+                if self.top_p < 1.0:
+                    create_kwargs["top_p"] = self.top_p
+                response = self.client.messages.create(**create_kwargs)
 
                 self._track(response)
                 stop = response.stop_reason or "unknown"
@@ -330,13 +340,16 @@ class AnthropicClient:
         # Exhausted max rounds — force final response without tools
         logger.warning(f"Tool loop hit max rounds ({max_rounds}), requesting final response...")
         try:
-            response = self.client.messages.create(
+            create_kwargs = dict(
                 model=self.model_name,
                 max_tokens=self.max_tokens,
                 system=system_blocks,
                 messages=anthropic_msgs,
                 temperature=self.temperature,
             )
+            if self.top_p < 1.0:
+                create_kwargs["top_p"] = self.top_p
+            response = self.client.messages.create(**create_kwargs)
             self._track(response)
             text = ""
             for block in response.content:

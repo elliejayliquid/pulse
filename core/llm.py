@@ -167,6 +167,7 @@ class LLMClient:
     def __init__(self, endpoint: str, model_name: str = "default",
                  temperature: float = 0.7, max_tokens: int = 1024,
                  frequency_penalty: float = 0.0, presence_penalty: float = 0.0,
+                 top_p: float = 1.0,
                  api_key: str = "", usage_tracker=None,
                  reasoning: bool = False, reasoning_effort: str = "",
                  provider_type: str = "local"):
@@ -179,6 +180,7 @@ class LLMClient:
         self.max_tokens = max_tokens
         self.frequency_penalty = frequency_penalty
         self.presence_penalty = presence_penalty
+        self.top_p = top_p
         self._available = None
         self._usage = usage_tracker
         self._provider_name = ""  # set by engine for usage logging
@@ -288,6 +290,7 @@ class LLMClient:
                 model=self.model_name,
                 messages=messages,
                 temperature=self.temperature,
+                top_p=self.top_p,
                 frequency_penalty=self.frequency_penalty,
                 presence_penalty=self.presence_penalty,
                 **{self._max_tokens_param: self.max_tokens},
@@ -348,6 +351,7 @@ class LLMClient:
                     messages=msgs,
                     tools=tools if tools else None,
                     temperature=self.temperature,
+                    top_p=self.top_p,
                     frequency_penalty=self.frequency_penalty,
                     presence_penalty=self.presence_penalty,
                     **{self._max_tokens_param: self.max_tokens},
@@ -425,6 +429,7 @@ class LLMClient:
                 model=self.model_name,
                 messages=msgs,
                 temperature=self.temperature,
+                top_p=self.top_p,
                 **{self._max_tokens_param: self.max_tokens},
                 **({"extra_body": self._extra_body} if self._extra_body else {}),
             )
