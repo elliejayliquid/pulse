@@ -174,7 +174,8 @@ class TTSSkill(BaseSkill):
             f"[TTS/{mode}] Queued voice message ({len(self.pending_voices)} in queue): {text[:50]}..."
         )
         #return f"Voice message generated. The listener will hear you say: \"{text}\""
-        return "Voice message delivered. No need to repeat or rephrase in text — your voice carries it."
+        #return "Voice message delivered. No need to repeat or rephrase in text — your voice carries it."
+        return f"Voice message generated & delivered. The listener will hear you say: \"{text}\". No need to repeat or rephrase this in text — your voice carries it."
 
     def synthesize(self, text: str, emotion: str = "") -> Path | None:
         """Generate a voice clip on demand without queuing.
