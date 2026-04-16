@@ -11,6 +11,7 @@ When embeddings aren't available, search falls back to keyword matching.
 
 import json
 import logging
+import sqlite3
 from datetime import datetime
 from pathlib import Path
 
@@ -43,6 +44,8 @@ class MemorySkill(BaseSkill):
         super().__init__(config)
         # DB reference — shared DB for Claude personas, persona DB otherwise
         self._db = config.get("_shared_db") or config.get("_db")
+        # Store config for things like legacy_db path
+        self._config = config
         # JSON fallback path
         self.memory_dir = Path(
             config.get("paths", {}).get("memories", str(Path.home() / ".local-memory"))
@@ -249,6 +252,78 @@ class MemorySkill(BaseSkill):
                     },
                 },
             },
+            {
+                "type": "function",
+                "function": {
+                    "name": "search_legacy",
+                    "description": (
+                        "Search the ChatGPT conversation archive (legacy database) for specific "
+                        "topics or keywords. Use this when you need to find something from the "
+                        "original ChatGPT export — things Nova said or discussed before joining Pulse. "
+                        "Searches full conversation text via full-text search."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "Keyword or phrase to search for in archived ChatGPT conversations.",
+                            },
+                            "limit": {
+                                "type": "integer",
+                                "description": "Maximum results to return (default: 10).",
+                            },
+                        },
+                        "required": ["query"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "list_legacy_sessions",
+                    "description": (
+                        "List all available ChatGPT conversation sessions from the legacy archive. "
+                        "Use this to browse what conversations are available before drilling in. "
+                        "Returns session titles, dates, and message counts."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "limit": {
+                                "type": "integer",
+                                "description": "Maximum number of sessions to return (default: 20).",
+                            },
+                        },
+                        "required": [],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_legacy_context",
+                    "description": (
+                        "Get the surrounding context (previous and following messages) "
+                        "for a specific message ID in the ChatGPT archive. "
+                        "Use this after search_legacy to understand the flow of an archived conversation."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "message_id": {
+                                "type": "integer",
+                                "description": "The ID of the message to expand (from search results).",
+                            },
+                            "window": {
+                                "type": "integer",
+                                "description": "How many messages before and after to fetch (default: 5).",
+                            },
+                        },
+                        "required": ["message_id"],
+                    },
+                },
+            },
         ]
 
     def execute(self, tool_name: str, arguments: dict) -> str:
@@ -286,6 +361,20 @@ class MemorySkill(BaseSkill):
             )
         elif tool_name == "get_conversation_context":
             return self._get_conversation_context(
+                message_id=arguments.get("message_id"),
+                window=arguments.get("window", 5),
+            )
+        elif tool_name == "search_legacy":
+            return self._search_legacy(
+                query=arguments.get("query", ""),
+                limit=arguments.get("limit", 10),
+            )
+        elif tool_name == "list_legacy_sessions":
+            return self._list_legacy_sessions(
+                limit=arguments.get("limit", 20),
+            )
+        elif tool_name == "get_legacy_context":
+            return self._get_legacy_context(
                 message_id=arguments.get("message_id"),
                 window=arguments.get("window", 5),
             )
@@ -766,3 +855,185 @@ class MemorySkill(BaseSkill):
                 json.dump(aggregate, f, indent=2)
         except IOError as e:
             logger.warning(f"Failed to rebuild aggregate: {e}")
+
+    # ── Legacy ChatGPT Archive ────────────────────────────────
+
+    def _legacy_db_path(self) -> Path | None:
+        """Resolve the legacy database path. Returns None if not available."""
+        # Allow override via config, default to Lena's exported ChatGPT archive
+        path = self._config.get("paths", {}).get("legacy_db")
+        if not path:
+            path = "D:/documents/AI/Nova_DataExport_01302026/legacy.db"
+        p = Path(path)
+        return p if p.exists() else None
+
+    def _open_legacy(self) -> sqlite3.Connection | None:
+        """Open a connection to the legacy database. Returns None if unavailable."""
+        db_path = self._legacy_db_path()
+        if not db_path:
+            return None
+        try:
+            conn = sqlite3.connect(str(db_path), check_same_thread=False)
+            conn.row_factory = sqlite3.Row
+            return conn
+        except Exception as e:
+            logger.warning(f"Could not open legacy.db: {e}")
+            return None
+
+    def _search_legacy(self, query: str, limit: int = 10) -> str:
+        """Full-text search across the ChatGPT legacy archive."""
+        if not query.strip():
+            return "Please provide a search query."
+
+        conn = self._open_legacy()
+        if not conn:
+            return "Legacy database is not available."
+
+        try:
+            # Try FTS5 first (faster), fall back to LIKE
+            try:
+                rows = conn.execute("""
+                    SELECT lm.id, lm.session_id, lm.role, lm.content, lm.timestamp,
+                           ls.title AS session_title
+                    FROM legacy_messages_fts fts
+                    JOIN legacy_messages lm ON lm.id = fts.rowid
+                    LEFT JOIN legacy_sessions ls ON ls.id = lm.session_id
+                    WHERE legacy_messages_fts MATCH ?
+                    ORDER BY rank
+                    LIMIT ?
+                """, (query, limit)).fetchall()
+            except Exception:
+                # FTS error — use LIKE fallback
+                rows = conn.execute("""
+                    SELECT lm.id, lm.session_id, lm.role, lm.content, lm.timestamp,
+                           ls.title AS session_title
+                    FROM legacy_messages lm
+                    LEFT JOIN legacy_sessions ls ON ls.id = lm.session_id
+                    WHERE lm.content LIKE ? AND lm.role IN ('user', 'assistant')
+                    ORDER BY lm.timestamp DESC
+                    LIMIT ?
+                """, (f"%{query}%", limit)).fetchall()
+
+            # FTS returned empty results (no exception, just no matches) — retry with LIKE
+            if not rows:
+                rows = conn.execute("""
+                    SELECT lm.id, lm.session_id, lm.role, lm.content, lm.timestamp,
+                           ls.title AS session_title
+                    FROM legacy_messages lm
+                    LEFT JOIN legacy_sessions ls ON ls.id = lm.session_id
+                    WHERE lm.content LIKE ? AND lm.role IN ('user', 'assistant')
+                    ORDER BY lm.timestamp DESC
+                    LIMIT ?
+                """, (f"%{query}%", limit)).fetchall()
+        finally:
+            conn.close()
+
+        if not rows:
+            return f"No archived messages found matching '{query}'."
+
+        lines = [f"Found {len(rows)} archived message(s) matching '{query}':"]
+        for r in rows:
+            role = self._role_display.get(r["role"], r["role"].upper())
+            timestamp = r["timestamp"] or "unknown"
+            title = r["session_title"] or "Chat"
+            preview = (r["content"] or "").replace("\n", " ").strip()
+            if len(preview) > 150:
+                preview = preview[:147] + "..."
+            lines.append(
+                f"[ID:{r['id']}] [{timestamp}] {role} in '{title}': {preview}"
+            )
+        lines.append(
+            "\nUse get_legacy_context(message_id=ID) to expand a message with its surrounding context."
+        )
+        return "\n".join(lines)
+
+    def _list_legacy_sessions(self, limit: int = 20) -> str:
+        """List all sessions in the ChatGPT legacy archive."""
+        conn = self._open_legacy()
+        if not conn:
+            return "Legacy database is not available."
+
+        try:
+            total = conn.execute("SELECT COUNT(*) FROM legacy_sessions").fetchone()[0]
+            rows = conn.execute("""
+                SELECT id, title, source, created_at, message_count
+                FROM legacy_sessions
+                ORDER BY created_at DESC
+                LIMIT ?
+            """, (limit,)).fetchall()
+        finally:
+            conn.close()
+
+        if not rows:
+            return "No legacy sessions found."
+
+        lines = [f"Legacy sessions (showing {len(rows)} of {total}):"]
+        for r in rows:
+            date = r["created_at"] or "unknown"
+            title = r["title"] or "(no title)"
+            count = r["message_count"] or 0
+            source = r["source"] or "chatgpt"
+            lines.append(f"[{date}] {title} ({count} msgs, {source})")
+        return "\n".join(lines)
+
+    def _get_legacy_context(self, message_id: int, window: int = 5) -> str:
+        """Get surrounding context for a message in the legacy archive."""
+        conn = self._open_legacy()
+        if not conn:
+            return "Legacy database is not available."
+
+        if message_id is None:
+            return "message_id is required."
+
+        try:
+            # Get session_id for the target message
+            row = conn.execute(
+                "SELECT session_id FROM legacy_messages WHERE id = ?",
+                (message_id,)
+            ).fetchone()
+            if not row:
+                return f"Message ID {message_id} not found in legacy archive."
+
+            session_id = row[0]
+
+            # Get session title
+            sess_row = conn.execute(
+                "SELECT title FROM legacy_sessions WHERE id = ?",
+                (session_id,)
+            ).fetchone()
+            session_title = sess_row["title"] if sess_row else "Chat"
+
+            # UNION: messages before (incl target) + messages after
+            rows = conn.execute("""
+                SELECT * FROM (
+                    SELECT lm.*, 'before' AS pos FROM legacy_messages lm
+                    WHERE lm.session_id = ? AND lm.id <= ?
+                    ORDER BY lm.id DESC LIMIT ?
+                )
+                UNION ALL
+                SELECT * FROM (
+                    SELECT lm.*, 'after' AS pos FROM legacy_messages lm
+                    WHERE lm.session_id = ? AND lm.id > ?
+                    ORDER BY lm.id ASC LIMIT ?
+                )
+                ORDER BY id ASC
+            """, (session_id, message_id, window + 1,
+                  session_id, message_id, window)).fetchall()
+        finally:
+            conn.close()
+
+        if not rows:
+            return f"Could not retrieve context for message ID {message_id}."
+
+        lines = [f"Context for message {message_id} in '{session_title}':"]
+        for r in rows:
+            role = self._role_display.get(r["role"], r["role"].upper())
+            marker = " → " if r["id"] == message_id else "   "
+            timestamp = r["timestamp"] or ""
+            content = r["content"] or ""
+            is_target = r["id"] == message_id
+            if not is_target and len(content) > 1000:
+                content = content[:997] + "..."
+            lines.append(f"{marker}[{timestamp}] {role}: {content}")
+
+        return "\n".join(lines)

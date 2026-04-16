@@ -104,6 +104,10 @@ paths:
   # When unset, entries live under {journal}/entries as normal. Identity files
   # and the local latest.md always stay under {journal}, never shared.
   # journal_entries: "D:/Claude/memories/journal/entries"
+
+  # Optional: ChatGPT conversation archive
+  # Uncomment and set to enable search_legacy, list_legacy_sessions, get_legacy_context tools.
+  # legacy_db: "path/to/legacy.db"
   tasks: "data/tasks.json"
   dev_journal: "data/dev_journal.json"
   persona: "persona.yaml"
