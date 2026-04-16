@@ -11,6 +11,7 @@ Pulse gives your AI companion a life of their own. It runs in the background, le
 - **Heartbeat loop** — Your companion gets periodic "free-think" ticks where they can decide to reach out, stay quiet, journal, or schedule follow-ups
 - **Telegram chat** — Bidirectional messaging with tool use (your companion can save memories, set reminders, search their journal mid-conversation)
 - **Persistent memory** — Semantic search over stored facts and conversation summaries, stored in per-persona SQLite databases
+- **Legacy conversation archive** — Import your conversation history from ChatGPT (and soon Claude, Grok, Gemini, etc.) with RAG-powered semantic search over summarized sessions
 - **Journal** — Pinned identity entries (who am I, who is my human, what's our relationship) plus transient reflections as clean markdown with YAML frontmatter
 - **Self-scheduling** — The companion can set their own reminders and recurring tasks ("daily 8:00"), with priority levels (urgent/routine/creative)
 - **Cloud or local** — Use a local GGUF model via llama.cpp, or any OpenAI-compatible API (OpenRouter, OpenAI, etc.)
@@ -57,6 +58,9 @@ scripts/
   migrate_json_to_db.py     # Migrate persona JSON files to SQLite
   migrate_journal_phase2.py # Migrate journal from JSON to markdown format
   backfill_embeddings.py    # Regenerate memory/journal embeddings
+  export_chatgpt.py         # Stage 1: Export ChatGPT conversations.json to markdown
+  import_chatgpt.py         # Stage 2: Import exported markdown into legacy.db
+  rag_import.py             # Stage 3: Generate summaries + embeddings for RAG search
 ```
 
 Pulse talks to any OpenAI-compatible API. Locally, it manages [llama.cpp](https://github.com/ggml-org/llama.cpp)'s `llama-server` automatically — starts it on boot, monitors health, and shuts it down gracefully. Or point it at a cloud provider and skip the local server entirely.
@@ -210,6 +214,61 @@ python scripts/migrate_json_to_db.py --shared D:/path/to/shared/memories  # migr
 
 Original JSON files are kept as backups — they're not deleted.
 
+### Legacy Conversation Archive
+
+Bring your conversation history with you. Pulse can import conversations from previous AI providers so your companion can search and reference things you discussed before they existed.
+
+**Currently supported:**
+- ✅ **ChatGPT** — full pipeline (export → import → RAG)
+
+**Planned:**
+- 🔜 Claude
+- 🔜 Gemini
+- 🔜 Grok
+- 🔜 Generic markdown/JSON
+
+**How it works:**
+
+The import is a 3-stage pipeline:
+
+1. **Export** — Convert the provider's raw export (e.g. ChatGPT's `conversations.json`) into clean per-conversation markdown files
+2. **Import** — Load those markdown files into a `legacy.db` SQLite database with full-text search
+3. **RAG** — Generate LLM-powered summaries and embeddings for each conversation, enabling semantic search
+
+```bash
+# Stage 1: Export ChatGPT conversations.json to markdown
+python scripts/export_chatgpt.py --force
+
+# Stage 2: Import markdown files into legacy.db
+python scripts/import_chatgpt.py --dir "path/to/conversations" --db "path/to/legacy.db"
+
+# Stage 3: Generate summaries + embeddings (requires a running LLM endpoint)
+python scripts/rag_import.py --execute --endpoint http://127.0.0.1:8001/v1
+```
+
+**Connecting to your persona:**
+
+Point your persona's config at the database:
+```yaml
+# personas/mypersona/config.yaml
+paths:
+  legacy_db: "personas/mypersona/data/legacy.db"
+```
+
+Once configured, your companion gets three new tools: `search_legacy` (RAG-powered semantic + keyword search over summaries), `list_legacy_sessions` (browse available conversations), and `get_legacy_context` (drill into specific messages). If no `legacy_db` is configured, these tools are simply hidden from the model — zero overhead.
+
+**Search scoring:**
+
+Legacy search uses a multi-signal scoring formula:
+- **Semantic similarity (55%)** — cosine similarity between query and summary embeddings
+- **Keyword hits (20%)** — direct keyword matches in summary text (with stopword filtering)
+- **Title match (10%)** — keywords found in the original conversation title
+- **Recency (10%)** — newer conversations score higher
+- **Conversation length (5%)** — longer conversations get a small boost
+
+Results are deduplicated by session and include drill-down hints to expand into the raw message history.
+
+
 ### Heartbeat (`config.yaml`)
 
 ```yaml
@@ -312,7 +371,7 @@ Built-in skills:
 
 | Skill | Tools | Description |
 |-------|-------|-------------|
-| memory | `save_memory`, `search_memory`, `list_memories`, `list_all_memories` | Persistent fact storage with semantic search |
+| memory | `save_memory`, `search_memory`, `list_memories`, `list_all_memories`, `search_legacy`, `get_legacy_context` | Persistent fact storage with semantic search + legacy archive RAG search |
 | journal | `write_journal`, `read_journal`, `update_journal` | Markdown entries + pinned identity (search via companion memories) |
 | schedule | `set_reminder`, `update_reminder`, `delete_reminder`, `list_reminders` | One-time ("in 2 hours") and recurring ("daily 8:00") with priority levels |
 | tasks | `add_task`, `complete_task`, `list_tasks`, `clear_tasks` | Persistent to-do lists |
