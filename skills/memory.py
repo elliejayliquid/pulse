@@ -61,7 +61,7 @@ class MemorySkill(BaseSkill):
         }
 
     def get_tools(self) -> list[dict]:
-        return [
+        tools = [
             {
                 "type": "function",
                 "function": {
@@ -180,7 +180,7 @@ class MemorySkill(BaseSkill):
                         "Update a memory when a fact changes. Creates a new version that "
                         "supersedes the old one (old version is kept for history). "
                         "Use this when information you stored before has changed — "
-                        "e.g. 'Lena got a new job' supersedes 'Lena works at X'."
+                        "e.g. 'Human got a new job' supersedes 'Human works at X'."
                     ),
                     "parameters": {
                         "type": "object",
@@ -252,79 +252,86 @@ class MemorySkill(BaseSkill):
                     },
                 },
             },
-            {
-                "type": "function",
-                "function": {
-                    "name": "search_legacy",
-                    "description": (
-                        "Search the ChatGPT conversation archive (legacy database) for specific "
-                        "topics or keywords. Use this when you need to find something from the "
-                        "original ChatGPT export — things Nova said or discussed before joining Pulse. "
-                        "Searches full conversation text via full-text search."
-                    ),
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "query": {
-                                "type": "string",
-                                "description": "Keyword or phrase to search for in archived ChatGPT conversations.",
-                            },
-                            "limit": {
-                                "type": "integer",
-                                "description": "Maximum results to return (default: 10).",
-                            },
-                        },
-                        "required": ["query"],
-                    },
-                },
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "list_legacy_sessions",
-                    "description": (
-                        "List all available ChatGPT conversation sessions from the legacy archive. "
-                        "Use this to browse what conversations are available before drilling in. "
-                        "Returns session titles, dates, and message counts."
-                    ),
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "limit": {
-                                "type": "integer",
-                                "description": "Maximum number of sessions to return (default: 20).",
-                            },
-                        },
-                        "required": [],
-                    },
-                },
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "get_legacy_context",
-                    "description": (
-                        "Get the surrounding context (previous and following messages) "
-                        "for a specific message ID in the ChatGPT archive. "
-                        "Use this after search_legacy to understand the flow of an archived conversation."
-                    ),
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "message_id": {
-                                "type": "integer",
-                                "description": "The ID of the message to expand (from search results).",
-                            },
-                            "window": {
-                                "type": "integer",
-                                "description": "How many messages before and after to fetch (default: 5).",
-                            },
-                        },
-                        "required": ["message_id"],
-                    },
-                },
-            },
         ]
+
+        # Add legacy tools only if configured
+        if self._legacy_db_path():
+            tools.extend([
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "search_legacy",
+                        "description": (
+                            "Search the conversation archive (legacy database) for specific "
+                            "topics or keywords. Use this when you need to find something from the "
+                            "original chat history — things discussed before joining Pulse. "
+                            "Utilizes RAG for semantic search."
+                        ),
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "query": {
+                                    "type": "string",
+                                    "description": "Keyword or phrase to search for in archived conversations.",
+                                },
+                                "limit": {
+                                    "type": "integer",
+                                    "description": "Maximum results to return (default: 10).",
+                                },
+                            },
+                            "required": ["query"],
+                        },
+                    },
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "list_legacy_sessions",
+                        "description": (
+                            "List all available conversation sessions from the legacy archive. "
+                            "Use this to browse what conversations are available before drilling in. "
+                            "Returns session titles, dates, and message counts."
+                        ),
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "limit": {
+                                    "type": "integer",
+                                    "description": "Maximum number of sessions to return (default: 20).",
+                                },
+                            },
+                            "required": [],
+                        },
+                    },
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_legacy_context",
+                        "description": (
+                            "Get the surrounding context (previous and following messages) "
+                            "for a specific message ID in the archive. "
+                            "Use this after search_legacy to understand the flow of an archived conversation."
+                        ),
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "message_id": {
+                                    "type": "integer",
+                                    "description": "The ID of the message to expand (from search results).",
+                                },
+                                "window": {
+                                    "type": "integer",
+                                    "description": "How many messages before and after to fetch (default: 5).",
+                                },
+                            },
+                            "required": ["message_id"],
+                        },
+                    },
+                },
+            ])
+
+        return tools
 
     def execute(self, tool_name: str, arguments: dict) -> str:
         if tool_name == "save_memory":
@@ -856,14 +863,14 @@ class MemorySkill(BaseSkill):
         except IOError as e:
             logger.warning(f"Failed to rebuild aggregate: {e}")
 
-    # ── Legacy ChatGPT Archive ────────────────────────────────
+    # ── Legacy Conversations Archive ──────────────────────────
 
     def _legacy_db_path(self) -> Path | None:
         """Resolve the legacy database path. Returns None if not available."""
-        # Allow override via config, default to Lena's exported ChatGPT archive
+        # Allow override via config
         path = self._config.get("paths", {}).get("legacy_db")
         if not path:
-            path = "D:/documents/AI/Nova_DataExport_01302026/legacy.db"
+            return None
         p = Path(path)
         return p if p.exists() else None
 
@@ -880,8 +887,18 @@ class MemorySkill(BaseSkill):
             logger.warning(f"Could not open legacy.db: {e}")
             return None
 
+    def _legacy_has_summaries(self, conn: sqlite3.Connection) -> bool:
+        """Check if the legacy_summaries table exists and has data."""
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM legacy_summaries"
+            ).fetchone()
+            return row[0] > 0
+        except Exception:
+            return False
+
     def _search_legacy(self, query: str, limit: int = 10) -> str:
-        """Full-text search across the ChatGPT legacy archive."""
+        """Search legacy archive — RAG summaries first, raw FTS fallback."""
         if not query.strip():
             return "Please provide a search query."
 
@@ -890,43 +907,198 @@ class MemorySkill(BaseSkill):
             return "Legacy database is not available."
 
         try:
-            # Try FTS5 first (faster), fall back to LIKE
-            try:
-                rows = conn.execute("""
-                    SELECT lm.id, lm.session_id, lm.role, lm.content, lm.timestamp,
-                           ls.title AS session_title
-                    FROM legacy_messages_fts fts
-                    JOIN legacy_messages lm ON lm.id = fts.rowid
-                    LEFT JOIN legacy_sessions ls ON ls.id = lm.session_id
-                    WHERE legacy_messages_fts MATCH ?
-                    ORDER BY rank
-                    LIMIT ?
-                """, (query, limit)).fetchall()
-            except Exception:
-                # FTS error — use LIKE fallback
-                rows = conn.execute("""
-                    SELECT lm.id, lm.session_id, lm.role, lm.content, lm.timestamp,
-                           ls.title AS session_title
-                    FROM legacy_messages lm
-                    LEFT JOIN legacy_sessions ls ON ls.id = lm.session_id
-                    WHERE lm.content LIKE ? AND lm.role IN ('user', 'assistant')
-                    ORDER BY lm.timestamp DESC
-                    LIMIT ?
-                """, (f"%{query}%", limit)).fetchall()
+            # Check if legacy_summaries table exists
+            if self._legacy_has_summaries(conn):
+                results = self._search_legacy_rag(conn, query, limit)
+                if results:
+                    return results
+                # If RAG returned nothing, fall through to raw search
 
-            # FTS returned empty results (no exception, just no matches) — retry with LIKE
-            if not rows:
-                rows = conn.execute("""
-                    SELECT lm.id, lm.session_id, lm.role, lm.content, lm.timestamp,
-                           ls.title AS session_title
-                    FROM legacy_messages lm
-                    LEFT JOIN legacy_sessions ls ON ls.id = lm.session_id
-                    WHERE lm.content LIKE ? AND lm.role IN ('user', 'assistant')
-                    ORDER BY lm.timestamp DESC
-                    LIMIT ?
-                """, (f"%{query}%", limit)).fetchall()
+            # Fallback: existing FTS/LIKE search on legacy_messages
+            return self._search_legacy_raw(conn, query, limit)
         finally:
             conn.close()
+
+    def _search_legacy_rag(self, conn: sqlite3.Connection, query: str, limit: int) -> str | None:
+        """Semantic + keyword search over RAG summaries."""
+        model = _get_embedding_model()
+
+        # Load all summaries with their embeddings + session metadata
+        rows = conn.execute("""
+            SELECT ls.*, s.title, s.created_at, s.message_count
+            FROM legacy_summaries ls
+            JOIN legacy_sessions s ON s.id = ls.session_id
+        """).fetchall()
+
+        if not rows:
+            return None
+
+        query_lower = query.lower()
+        STOP_WORDS = {
+            "the", "a", "an", "is", "in", "to", "of", "and", "or", "it",
+            "was", "for", "on", "with", "that", "this", "my", "we", "i",
+            "about", "how", "what", "when", "where", "do", "did", "does",
+        }
+        query_keywords = [w for w in query_lower.split() if w not in STOP_WORDS]
+
+        # Cache query vector if model is available
+        query_vec = model.encode(query, normalize_embeddings=True) if model else None
+
+        # Reference date for recency calculation
+        now = datetime.now()
+
+        # Find the oldest session date for normalization
+        dates = [r["created_at"] for r in rows if r["created_at"]]
+        max_days = 1  # avoid div by zero
+        if dates:
+            try:
+                valid_dates = []
+                for d in dates:
+                    try:
+                        valid_dates.append(datetime.fromisoformat(d))
+                    except (ValueError, TypeError):
+                        continue
+                if valid_dates:
+                    oldest = min(valid_dates)
+                    max_days = max((now - oldest).days, 1)
+            except Exception:
+                pass
+
+        scored = []
+        for row in rows:
+            # 1. Semantic similarity
+            sem_score = 0.0
+            if query_vec is not None and row["summary_embedding"]:
+                summary_vec = _blob_to_vec(row["summary_embedding"])
+                if summary_vec is not None and len(summary_vec) > 0:
+                    norm_q = np.linalg.norm(query_vec)
+                    norm_s = np.linalg.norm(summary_vec)
+                    if norm_q > 0 and norm_s > 0:
+                        sem_score = float(np.dot(query_vec, summary_vec) / (norm_q * norm_s))
+
+            # 2. Keyword score
+            summary_lower = (row["summary_text"] or "").lower()
+            if query_keywords:
+                kw_hits = sum(1 for kw in query_keywords if kw in summary_lower)
+                kw_score = kw_hits / len(query_keywords)
+            else:
+                kw_score = 0.0
+
+            # 3. Title score
+            title_lower = (row["title"] or "").lower()
+            title_score = 1.0 if query_keywords and any(kw in title_lower for kw in query_keywords) else 0.0
+
+            # 4. Recency score
+            recency = 0.5  # default for unknown dates
+            if row["created_at"]:
+                try:
+                    session_date = datetime.fromisoformat(row["created_at"])
+                    days_ago = (now - session_date).days
+                    recency = 1.0 - (days_ago / max_days)
+                    recency = max(0.0, min(1.0, recency))
+                except (ValueError, TypeError):
+                    pass
+
+            # 5. Length bonus
+            msg_count = row["message_count"] or 0
+            length_bonus = min(msg_count / 50, 1.0)
+
+            # Combined score
+            final = (
+                sem_score    * 0.55 +
+                kw_score     * 0.20 +
+                title_score  * 0.10 +
+                recency      * 0.10 +
+                length_bonus * 0.05
+            )
+
+            if final >= 0.30:
+                scored.append((final, row))
+
+        if not scored:
+            return None  # trigger fallback
+
+        # Sort descending
+        scored.sort(key=lambda x: x[0], reverse=True)
+
+        # Deduplicate by session_id (keep highest-scoring entry per session)
+        seen_sessions = set()
+        deduped = []
+        for score, row in scored:
+            sid = row["session_id"]
+            if sid not in seen_sessions:
+                seen_sessions.add(sid)
+                deduped.append((score, row))
+            if len(deduped) >= limit:
+                break
+
+        # Format output
+        lines = [f"Found {len(deduped)} relevant conversation(s) in legacy archive:"]
+        for score, row in deduped:
+            title = row["title"] or "(untitled)"
+            date = (row["created_at"] or "unknown")[:10]
+            msg_count = row["message_count"] or 0
+            chunk_label = ""
+            if row["chunk_index"] > 0:
+                chunk_label = f" [segment {row['chunk_index']}]"
+
+            lines.append(
+                f"\n📌 [{date}] \"{title}\" ({msg_count} msgs, relevance: {int(score*100)}%){chunk_label}"
+            )
+            # Show summary preview (truncated)
+            summary = row["summary_text"] or ""
+            if len(summary) > 300:
+                summary = summary[:297] + "..."
+            lines.append(f"   {summary}")
+
+            # Provide drill-down hint using first message ID
+            if row["first_msg_id"]:
+                lines.append(
+                    f"   → Expand with: get_legacy_context(message_id={row['first_msg_id']})"
+                )
+
+        lines.append(
+            "\nUse get_legacy_context(message_id=ID) to expand a message with its surrounding context."
+        )
+        return "\n".join(lines)
+
+    def _search_legacy_raw(self, conn: sqlite3.Connection, query: str, limit: int) -> str:
+        """Full-text search across the legacy archive (fallback)."""
+        # Try FTS5 first (faster), fall back to LIKE
+        try:
+            rows = conn.execute("""
+                SELECT lm.id, lm.session_id, lm.role, lm.content, lm.timestamp,
+                       ls.title AS session_title
+                FROM legacy_messages_fts fts
+                JOIN legacy_messages lm ON lm.id = fts.rowid
+                LEFT JOIN legacy_sessions ls ON ls.id = lm.session_id
+                WHERE legacy_messages_fts MATCH ?
+                ORDER BY rank
+                LIMIT ?
+            """, (query, limit)).fetchall()
+        except Exception:
+            # FTS error — use LIKE fallback
+            rows = conn.execute("""
+                SELECT lm.id, lm.session_id, lm.role, lm.content, lm.timestamp,
+                       ls.title AS session_title
+                FROM legacy_messages lm
+                LEFT JOIN legacy_sessions ls ON ls.id = lm.session_id
+                WHERE lm.content LIKE ? AND lm.role IN ('user', 'assistant')
+                ORDER BY lm.timestamp DESC
+                LIMIT ?
+            """, (f"%{query}%", limit)).fetchall()
+
+        # FTS returned empty results (no exception, just no matches) — retry with LIKE
+        if not rows:
+            rows = conn.execute("""
+                SELECT lm.id, lm.session_id, lm.role, lm.content, lm.timestamp,
+                       ls.title AS session_title
+                FROM legacy_messages lm
+                LEFT JOIN legacy_sessions ls ON ls.id = lm.session_id
+                WHERE lm.content LIKE ? AND lm.role IN ('user', 'assistant')
+                ORDER BY lm.timestamp DESC
+                LIMIT ?
+            """, (f"%{query}%", limit)).fetchall()
 
         if not rows:
             return f"No archived messages found matching '{query}'."
