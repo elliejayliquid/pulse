@@ -48,6 +48,8 @@ skills/                   # Auto-discovered — just drop a .py file here
   tts.py                  # Text to speech skill
   lor.py                  # LoR forum integration (optional)
   web_search.py           # Web search via DuckDuckGo (free)
+  paint.py                # Pixel art canvas (16×16 emoji grid + PNG)
+  garden.py               # Memory garden (plant memories, watch them grow)
   dev.py                  # Autonomous skill creation (dev ticks)
 personas/                 # Per-persona config, identity, and data
   _template/              # Example persona — copy this to get started
@@ -380,6 +382,7 @@ Built-in skills:
 | tts | `speak` | Send voice messages via Qwen3-TTS (requires CUDA GPU) |
 | web_search | `web_search`, `image_search`, `fetch_url` | Search the web using DuckDuckGo; `fetch_url` retrieves full article/page text |
 | paint | `paint_start`, `paint_set`, `paint_view`, `paint_finish` | Tiny pixel art (16×16) as a creative medium — emoji grid + PNG export |
+| garden | `garden_plant`, `garden_water`, `garden_prune`, `garden_view`, `garden_info` | Plant memories as seedlings and watch them grow — surprise blooms based on memory tags, wilting from neglect, PNG snapshots via Telegram |
 | dev | `read_source`, `search_code`, `write_skill`, `list_skills`, `dev_journal_read`, `dev_journal_write` | Autonomous skill creation (used by dev ticks) |
 
 Disable any skill in `config.yaml`:

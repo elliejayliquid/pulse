@@ -547,6 +547,62 @@ class PulseDatabase:
             result.append(d)
         return result
 
+    # ── Garden ───────────────────────────────────────────────
+
+    def save_plant(self, x: int, y: int, memory_id: Optional[int] = None,
+                   species: str = "wildflower", name: Optional[str] = None) -> int:
+        """Insert a plant and return its row id."""
+        cur = self.conn.execute(
+            "INSERT INTO garden_plants (x, y, memory_id, species, name) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (x, y, memory_id, species, name)
+        )
+        self.conn.commit()
+        return cur.lastrowid
+
+    def get_plant(self, x: int, y: int) -> Optional[dict]:
+        """Get a plant by its coordinates."""
+        row = self.conn.execute(
+            "SELECT * FROM garden_plants WHERE x = ? AND y = ?", (x, y)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def get_all_plants(self) -> list[dict]:
+        """Get all plants in the garden."""
+        rows = self.conn.execute("SELECT * FROM garden_plants").fetchall()
+        return [dict(r) for r in rows]
+
+    def update_plant(self, x: int, y: int, **kwargs) -> bool:
+        """Update plant fields by coordinates."""
+        if not kwargs:
+            return False
+        
+        # Fields to update
+        fields = []
+        params = []
+        for k, v in kwargs.items():
+            if k == "last_tended" and v == "datetime('now')":
+                fields.append(f"{k} = datetime('now')")
+            elif k == "last_watered" and v == "datetime('now')":
+                fields.append(f"{k} = datetime('now')")
+            else:
+                fields.append(f"{k} = ?")
+                params.append(v)
+        
+        params.extend([x, y])
+        sql = f"UPDATE garden_plants SET {', '.join(fields)} WHERE x = ? AND y = ?"
+        cur = self.conn.execute(sql, params)
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def delete_plant(self, x: int, y: int) -> bool:
+        """Delete a plant by coordinates."""
+        cur = self.conn.execute(
+            "DELETE FROM garden_plants WHERE x = ? AND y = ?", (x, y)
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
     # ── Utility ──────────────────────────────────────────────
 
     def row_count(self, table: str) -> int:
@@ -554,7 +610,8 @@ class PulseDatabase:
         # Whitelist table names to prevent injection
         valid = {
             "messages", "sessions", "memories", "schedules", "tasks",
-            "dev_journal", "action_log", "usage", "journal_entries", "identity"
+            "dev_journal", "action_log", "usage", "journal_entries", "identity",
+            "garden_plants"
         }
         if table not in valid:
             raise ValueError(f"Unknown table: {table}")
@@ -683,4 +740,23 @@ CREATE TABLE IF NOT EXISTS identity (
     created_at   TEXT NOT NULL DEFAULT (datetime('now')),
     last_updated TEXT
 );
+
+-- Garden plants
+CREATE TABLE IF NOT EXISTS garden_plants (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    memory_id    INTEGER,                              -- links to memories.id (nullable for decorative)
+    species      TEXT NOT NULL DEFAULT 'wildflower',    -- tag category that determined bloom pool
+    bloom_emoji  TEXT,                                  -- NULL until bloomed, then the surprise emoji
+    name         TEXT,                                  -- optional pet name Nova gives the plant
+    x            INTEGER NOT NULL,
+    y            INTEGER NOT NULL,
+    growth       REAL NOT NULL DEFAULT 0.0,             -- 0.0 to 4.0 (stage thresholds: 1.0, 2.0)
+    health       REAL NOT NULL DEFAULT 1.0,             -- 0.0 to 1.0 (below 0.3 = wilting)
+    planted_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    last_watered TEXT,
+    last_tended  TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(x, y)                                        -- one plant per plot
+);
+CREATE INDEX IF NOT EXISTS idx_garden_coords ON garden_plants(x, y);
+CREATE INDEX IF NOT EXISTS idx_garden_memory ON garden_plants(memory_id);
 """

@@ -167,6 +167,12 @@ skills:
     enabled: false                 # speak — send voice messages
   paint:
     enabled: true                  # paint_start, paint_set, paint_view, paint_finish
+  garden:
+    enabled: true                 # garden_plant, garden_water, garden_prune, garden_view, garden_info
+
+# --- Context Injection ---
+#context:
+#  inject_skills: ["garden"] -> this would let your persona see the garden stats in their prompt on every turn.
 
 # --- Dev Tick (autonomous self-improvement) ---
 # The companion periodically reviews its own code and can create/improve skills.

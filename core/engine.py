@@ -257,6 +257,15 @@ class PulseEngine:
             if getattr(paint_skill, "pending_paint_info", None):
                 paint_skill.pending_paint_info.clear()
 
+        # Garden — send any snapshots
+        garden_skill = self.skill_registry.get_skill("garden")
+        if garden_skill and garden_skill.pending_images:
+            queued = list(garden_skill.pending_images)
+            garden_skill.pending_images.clear()
+            if telegram and hasattr(telegram, "send_photo"):
+                for img_path in queued:
+                    await telegram.send_photo(img_path)
+
         # Web search — clear (not useful standalone)
         web_skill = self.skill_registry.get_skill("web_search")
         if web_skill:

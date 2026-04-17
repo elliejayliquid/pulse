@@ -157,6 +157,7 @@ def resolve_persona(config: dict, persona_name: str | None, pulse_root: Path) ->
         "action_log": str(persona_data / "action_log.json"),
         "usage": str(persona_data / "usage.json"),
         "paintings": str(persona_data / "paintings"),
+        "garden": str(persona_data / "garden"),
     }
     config.setdefault("paths", {})
     for key, default in default_paths.items():

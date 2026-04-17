@@ -116,6 +116,7 @@ class TelegramChannel(Channel):
         self.app.add_handler(CommandHandler("ping", self._cmd_ping))
         self.app.add_handler(CommandHandler("tasks", self._cmd_tasks))
         self.app.add_handler(CommandHandler("tasks_clear", self._cmd_tasks_clear))
+        self.app.add_handler(CommandHandler("garden", self._cmd_garden))
 
         # Message handler — all regular text messages
         self.app.add_handler(MessageHandler(
@@ -413,6 +414,13 @@ class TelegramChannel(Channel):
                 await self.send_photo(img_url)
             paint_skill.pending_images.clear()
 
+        # Garden — send snapshots
+        garden_skill = self._engine.skill_registry.get_skill("garden")
+        if garden_skill and garden_skill.pending_images:
+            for img_path in garden_skill.pending_images:
+                await self.send_photo(img_path)
+            garden_skill.pending_images.clear()
+
         return voice_sent
 
     async def shutdown(self):
@@ -583,6 +591,29 @@ class TelegramChannel(Channel):
             )
         else:
             await update.message.reply_text(f"Got it! I'll remind you: \"{task}\"\nSchedule ID: {entry['id']}")
+
+    async def _cmd_garden(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /garden — render personal garden state and send as PNG."""
+        if not self._engine or not self._engine.skill_registry:
+            await update.message.reply_text("Engine not connected yet.")
+            return
+
+        garden_skill = self._engine.skill_registry.get_skill("garden")
+        if not garden_skill:
+            await update.message.reply_text("Garden skill not loaded.")
+            return
+
+        await update.message.chat.send_action("upload_photo")
+        
+        # Trigger a view (this queues the PNG snapshot)
+        result = await asyncio.to_thread(garden_skill.execute, "garden_view", {})
+        
+        # Pull from queue and send directly
+        if garden_skill.pending_images:
+            img_path = garden_skill.pending_images.pop(0)
+            await self.send_photo(img_path, caption="Here is your garden! 🌿")
+        else:
+            await update.message.reply_text(f"Couldn't render the garden right now, but here's the view:\n\n{result}")
 
     # --- Message handler ---
 
