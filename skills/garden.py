@@ -227,6 +227,26 @@ class GardenSkill(BaseSkill):
         if not memory:
             return f"Memory ID {memory_id} not found."
 
+        # Dedup — don't plant the same memory twice
+        existing = [p for p in self._db.get_all_plants() if p['memory_id'] == memory_id]
+        if existing:
+            p = existing[0]
+            return (
+                f"Memory {memory_id} is already planted at ({p['x']}, {p['y']}) "
+                f"as '{p.get('name') or 'unnamed'}'. Each memory can only be planted once."
+            )
+
+        # Name uniqueness — no two plants should share a name
+        if name:
+            same_name = [p for p in self._db.get_all_plants()
+                         if p.get('name') and p['name'].lower() == name.lower()]
+            if same_name:
+                p = same_name[0]
+                return (
+                    f"A plant named '{p['name']}' already exists at ({p['x']}, {p['y']}). "
+                    f"Pick a unique name for this one!"
+                )
+
         # Determine species based on tags
         tags = memory.get("tags", [])
         species = "wildflower"
