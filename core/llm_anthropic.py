@@ -9,9 +9,10 @@ Same interface as LLMClient so the engine can swap them transparently.
 
 import json
 import logging
+import time
 from typing import Optional
 
-from anthropic import Anthropic, APIConnectionError, APIStatusError
+from anthropic import Anthropic, APIConnectionError, APIStatusError, InternalServerError
 
 from core.llm import PulseResponse, extract_think_content, strip_think_tags
 
@@ -213,9 +214,23 @@ class AnthropicClient:
                 messages=anthropic_msgs,
                 temperature=self.temperature,
             )
-            if self.top_p < 1.0:
-                create_kwargs["top_p"] = self.top_p
-            response = self.client.messages.create(**create_kwargs)
+            # Retry loop for transient 500 errors
+            response = None
+            for attempt in range(3):
+                try:
+                    response = self.client.messages.create(**create_kwargs)
+                    break  # Success!
+                except InternalServerError as e:
+                    if attempt < 2:
+                        wait = 2 ** (attempt + 1)  # 2s, 4s
+                        logger.warning(f"Anthropic 500 (attempt {attempt + 1}/3), retrying in {wait}s: {e}")
+                        time.sleep(wait)
+                    else:
+                        logger.error(f"Anthropic 500 after 3 attempts: {e}")
+                        return None
+
+            if not response:
+                return None
 
             self._track(response)
             stop = response.stop_reason or "unknown"
@@ -273,7 +288,24 @@ class AnthropicClient:
                 )
                 if self.top_p < 1.0:
                     create_kwargs["top_p"] = self.top_p
-                response = self.client.messages.create(**create_kwargs)
+                
+                # Retry loop for transient 500 errors
+                response = None
+                for attempt in range(3):
+                    try:
+                        response = self.client.messages.create(**create_kwargs)
+                        break  # Success!
+                    except InternalServerError as e:
+                        if attempt < 2:
+                            wait = 2 ** (attempt + 1)  # 2s, 4s
+                            logger.warning(f"Anthropic 500 (attempt {attempt + 1}/3), retrying in {wait}s: {e}")
+                            time.sleep(wait)
+                        else:
+                            logger.error(f"Anthropic 500 after 3 attempts: {e}")
+                            return None, tools_used
+
+                if not response:
+                    return None, tools_used
 
                 self._track(response)
                 stop = response.stop_reason or "unknown"
@@ -349,7 +381,24 @@ class AnthropicClient:
             )
             if self.top_p < 1.0:
                 create_kwargs["top_p"] = self.top_p
-            response = self.client.messages.create(**create_kwargs)
+            
+            # Retry loop for transient 500 errors
+            response = None
+            for attempt in range(3):
+                try:
+                    response = self.client.messages.create(**create_kwargs)
+                    break
+                except InternalServerError as e:
+                    if attempt < 2:
+                        wait = 2 ** (attempt + 1)
+                        logger.warning(f"Anthropic 500 in final response (attempt {attempt + 1}/3), retrying in {wait}s: {e}")
+                        time.sleep(wait)
+                    else:
+                        logger.error(f"Anthropic 500 in final response after 3 attempts: {e}")
+                        return None, tools_used
+
+            if not response:
+                return None, tools_used
             self._track(response)
             text = ""
             for block in response.content:

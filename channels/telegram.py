@@ -69,6 +69,9 @@ class TelegramChannel(Channel):
         # The engine extracts reasoning from <think> tags / reasoning_content
         # / reasoning fields and hands it back through handle_message().
         self._show_reasoning = bool(config.get("model", {}).get("show_reasoning", False))
+        # Stash the last user message text (or photo caption/voice transcription)
+        # to allow re-processing via the /retry command if an API error occurs.
+        self._last_user_message = None
 
     def set_engine(self, engine):
         """Connect the engine so incoming messages can trigger responses."""
@@ -117,6 +120,7 @@ class TelegramChannel(Channel):
         self.app.add_handler(CommandHandler("tasks", self._cmd_tasks))
         self.app.add_handler(CommandHandler("tasks_clear", self._cmd_tasks_clear))
         self.app.add_handler(CommandHandler("garden", self._cmd_garden))
+        self.app.add_handler(CommandHandler("retry", self._cmd_retry))
 
         # Message handler — all regular text messages
         self.app.add_handler(MessageHandler(
@@ -455,6 +459,7 @@ class TelegramChannel(Channel):
             "/status — see what I'm up to\n"
             "/tasks — view your task list\n"
             "/remind <text> — set a quick reminder\n"
+            "/retry — re-send the last message\n"
             "/quiet — toggle quiet mode"
         )
 
@@ -615,6 +620,49 @@ class TelegramChannel(Channel):
         else:
             await update.message.reply_text(f"Couldn't render the garden right now, but here's the view:\n\n{result}")
 
+    async def _cmd_retry(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /retry — re-process the last user message."""
+        if not self._engine:
+            await update.message.reply_text("Engine not connected yet.")
+            return
+
+        if not self._last_user_message:
+            await update.message.reply_text("Nothing to retry — send a message first!")
+            return
+
+        # Let the user know we're on it
+        preview = self._last_user_message[:50] + ("..." if len(self._last_user_message) > 50 else "")
+        await update.message.reply_text(f"🔄 Retrying: \"{preview}\"")
+
+        # Keep typing indicator alive
+        typing_task = self._start_typing_loop(update.effective_chat)
+        try:
+            # Route to companion via the engine using the stashed message
+            reply, tools_used, reasoning = await self._engine.handle_message(
+                self._last_user_message, source="telegram"
+            )
+        finally:
+            typing_task.cancel()
+
+        # Handle output same as _on_message
+        voice_sent = await self._send_pending_skill_output(
+            update.message, reply or "", tools_used
+        )
+
+        if self._show_reasoning and reasoning:
+            await self._send_reasoning(update.message, reasoning)
+
+        if tools_used:
+            tool_names = ", ".join(dict.fromkeys(tools_used))
+            await self._reply_with_retry(update.message, f"🔧 {tool_names}")
+
+        if reply:
+            await self._reply_with_retry(
+                update.message, reply, reply_markup=self._voice_markup()
+            )
+        elif not voice_sent:
+            await self._reply_with_retry(update.message, "(Retry failed — LLM didn't return a thought)")
+
     # --- Message handler ---
 
     async def _on_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -626,6 +674,7 @@ class TelegramChannel(Channel):
 
             user_message = update.message.text
             logger.info(f"Telegram message from user: {user_message[:50]}...")
+            self._last_user_message = user_message
 
             # Keep typing indicator alive for the entire generation
             typing_task = self._start_typing_loop(update.effective_chat)
@@ -673,6 +722,7 @@ class TelegramChannel(Channel):
             # Get the highest resolution photo (last in the list)
             photo = update.message.photo[-1]
             caption = update.message.caption or "What do you see in this image?"
+            self._last_user_message = caption
 
             logger.info(f"Telegram photo from user ({photo.width}x{photo.height}, caption: {caption[:50]}...)")
 
@@ -750,6 +800,7 @@ class TelegramChannel(Channel):
 
                 # Show what we heard (so the user can verify)
                 await self._reply_with_retry(update.message, f"🎙️ {text}")
+                self._last_user_message = f"🎙️ {text}"
 
                 # Route to companion with voice hint so they know transcription may be imperfect
                 reply, tools_used, reasoning = await self._engine.handle_message(f"🎙️ {text}", source="telegram")
