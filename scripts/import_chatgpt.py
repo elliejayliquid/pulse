@@ -1,7 +1,9 @@
 """
 Stage 2: Import exported ChatGPT conversations into legacy.db.
 Designed for streaming — processes files one at a time without loading
-all conversations into memory.
+all conversations into memory. N.B.: you must edit USER and ASSISTANT variables.
+This now works for both ChatGPT and Claude exports.
+
 
 Usage:
     python import_chatgpt.py [--db PATH] [--source NAME] [--drop]
@@ -22,8 +24,8 @@ sys.stdout.reconfigure(encoding='utf-8')
 CONVERSATIONS_DIR = Path("path/to/your/conversations")
 DEFAULT_DB = Path("path/to/your/legacy.db")
 CHUNK_SIZE = 100  # messages per batch insert
-USER = "YOUR USERNAME"
-ASSISTANT = "your assistant's name"
+USER = "Your username"
+ASSISTANT = "Your AI name"
 
 def parse_frontmatter(text: str) -> tuple[dict, str]:
     """Split YAML frontmatter from markdown body. Returns (metadata, body)."""

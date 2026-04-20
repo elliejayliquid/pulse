@@ -9,6 +9,7 @@
 # Usage:
 #   python rag_import.py                           # dry run (print what would be done)
 #   python rag_import.py --execute                 # actually write to DB
+#   python rag_import.py --execute --db "path"     # use a specific legacy.db (--db "D:\path\to\legacy.db")
 #   python rag_import.py --execute --reprocess     # re-summarize sessions that already have summaries
 
 import argparse
@@ -57,10 +58,9 @@ CHUNK_SIZE = 10  # messages per sub-chunk
 CHUNK_OVERLAP = 2  # overlapping messages between chunks
 LONG_SESSION_THRESHOLD = 15  # sessions above this get sub-chunked
 
-LEGACY_DB = Path(os.environ.get(
-    'LEGACY_DB',
-    '/path/to/your/legacy.db'
-))
+# Default paths (can be overridden by CLI or Environment)
+DEFAULT_DB = Path("/path/to/your/legacy.db")
+DEFAULT_ENDPOINT = 'http://127.0.0.1:8011/v1'
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -287,7 +287,7 @@ def summarize_messages(messages: list[dict], client: OpenAI) -> str:
                 ],
                 temperature=LLAMA_SUMMARIZE_TEMPERATURE,
                 max_tokens=LLAMA_SUMMARIZE_MAX_TOKENS,
-                timeout=60
+                timeout=180
             )
             msg = response.choices[0].message
             # Reasoning models (Ministral, Qwen3, etc.) may put thinking in reasoning_content
@@ -471,20 +471,22 @@ def upsert_summary(conn: sqlite3.Connection, session_id: str,
 
 def run(dry_run: bool = True, reprocess: bool = False,
         batch_pause: int = 20,
-        endpoint: str | None = None):
+        endpoint: str | None = None,
+        db_path: str | None = None):
     # LOG: Function Entry
     logger.debug(f"-> ENTER: run() - DryRun: {dry_run}, Reprocess: {reprocess}, BatchPause: {batch_pause}")
 
-    # Resolve endpoint at call time (not module load) so CLI env overrides work
-    llm_endpoint = endpoint or os.environ.get('LLAMA_ENDPOINT', 'http://127.0.0.1:8011/v1')
+    # Resolve paths at call time (not module load) so CLI overrides work
+    llm_endpoint = endpoint or os.environ.get('LLAMA_ENDPOINT', DEFAULT_ENDPOINT)
+    legacy_db = Path(db_path) if db_path else Path(os.environ.get('LEGACY_DB', DEFAULT_DB))
 
-    logger.info(f'Opening legacy.db: {LEGACY_DB}')
-    if not LEGACY_DB.exists():
-        logger.error(f'!!! Database not found: {LEGACY_DB}')
+    logger.info(f'Opening legacy.db: {legacy_db}')
+    if not legacy_db.exists():
+        logger.error(f'!!! Database not found: {legacy_db}')
         sys.exit(1)
 
     logger.debug("Calling open_legacy_db()...")
-    conn = open_legacy_db(LEGACY_DB)
+    conn = open_legacy_db(legacy_db)
 
     logger.debug("Calling ensure_summaries_table()...")
     ensure_summaries_table(conn)
@@ -498,7 +500,7 @@ def run(dry_run: bool = True, reprocess: bool = False,
     llm_client = OpenAI(
         base_url=llm_endpoint,
         api_key='not-needed',
-        timeout=60.0  # or even 30 if you want it aggressive
+        timeout=180.0  # or even 30 if you want it aggressive
     )
     logger.info(f'LLM endpoint config: {llm_endpoint}')
     logger.info(f'Embedding model config: {EMBEDDING_MODEL_NAME if embed_model else None}')
@@ -663,4 +665,4 @@ if __name__ == '__main__':
         logger.info('DRY RUN — use --execute to actually write to DB')
 
     run(dry_run=dry_run, reprocess=args.reprocess, batch_pause=args.batch_pause,
-        endpoint=args.endpoint)
+        endpoint=args.endpoint, db_path=args.db)
