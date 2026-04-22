@@ -142,6 +142,10 @@ class AnthropicClient:
         # native Anthropic thinking blocks (which require a separate
         # request param + tool-loop passthrough) are a follow-up.
         self.last_reasoning: str = ""
+        # Last error message from a failed call — read by the Telegram
+        # channel to surface specific reasons ("API 500", "disconnected",
+        # etc.) instead of a generic "LLM didn't respond" message.
+        self.last_error: str = ""
 
     def _track(self, response):
         """Log token usage from an Anthropic API response."""
@@ -204,6 +208,7 @@ class AnthropicClient:
 
         Used for heartbeat ticks and scheduled tasks (expects JSON format).
         """
+        self.last_error = ""
         try:
             system_text, anthropic_msgs = _convert_messages(messages)
 
@@ -226,7 +231,8 @@ class AnthropicClient:
                         logger.warning(f"Anthropic 500 (attempt {attempt + 1}/3), retrying in {wait}s: {e}")
                         time.sleep(wait)
                     else:
-                        logger.error(f"Anthropic 500 after 3 attempts: {e}")
+                        self.last_error = f"Anthropic API error after 3 retries: {e}"
+                        logger.error(self.last_error)
                         return None
 
             if not response:
@@ -251,10 +257,12 @@ class AnthropicClient:
             return PulseResponse.from_llm_output(text)
 
         except APIConnectionError:
-            logger.warning("Anthropic API not reachable")
+            self.last_error = "Anthropic API not reachable"
+            logger.warning(self.last_error)
             return None
         except Exception as e:
-            logger.error(f"Anthropic call failed: {e}")
+            self.last_error = f"Anthropic call failed: {e}"
+            logger.error(self.last_error)
             return None
 
     def chat_with_tools(self, messages: list[dict], tools: list[dict],
@@ -270,8 +278,9 @@ class AnthropicClient:
         system_text, anthropic_msgs = _convert_messages(messages)
         anthropic_tools = _openai_tools_to_anthropic(tools) if tools else []
         tools_used = []
-        # Reset captured reasoning per call so a previous chain of thought
-        # never leaks forward into the next reply.
+        # Reset captured reasoning and error per call so a previous chain
+        # of thought / error never leaks forward into the next reply.
+        self.last_error = ""
         self.last_reasoning = ""
 
         system_blocks = self._build_system_blocks(system_text)
@@ -363,10 +372,12 @@ class AnthropicClient:
                 anthropic_msgs.append({"role": "user", "content": tool_results})
 
             except APIConnectionError:
-                logger.warning("Anthropic API disconnected during tool loop")
+                self.last_error = "Anthropic API disconnected during tool loop"
+                logger.warning(self.last_error)
                 return None, tools_used
             except Exception as e:
-                logger.error(f"Anthropic tool loop failed (round {round_num + 1}): {e}")
+                self.last_error = f"Anthropic tool loop failed (round {round_num + 1}): {e}"
+                logger.error(self.last_error)
                 return None, tools_used
 
         # Exhausted max rounds — force final response without tools
@@ -394,7 +405,8 @@ class AnthropicClient:
                         logger.warning(f"Anthropic 500 in final response (attempt {attempt + 1}/3), retrying in {wait}s: {e}")
                         time.sleep(wait)
                     else:
-                        logger.error(f"Anthropic 500 in final response after 3 attempts: {e}")
+                        self.last_error = f"Anthropic 500 in final response after 3 retries: {e}"
+                        logger.error(self.last_error)
                         return None, tools_used
 
             if not response:
@@ -406,5 +418,6 @@ class AnthropicClient:
                     text += block.text
             return (strip_think_tags(text) or None), tools_used
         except Exception as e:
-            logger.error(f"Final response after tool loop failed: {e}")
+            self.last_error = f"Final response after tool loop failed: {e}"
+            logger.error(self.last_error)
             return None, tools_used

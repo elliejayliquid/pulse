@@ -812,7 +812,10 @@ class ContextManager:
             "You have tools available (like saving memories, searching memories, setting reminders, "
             "checking the time). If you want to do something, USE the actual tool — don't just say "
             f"you did it. If you don't have a tool for something, be honest about that instead of "
-            f"pretending. {self.user_name} can see when you use tools, so they'll know if you're bluffing."
+            f"pretending. {self.user_name} can see when you use tools, so they'll know if you're bluffing.\n\n"
+            "IMPORTANT: Always respond to the user's MOST RECENT message below. "
+            "Do not revisit or re-address topics from earlier in the conversation "
+            "unless the user explicitly brings them up again."
         )
 
         # Time awareness
@@ -863,6 +866,10 @@ class ContextManager:
                 trimmed.insert(0, msg)
                 total_chars += msg_chars
             messages.extend(trimmed)
+
+        # Add a separator so the model clearly sees where history ends
+        # and the current message begins — prevents attention drift to older turns
+        messages.append({"role": "system", "content": f"{self.user_name}'s new message:"})
 
         # Add the current message (with optional image for vision models)
         if image_url:

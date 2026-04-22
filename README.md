@@ -61,6 +61,7 @@ scripts/
   migrate_journal_phase2.py # Migrate journal from JSON to markdown format
   backfill_embeddings.py    # Regenerate memory/journal embeddings
   export_chatgpt.py         # Stage 1: Export ChatGPT conversations.json to markdown
+  export_claude.py          # Stage 1: Export Claude conversations.json to markdown
   import_chatgpt.py         # Stage 2: Import exported markdown into legacy.db
   rag_import.py             # Stage 3: Generate summaries + embeddings for RAG search
 ```
@@ -222,9 +223,9 @@ Bring your conversation history with you. Pulse can import conversations from pr
 
 **Currently supported:**
 - ✅ **ChatGPT** — full pipeline (export → import → RAG)
+- ✅ **Claude** — full pipeline (export → import → RAG)
 
 **Planned:**
-- 🔜 Claude
 - 🔜 Gemini
 - 🔜 Grok
 - 🔜 Generic markdown/JSON
@@ -238,11 +239,12 @@ The import is a 3-stage pipeline:
 3. **RAG** — Generate LLM-powered summaries and embeddings for each conversation, enabling semantic search
 
 ```bash
-# Stage 1: Export ChatGPT conversations.json to markdown
-python scripts/export_chatgpt.py --force
+# Stage 1: Export conversations.json to markdown
+python scripts/export_chatgpt.py --force                   # for ChatGPT
+python scripts/export_claude.py --input "path/to/claude.json" --force  # for Claude
 
 # Stage 2: Import markdown files into legacy.db
-python scripts/import_chatgpt.py --dir "path/to/conversations" --db "path/to/legacy.db"
+python scripts/import_chatgpt.py --dir "path/to/conversations" --db "path/to/legacy.db" --source claude
 
 # Stage 3: Generate summaries + embeddings (requires a running LLM endpoint)
 python scripts/rag_import.py --execute --endpoint http://127.0.0.1:8001/v1

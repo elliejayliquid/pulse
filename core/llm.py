@@ -218,6 +218,9 @@ class LLMClient:
         #   - non-standard `message.reasoning_content` (DeepSeek)
         #   - non-standard `message.reasoning` (OpenRouter)
         self.last_reasoning: str = ""
+        # Last error message from a failed call — read by the Telegram
+        # channel to surface specific failure reasons to the user.
+        self.last_error: str = ""
 
     def _collect_reasoning(self, message, text: str) -> str:
         """Pull reasoning from wherever the provider chose to put it.
@@ -285,6 +288,7 @@ class LLMClient:
         # Reset captured reasoning at the start of each call so a previous
         # call's chain of thought never leaks forward.
         self.last_reasoning = ""
+        self.last_error = ""
         try:
             response = self.client.chat.completions.create(
                 model=self.model_name,
@@ -313,10 +317,12 @@ class LLMClient:
             return PulseResponse.from_llm_output(text)
 
         except APIConnectionError:
-            logger.warning("LLM server is not running or not reachable")
+            self.last_error = "LLM server is not running or not reachable"
+            logger.warning(self.last_error)
             return None
         except Exception as e:
-            logger.error(f"LLM call failed: {e}")
+            self.last_error = f"LLM call failed: {e}"
+            logger.error(self.last_error)
             return None
 
     def chat_with_tools(self, messages: list[dict], tools: list[dict],
@@ -343,6 +349,7 @@ class LLMClient:
         # Reset captured reasoning at the start of each call so a previous
         # call's chain of thought never leaks forward.
         self.last_reasoning = ""
+        self.last_error = ""
 
         for round_num in range(max_rounds):
             try:
@@ -416,10 +423,12 @@ class LLMClient:
                     })
 
             except APIConnectionError:
-                logger.warning("LLM server disconnected during tool loop")
+                self.last_error = "LLM server disconnected during tool loop"
+                logger.warning(self.last_error)
                 return None, tools_used
             except Exception as e:
-                logger.error(f"Tool-calling loop failed (round {round_num + 1}): {e}")
+                self.last_error = f"Tool-calling loop failed (round {round_num + 1}): {e}"
+                logger.error(self.last_error)
                 return None, tools_used
 
         # Exhausted max rounds — force a final response without tools
@@ -437,5 +446,6 @@ class LLMClient:
             text = response.choices[0].message.content or ""
             return (strip_think_tags(text) or None), tools_used
         except Exception as e:
-            logger.error(f"Final response after tool loop failed: {e}")
+            self.last_error = f"Final response after tool loop failed: {e}"
+            logger.error(self.last_error)
             return None, tools_used

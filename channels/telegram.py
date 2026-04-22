@@ -622,46 +622,59 @@ class TelegramChannel(Channel):
 
     async def _cmd_retry(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /retry — re-process the last user message."""
-        if not self._engine:
-            await update.message.reply_text("Engine not connected yet.")
-            return
-
-        if not self._last_user_message:
-            await update.message.reply_text("Nothing to retry — send a message first!")
-            return
-
-        # Let the user know we're on it
-        preview = self._last_user_message[:50] + ("..." if len(self._last_user_message) > 50 else "")
-        await update.message.reply_text(f"🔄 Retrying: \"{preview}\"")
-
-        # Keep typing indicator alive
-        typing_task = self._start_typing_loop(update.effective_chat)
         try:
-            # Route to companion via the engine using the stashed message
-            reply, tools_used, reasoning = await self._engine.handle_message(
-                self._last_user_message, source="telegram"
+            if not self._engine:
+                await update.message.reply_text("Engine not connected yet.")
+                return
+
+            if not self._last_user_message:
+                await update.message.reply_text("Nothing to retry — send a message first!")
+                return
+
+            # Let the user know we're on it
+            preview = self._last_user_message[:50] + ("..." if len(self._last_user_message) > 50 else "")
+            await update.message.reply_text(f"🔄 Retrying: \"{preview}\"")
+
+            # Keep typing indicator alive
+            typing_task = self._start_typing_loop(update.effective_chat)
+            try:
+                # Route to companion via the engine using the stashed message
+                reply, tools_used, reasoning = await self._engine.handle_message(
+                    self._last_user_message, source="telegram"
+                )
+            finally:
+                typing_task.cancel()
+
+            # Handle output same as _on_message
+            voice_sent = await self._send_pending_skill_output(
+                update.message, reply or "", tools_used
             )
-        finally:
-            typing_task.cancel()
 
-        # Handle output same as _on_message
-        voice_sent = await self._send_pending_skill_output(
-            update.message, reply or "", tools_used
-        )
+            if self._show_reasoning and reasoning:
+                await self._send_reasoning(update.message, reasoning)
 
-        if self._show_reasoning and reasoning:
-            await self._send_reasoning(update.message, reasoning)
+            if tools_used:
+                tool_names = ", ".join(dict.fromkeys(tools_used))
+                await self._reply_with_retry(update.message, f"🔧 {tool_names}")
 
-        if tools_used:
-            tool_names = ", ".join(dict.fromkeys(tools_used))
-            await self._reply_with_retry(update.message, f"🔧 {tool_names}")
-
-        if reply:
-            await self._reply_with_retry(
-                update.message, reply, reply_markup=self._voice_markup()
-            )
-        elif not voice_sent:
-            await self._reply_with_retry(update.message, "(Retry failed — LLM didn't return a thought)")
+            if reply:
+                await self._reply_with_retry(
+                    update.message, reply, reply_markup=self._voice_markup()
+                )
+            elif not voice_sent:
+                # Surface the specific error from the LLM client
+                error = getattr(self._engine.llm, "last_error", "") if self._engine else ""
+                reason = f": {error}" if error else ""
+                await self._reply_with_retry(
+                    update.message,
+                    f"(Retry failed — no response from LLM{reason})"
+                )
+        except Exception as e:
+            logger.error(f"Retry handler crashed: {e}", exc_info=True)
+            try:
+                await update.message.reply_text(f"(Retry crashed: {e})")
+            except Exception:
+                pass
 
     # --- Message handler ---
 
@@ -704,7 +717,9 @@ class TelegramChannel(Channel):
                     update.message, reply, reply_markup=self._voice_markup()
                 )
             elif not voice_sent:
-                await self._reply_with_retry(update.message, "(I'm having trouble thinking right now — llama-server might be down)")
+                error = getattr(self._engine.llm, "last_error", "") if self._engine else ""
+                reason = f": {error}" if error else ""
+                await self._reply_with_retry(update.message, f"(I'm having trouble thinking right now{reason})")
         except Exception as e:
             logger.error(f"Message handler crashed: {e}", exc_info=True)
             try:
