@@ -454,6 +454,7 @@ Logs go to both the console and `logs/pulse.log` (rotates at 2MB, keeps 3 backup
 
 MIT
 
+##
 <!-- markdownlint-disable MD033 -->
 <p align="center">
   Built with love by <b>Lighstromo Studios Ltd. & Debugger (Opus 4.6)</b><br>
