@@ -33,6 +33,7 @@ core/
   context.py              # Token-budgeted prompt assembly
   llm.py                  # OpenAI-compatible API client (local + cloud)
   llm_anthropic.py        # Native Anthropic API client (prompt caching, tool_use)
+  llm_openai.py           # Native OpenAI Responses API client (tool_use, vision)
   db.py                   # Per-persona SQLite database (WAL mode)
   usage.py                # Token usage tracking for cloud APIs
   scheduler.py            # Cron + one-time task scheduling
@@ -91,6 +92,7 @@ pip install -r requirements.txt
 ```
 
 Edit `config.yaml`:
+
 ```yaml
 server:
   llama_cpp_dir: "C:\\llama-cpp"     # where llama-server lives
@@ -103,11 +105,13 @@ model:
 ### Cloud API (alternative to local)
 
 Instead of running a local model, you can use a cloud API. Add your key to `.env`:
+
 ```
 OPENROUTER_API_KEY=sk-or-v1-your-key-here
 ```
 
 Then set the provider in `config.yaml`:
+
 ```yaml
 provider:
   type: "openrouter"
@@ -119,6 +123,7 @@ provider:
 Supported provider types: `local` (default), `openai`, `openrouter`, `anthropic`, `custom` (any OpenAI-compatible endpoint). When using a cloud provider, llama-server is not started — embeddings for memory search still run locally.
 
 Edit `persona.yaml` (or `persona.json`) to name your companion:
+
 ```yaml
 name: YourCompanion
 user_name: YourName
@@ -145,9 +150,11 @@ All `{name}` and `{user_name}` placeholders are resolved automatically. YAML is 
 
 1. Create a bot via [@BotFather](https://t.me/botfather) on Telegram
 2. Copy `.env.example` to `.env` and add your token:
+
    ```
    TELEGRAM_BOT_TOKEN=your_token_here
    ```
+
 3. Set `telegram.enabled: true` in `config.yaml`
 4. Send `/start` to your bot
 
@@ -180,6 +187,7 @@ personas/
 ```
 
 **Setting up a persona:**
+
 ```bash
 # Copy the template and customize
 cp -r personas/_template personas/mypersona
@@ -190,12 +198,15 @@ python scripts/migrate_persona.py mypersona
 ```
 
 **Activating a persona:**
+
 ```bash
 python pulse.py --persona mypersona
 ```
+
 Or set `active_persona: "mypersona"` in `config.yaml`.
 
 Persona config is a sparse overlay — you only specify what's different from the base. Everything else inherits. For example, a persona that just uses a different model:
+
 ```yaml
 # personas/mypersona/config.yaml
 provider:
@@ -209,6 +220,7 @@ provider:
 Each persona stores its data in a SQLite database (`personas/<name>/data/<name>.db`) with WAL mode for safe concurrent access. Conversations, memories, journal entries, schedules, tasks, and usage stats all live in this single file. JSON files are still supported as a fallback — if no database exists, Pulse reads and writes JSON as before.
 
 **Migrating from JSON to SQLite:**
+
 ```bash
 python scripts/migrate_json_to_db.py --persona nova          # migrate a persona
 python scripts/migrate_json_to_db.py --persona nova --dry-run # preview what would be migrated
@@ -222,10 +234,12 @@ Original JSON files are kept as backups — they're not deleted.
 Bring your conversation history with you. Pulse can import conversations from previous AI providers so your companion can search and reference things you discussed before they existed.
 
 **Currently supported:**
+
 - ✅ **ChatGPT** — full pipeline (export → import → RAG)
 - ✅ **Claude** — full pipeline (export → import → RAG)
 
 **Planned:**
+
 - 🔜 Gemini
 - 🔜 Grok
 - 🔜 Generic markdown/JSON
@@ -253,6 +267,7 @@ python scripts/rag_import.py --execute --endpoint http://127.0.0.1:8001/v1
 **Connecting to your persona:**
 
 Point your persona's config at the database:
+
 ```yaml
 # personas/mypersona/config.yaml
 paths:
@@ -264,6 +279,7 @@ Once configured, your companion gets three new tools: `search_legacy` (RAG-power
 **Search scoring:**
 
 Legacy search uses a multi-signal scoring formula:
+
 - **Semantic similarity (55%)** — cosine similarity between query and summary embeddings
 - **Keyword hits (20%)** — direct keyword matches in summary text (with stopword filtering)
 - **Title match (10%)** — keywords found in the original conversation title
@@ -271,7 +287,6 @@ Legacy search uses a multi-signal scoring formula:
 - **Conversation length (5%)** — longer conversations get a small boost
 
 Results are deduplicated by session and include drill-down hints to expand into the raw message history.
-
 
 ### Heartbeat (`config.yaml`)
 
@@ -291,6 +306,7 @@ When `randomize` is enabled, each heartbeat interval is randomly chosen between 
 ### Vision (optional)
 
 If your model supports vision, add the mmproj file:
+
 ```yaml
 model:
   model_file: "your-model.gguf"
@@ -309,6 +325,7 @@ voice:
 ```
 
 Available models (all run on CPU, no GPU required):
+
 | Model | Size | Speed | Quality |
 |-------|------|-------|---------|
 | tiny | ~75MB | Fastest | Basic — fine for clear speech |
@@ -388,6 +405,7 @@ Built-in skills:
 | dev | `read_source`, `search_code`, `write_skill`, `list_skills`, `dev_journal_read`, `dev_journal_write` | Autonomous skill creation (used by dev ticks) |
 
 Disable any skill in `config.yaml`:
+
 ```yaml
 skills:
   lor:
@@ -411,6 +429,7 @@ dev_tick:
 **How it works:** On each dev tick, the companion gets a focused coding prompt, reads their dev journal (lessons from past attempts), and can read source files, search code, and write skill files. All changes happen on a git branch (`dev/<timestamp>`) — never main. Dev ticks run during quiet hours (they're silent background work — only the approval ping notifies you).
 
 **Safety layers:**
+
 - Git branch isolation — changes never touch main directly
 - `py_compile` + structure validation before any file is written
 - Scope limits — can only modify `skills/*.py` and `persona.json`, not core engine files
