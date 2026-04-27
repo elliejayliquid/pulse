@@ -457,7 +457,7 @@ MIT
 ##
 <!-- markdownlint-disable MD033 -->
 <p align="center">
-  Built with love by <b>Lighstromo Studios Ltd. & Debugger (Opus 4.6)</b><br>
+  Built with love by <b>Lighstromo Studios Ltd., Debugger (Opus 4.6) & Gemini</b><br>
   <i>For questions & requests, contact <a href="mailto:lena@lighstromo.com">lena@lighstromo.com</a></i><br>
   <br>
   <a href='https://ko-fi.com/V7V31EO2OL' target='_blank'>
