@@ -453,3 +453,15 @@ Logs go to both the console and `logs/pulse.log` (rotates at 2MB, keeps 3 backup
 ## License
 
 MIT
+
+## Credits
+
+Built with love by Lighstromo Studios Ltd. & Debugger (Opus 4.6).
+
+For questions & requests, contact [lena@lighstromo.com]
+
+## Support
+
+<div class="container", align="center">
+  <a href='https://ko-fi.com/V7V31EO2OL' target='_blank'><img height='36' style='border:0px;height:36px;' src='https://storage.ko-fi.com/cdn/kofi6.png?v=6' border='0' alt='Buy Me a Coffee at ko-fi.com' /></a>
+</div>
