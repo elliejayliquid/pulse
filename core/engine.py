@@ -18,6 +18,7 @@ from pathlib import Path
 
 from core.llm import LLMClient, PulseResponse
 from core.llm_anthropic import AnthropicClient
+from core.llm_openai import OpenAIResponsesClient
 from core.context import ContextManager
 from core.scheduler import ScheduleManager
 
@@ -70,6 +71,20 @@ class PulseEngine:
                 api_key=api_key,
                 usage_tracker=usage_tracker,
                 cache_ttl=provider_config.get("cache_ttl", "5m"),
+            )
+        elif provider_type == "openai":
+            self.llm = OpenAIResponsesClient(
+                endpoint=endpoint,
+                model_name=model_name,
+                temperature=model_config.get("temperature", 0.7),
+                max_tokens=model_config.get("max_response_tokens", 1024),
+                top_p=model_config.get("top_p", 1.0),
+                frequency_penalty=model_config.get("frequency_penalty", 0.0),
+                presence_penalty=model_config.get("presence_penalty", 0.0),
+                api_key=api_key,
+                usage_tracker=usage_tracker,
+                reasoning=model_config.get("reasoning", False),
+                reasoning_effort=model_config.get("reasoning_effort", ""),
             )
         else:
             self.llm = LLMClient(
