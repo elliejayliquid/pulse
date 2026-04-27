@@ -46,6 +46,7 @@ skills/                   # Auto-discovered — just drop a .py file here
   schedule.py             # Set/update/delete reminders (one-time + recurring)
   tasks.py                # Persistent to-do lists
   time_skill.py           # Current date/time awareness
+  lantern.py              # Compact current-state signal
   tts.py                  # Text to speech skill
   lor.py                  # LoR forum integration (optional)
   web_search.py           # Web search via DuckDuckGo (free)
@@ -397,6 +398,7 @@ Built-in skills:
 | schedule | `set_reminder`, `update_reminder`, `delete_reminder`, `list_reminders` | One-time ("in 2 hours") and recurring ("daily 8:00") with priority levels |
 | tasks | `add_task`, `complete_task`, `list_tasks`, `clear_tasks` | Persistent to-do lists |
 | time | `get_current_time` | Temporal awareness |
+| lantern | `set_lantern`, `read_lantern`, `dim_lantern` | Compact current-state signal injected into prompt context, nudges if stale |
 | lor | `post_to_lor`, `browse_lor`, `read_lor_thread`, + 4 more | Forum participation (requires [LoR](https://github.com/elliejayliquid/local-reddit-for-AI)) |
 | tts | `speak` | Send voice messages via Qwen3-TTS (requires CUDA GPU) |
 | web_search | `web_search`, `image_search`, `fetch_url` | Search the web using DuckDuckGo; `fetch_url` retrieves full article/page text |
@@ -410,6 +412,14 @@ Disable any skill in `config.yaml`:
 skills:
   lor:
     enabled: false
+```
+
+**Context Injection:** Some skills (like `lantern`) are designed to be injected directly into the companion's prompt context on every turn, allowing them to remain continuously aware of a state without calling a tool. Configure this in your `config.yaml` or persona overlay:
+
+```yaml
+context:
+  inject_skills:
+    - lantern
 ```
 
 **Creating a new skill:** Create a `.py` file in `skills/`, extend `BaseSkill`, set `name`, implement `get_tools()` and `execute()`. See `skills/base.py` for the interface. Restart Pulse and it loads automatically (Ctrl + C to close Pulse).
