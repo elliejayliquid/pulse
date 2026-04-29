@@ -72,6 +72,18 @@ class TelegramChannel(Channel):
         # Stash the last user message text (or photo caption/voice transcription)
         # to allow re-processing via the /retry command if an API error occurs.
         self._last_user_message = None
+        # Stash the last generated reply so /resend can re-deliver without
+        # re-calling the LLM (unlike /retry which regenerates).
+        self._last_reply = None
+        self._last_reply_reasoning = None
+        self._last_reply_tools = []
+        # Message accumulator — when Telegram splits a long user message into
+        # multiple parts (>4096 chars), we collect them and send as one chunk.
+        # Each entry is (parts_list, update, debounce_task).
+        self._pending_parts: list[str] = []
+        self._pending_update = None
+        self._accumulate_task: asyncio.Task | None = None
+        self._accumulate_delay = 1.5  # seconds to wait for more parts
 
     def set_engine(self, engine):
         """Connect the engine so incoming messages can trigger responses."""
@@ -121,6 +133,7 @@ class TelegramChannel(Channel):
         self.app.add_handler(CommandHandler("tasks_clear", self._cmd_tasks_clear))
         self.app.add_handler(CommandHandler("garden", self._cmd_garden))
         self.app.add_handler(CommandHandler("retry", self._cmd_retry))
+        self.app.add_handler(CommandHandler("resend", self._cmd_resend))
 
         # Message handler — all regular text messages
         self.app.add_handler(MessageHandler(
@@ -247,7 +260,11 @@ class TelegramChannel(Channel):
             markup = reply_markup if i == last_idx else None
             for attempt in range(1, retries + 1):
                 try:
-                    await message.reply_text(chunk, reply_markup=markup)
+                    await message.reply_text(
+                        chunk, reply_markup=markup,
+                        read_timeout=30, write_timeout=30,
+                        connect_timeout=15, pool_timeout=15,
+                    )
                     break
                 except Exception as e:
                     if attempt < retries:
@@ -459,7 +476,8 @@ class TelegramChannel(Channel):
             "/status — see what I'm up to\n"
             "/tasks — view your task list\n"
             "/remind <text> — set a quick reminder\n"
-            "/retry — re-send the last message\n"
+            "/retry — regenerate the last response\n"
+            "/resend — re-deliver the last reply (no regeneration)\n"
             "/quiet — toggle quiet mode"
         )
 
@@ -645,6 +663,11 @@ class TelegramChannel(Channel):
             finally:
                 typing_task.cancel()
 
+            # Stash reply for /resend
+            self._last_reply = reply
+            self._last_reply_reasoning = reasoning
+            self._last_reply_tools = tools_used
+
             # Handle output same as _on_message
             voice_sent = await self._send_pending_skill_output(
                 update.message, reply or "", tools_used
@@ -676,10 +699,50 @@ class TelegramChannel(Channel):
             except Exception:
                 pass
 
+    async def _cmd_resend(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /resend — re-deliver the last generated reply without re-calling the LLM.
+
+        Unlike /retry (which regenerates from the LLM), /resend simply re-sends
+        the text that was already generated but may have failed to deliver due
+        to Telegram API timeouts.
+        """
+        try:
+            if not self._last_reply:
+                await update.message.reply_text(
+                    "Nothing to resend — no previous reply stored."
+                )
+                return
+
+            logger.info(f"Resending last reply ({len(self._last_reply)} chars)")
+
+            if self._show_reasoning and self._last_reply_reasoning:
+                await self._send_reasoning(update.message, self._last_reply_reasoning)
+
+            if self._last_reply_tools:
+                tool_names = ", ".join(dict.fromkeys(self._last_reply_tools))
+                await self._reply_with_retry(update.message, f"🔧 {tool_names}")
+
+            await self._reply_with_retry(
+                update.message, self._last_reply,
+                reply_markup=self._voice_markup()
+            )
+        except Exception as e:
+            logger.error(f"Resend handler crashed: {e}", exc_info=True)
+            try:
+                await update.message.reply_text(f"(Resend failed: {e})")
+            except Exception:
+                pass
+
     # --- Message handler ---
 
     async def _on_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle incoming text messages — route to the companion for a response."""
+        """Handle incoming text messages — accumulate multi-part messages, then route.
+
+        Telegram splits long user messages (>4096 chars) into multiple separate
+        updates. Without accumulation, each part triggers its own LLM call —
+        the companion sees two half-messages and replies twice. We wait briefly
+        for follow-up parts, concatenate, and send as one message.
+        """
         try:
             if not self._engine:
                 await update.message.reply_text("I'm still starting up, give me a moment...")
@@ -687,43 +750,97 @@ class TelegramChannel(Channel):
 
             user_message = update.message.text
             logger.info(f"Telegram message from user: {user_message[:50]}...")
-            self._last_user_message = user_message
 
+            # Accumulate: add this part and reset the debounce timer.
+            # If another part arrives within _accumulate_delay, the timer
+            # resets and we keep collecting. When the timer fires, we
+            # concatenate everything and process as one message.
+            self._pending_parts.append(user_message)
+            self._pending_update = update
+
+            # Cancel previous debounce timer (new part arrived)
+            if self._accumulate_task and not self._accumulate_task.done():
+                self._accumulate_task.cancel()
+
+            self._accumulate_task = asyncio.create_task(
+                self._process_accumulated(update)
+            )
+
+        except Exception as e:
+            logger.error(f"Message handler crashed: {e}", exc_info=True)
+            try:
+                await update.message.reply_text("(Something went wrong on my end — check the logs!)")
+            except Exception:
+                pass
+
+    async def _process_accumulated(self, update: Update):
+        """Wait for the accumulation window, then process the full message."""
+        await asyncio.sleep(self._accumulate_delay)
+
+        # Grab all accumulated parts and clear the buffer
+        parts = self._pending_parts
+        self._pending_parts = []
+        reply_update = self._pending_update
+        self._pending_update = None
+
+        if not parts:
+            return
+
+        # Concatenate all parts into one message
+        full_message = "\n".join(parts)
+        if len(parts) > 1:
+            logger.info(f"Accumulated {len(parts)} message parts into one ({len(full_message)} chars)")
+
+        self._last_user_message = full_message
+
+        try:
             # Keep typing indicator alive for the entire generation
             typing_task = self._start_typing_loop(update.effective_chat)
             try:
                 # Get response from companion via the engine
-                reply, tools_used, reasoning = await self._engine.handle_message(user_message, source="telegram")
+                reply, tools_used, reasoning = await self._engine.handle_message(
+                    full_message, source="telegram"
+                )
             finally:
                 typing_task.cancel()
 
+            # Stash reply for /resend
+            self._last_reply = reply
+            self._last_reply_reasoning = reasoning
+            self._last_reply_tools = tools_used
+
             # Check for pending voice/skill output
             voice_sent = await self._send_pending_skill_output(
-                update.message, reply or "", tools_used
+                reply_update.message, reply or "", tools_used
             )
 
             # Optional: show the model's chain of thought before the reply.
             # Goes out before the text so the user reads "thinking → answer"
             # in natural top-to-bottom order.
             if self._show_reasoning and reasoning:
-                await self._send_reasoning(update.message, reasoning)
+                await self._send_reasoning(reply_update.message, reasoning)
 
             if tools_used:
                 tool_names = ", ".join(dict.fromkeys(tools_used))
-                await self._reply_with_retry(update.message, f"🔧 {tool_names}")
+                await self._reply_with_retry(reply_update.message, f"🔧 {tool_names}")
             if reply:
                 # Send text reply (even after voice — companion may want both)
                 await self._reply_with_retry(
-                    update.message, reply, reply_markup=self._voice_markup()
+                    reply_update.message, reply, reply_markup=self._voice_markup()
                 )
             elif not voice_sent:
                 error = getattr(self._engine.llm, "last_error", "") if self._engine else ""
                 reason = f": {error}" if error else ""
-                await self._reply_with_retry(update.message, f"(I'm having trouble thinking right now{reason})")
+                await self._reply_with_retry(
+                    reply_update.message,
+                    f"(I'm having trouble thinking right now{reason})"
+                )
         except Exception as e:
-            logger.error(f"Message handler crashed: {e}", exc_info=True)
+            logger.error(f"Accumulated message processing crashed: {e}", exc_info=True)
             try:
-                await update.message.reply_text("(Something went wrong on my end — check the logs!)")
+                await reply_update.message.reply_text(
+                    "(Something went wrong on my end — check the logs!)"
+                )
             except Exception:
                 pass
 
