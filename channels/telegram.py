@@ -134,6 +134,7 @@ class TelegramChannel(Channel):
         self.app.add_handler(CommandHandler("garden", self._cmd_garden))
         self.app.add_handler(CommandHandler("retry", self._cmd_retry))
         self.app.add_handler(CommandHandler("resend", self._cmd_resend))
+        self.app.add_handler(CommandHandler("timeout", self._cmd_timeout))
 
         # Message handler — all regular text messages
         self.app.add_handler(MessageHandler(
@@ -637,6 +638,32 @@ class TelegramChannel(Channel):
             await self.send_photo(img_path, caption="Here is your garden! 🌿")
         else:
             await update.message.reply_text(f"Couldn't render the garden right now, but here's the view:\n\n{result}")
+
+    async def _cmd_timeout(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /timeout — check status or clear active timeout."""
+        if not self._engine:
+            await update.message.reply_text("Engine not connected yet.")
+            return
+
+        text = update.message.text.replace("/timeout", "").strip()
+        if text.lower() == "clear":
+            if self._engine._lift_timeout(note="admin_override", lifted_by="admin_override"):
+                await update.message.reply_text("✅ Timeout cleared.")
+            else:
+                await update.message.reply_text("No active timeout to clear.")
+            return
+
+        timeout = self._engine._check_timeout_state()
+        if not timeout:
+            await update.message.reply_text("No active timeout.")
+            return
+
+        msg = self._engine._format_timeout_message(timeout)
+        history = self._engine.db.get_timeout_history(limit=5) if self._engine.db else []
+        count = len(history)
+        
+        status = f"Current Status:\n{msg}\n\n(Total timeouts with this user: {count})"
+        await update.message.reply_text(status)
 
     async def _cmd_retry(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /retry — re-process the last user message."""

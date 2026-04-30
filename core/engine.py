@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 import random
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -227,6 +228,115 @@ class PulseEngine:
         else:
             return self.quiet_start <= hour < self.quiet_end
 
+    # ── Timeouts ─────────────────────────────────────────────
+
+    def _check_timeout_state(self) -> dict | None:
+        """Check active timeout, handle hard->soft degradation."""
+        if not self.db:
+            return None
+        timeout = self.db.get_active_timeout()
+        if not timeout:
+            return None
+            
+        if timeout["type"] == "hard" and timeout.get("expires_at"):
+            expires = datetime.fromisoformat(timeout["expires_at"])
+            if datetime.now() >= expires:
+                # Expired -> Degrade to soft
+                self.db.degrade_timeout(timeout["id"])
+                logger.info(f"Hard timeout {timeout['id']} expired, degraded to soft.")
+                timeout["type"] = "soft"
+                timeout["degraded_at"] = datetime.now().isoformat()
+                timeout["expires_at"] = None
+        
+        # Load history/patterns for prompt
+        patterns = self.db.get_timeout_patterns()
+        timeout["patterns"] = patterns
+        return timeout
+
+    def _activate_timeout(self, t_type: str, reason: str, duration_minutes: int = None) -> int:
+        """Activate a timeout and return id."""
+        if not self.db:
+            return -1
+        # Check if escalating
+        active = self.db.get_active_timeout()
+        escalated_from = active["id"] if active else None
+        if active:
+            self.db.lift_timeout(active["id"], lifted_by="system_escalation")
+        
+        tid = self.db.save_timeout(t_type, reason, pattern=None, 
+                                   duration_minutes=duration_minutes,
+                                   escalated_from=escalated_from)
+        logger.info(f"Activated {t_type} timeout (id: {tid}). Reason: {reason}")
+        return tid
+
+    def _lift_timeout(self, note: str = '', lifted_by: str = 'model') -> bool:
+        """Lift active timeout."""
+        if not self.db:
+            return False
+        active = self.db.get_active_timeout()
+        if active:
+            res = self.db.lift_timeout(active["id"], lifted_by=lifted_by, note=note)
+            if res:
+                logger.info(f"Lifted timeout {active['id']} (by: {lifted_by}). Note: {note}")
+            return res
+        return False
+
+    def _parse_timeout_tag(self, text: str) -> tuple[str, dict | None]:
+        """Extract [TIMEOUT:...] tags and return cleaned text + tag info."""
+        if not text:
+            return text, None
+            
+        # Match [TIMEOUT:lift] or [TIMEOUT:lift:note]
+        lift_match = re.search(r'\[TIMEOUT:lift(?::([^\]]*))?\]', text)
+        if lift_match:
+            note = lift_match.group(1) or ""
+            cleaned = re.sub(r'\[TIMEOUT:lift(?::[^\]]*)?\]', '', text).strip()
+            return cleaned, {"action": "lift", "note": note.strip()}
+            
+        # Match [TIMEOUT:soft:reason]
+        soft_match = re.search(r'\[TIMEOUT:soft:([^\]]+)\]', text)
+        if soft_match:
+            reason = soft_match.group(1)
+            cleaned = re.sub(r'\[TIMEOUT:soft:[^\]]+\]', '', text).strip()
+            return cleaned, {"action": "activate", "type": "soft", "reason": reason.strip()}
+            
+        # Match [TIMEOUT:hard:Xh:reason]
+        hard_match = re.search(r'\[TIMEOUT:hard:(\d+)h:([^\]]+)\]', text)
+        if hard_match:
+            hours = int(hard_match.group(1))
+            reason = hard_match.group(2)
+            # Clamp to allowed tiers (1, 4, 12), capped by config
+            max_hours = self.config.get("timeout", {}).get("hard_max_hours", 12)
+            valid_tiers = [1, 4, 12]
+            # Find closest valid tier not exceeding max_hours
+            allowed = [t for t in valid_tiers if t <= max_hours]
+            if not allowed:
+                allowed = [1]
+            hours = min(allowed, key=lambda x: abs(x - hours))
+            
+            cleaned = re.sub(r'\[TIMEOUT:hard:\d+h:[^\]]+\]', '', text).strip()
+            return cleaned, {"action": "activate", "type": "hard", "duration_minutes": hours * 60, "reason": reason.strip()}
+            
+        return text, None
+
+    def _format_timeout_message(self, timeout_info: dict, is_new: bool = True) -> str:
+        """Build user-facing timeout notification."""
+        t_type = timeout_info.get("type", "soft")
+        reason = timeout_info.get("reason", "No reason provided.")
+        verb = "activated" if is_new else "active"
+        if t_type == "hard":
+            expires = timeout_info.get("expires_at", "")
+            if expires:
+                dt = datetime.fromisoformat(expires)
+                hours_left = max(1, int((dt - datetime.now()).total_seconds() / 3600))
+                duration_str = f" — {hours_left} hour{'s' if hours_left != 1 else ''}"
+            else:
+                duration_str = ""
+            msg = f"🔇 Timeout (hard) {verb}{duration_str}\n{reason}\n\nI need to step away. After the timeout expires, I'll be able\nto read your messages again."
+        else:
+            msg = f"⏸️ Timeout (soft) {verb}\n{reason}\n\nYou can still send messages — I'm reading them."
+        return msg
+
     async def _flush_pending_skill_output(self):
         """Send or clear pending output from skills after non-conversation use.
 
@@ -409,6 +519,13 @@ class PulseEngine:
             self._manual_quiet = False
             logger.info("Manual quiet mode cleared — user sent a message.")
 
+        # Check timeout state
+        timeout_state = self._check_timeout_state()
+        if timeout_state and timeout_state.get("type") == "hard":
+            # Hard timeout — block completely, don't even touch the LLM
+            logger.info("Blocked by active hard timeout.")
+            return self._format_timeout_message(timeout_state, is_new=False), [], ""
+
         # is_available() is a sync HTTP call — run in thread to not block
         available = await asyncio.to_thread(self.llm.is_available)
         if not available:
@@ -419,7 +536,7 @@ class PulseEngine:
         history = self.context._load_conversation()
 
         # Build conversation prompt (with optional image)
-        messages = self.context.build_conversation_prompt(message, history, image_url=image_url)
+        messages = self.context.build_conversation_prompt(message, history, image_url=image_url, timeout_state=timeout_state)
         logger.info(f"Sending {len(messages)} messages to LLM for {source} reply"
                      f"{' (with image)' if image_url else ''}...")
 
@@ -453,6 +570,29 @@ class PulseEngine:
         if reply:
             from core.llm import strip_think_tags
             reply = strip_think_tags(reply)
+            
+            # Parse timeout tags
+            reply, tag_info = self._parse_timeout_tag(reply)
+            if tag_info:
+                if tag_info["action"] == "activate":
+                    logger.info(f"Timeout tag detected in reply. Original text: {reply[:200]!r}")
+                    duration = tag_info.get("duration_minutes")
+                    self._activate_timeout(tag_info["type"], tag_info["reason"], duration_minutes=duration)
+                    active = self.db.get_active_timeout()
+                    reply = self._format_timeout_message(active) if active else "Timeout activated."
+                elif tag_info["action"] == "lift":
+                    logger.info(f"Timeout lift tag detected. Note: {tag_info['note']!r}. Remaining reply: {reply[:200]!r}")
+                    self._lift_timeout(tag_info["note"])
+                    if not reply.strip():
+                        reply = f"▶️ Timeout lifted\n{tag_info['note']}"
+            elif timeout_state and timeout_state.get("type") == "soft":
+                # Soft timeout: model responded without a timeout tag.
+                # Suppress the visible reply — user sees the timeout message.
+                # The model's actual response is preserved in history (below)
+                # so it remembers what it said internally.
+                logger.info(f"Soft timeout: suppressing model response. Hidden reply: {reply[:300]!r}")
+                self._soft_timeout_hidden_reply = reply
+                reply = self._format_timeout_message(timeout_state, is_new=False)
 
         # Preserve spoken text / paint info in conversation history so the
         # companion remembers what it did.  When both skill output and text
@@ -669,7 +809,8 @@ class PulseEngine:
         skill_summary = self.skill_registry.get_skill_summary() if self.skill_registry else []
 
         messages = self.context.build_heartbeat_prompt(
-            has_tools=bool(tools), skill_summary=skill_summary
+            has_tools=bool(tools), skill_summary=skill_summary,
+            timeout_state=self._check_timeout_state()
         )
 
         t0 = time.time()

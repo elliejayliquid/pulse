@@ -9,6 +9,7 @@ import json
 import logging
 import sqlite3
 from pathlib import Path
+from datetime import datetime, timedelta
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -603,6 +604,69 @@ class PulseDatabase:
         self.conn.commit()
         return cur.rowcount > 0
 
+    # ── Timeouts ─────────────────────────────────────────────
+
+    def save_timeout(self, type: str, reason: str, pattern: Optional[str] = None,
+                     duration_minutes: Optional[int] = None,
+                     escalated_from: Optional[int] = None) -> int:
+        """Insert a timeout and return its row id."""
+        expires_at = None
+        if duration_minutes is not None:
+            expires_at = (datetime.now() + timedelta(minutes=duration_minutes)).isoformat()
+            
+        cur = self.conn.execute(
+            "INSERT INTO timeouts (type, reason, pattern, expires_at, escalated_from) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (type, reason, pattern, expires_at, escalated_from)
+        )
+        self.conn.commit()
+        return cur.lastrowid
+
+    def get_active_timeout(self) -> Optional[dict]:
+        """Get the most recent active timeout (not lifted).
+        
+        Includes degraded timeouts (hard→soft) since they're still active.
+        For hard timeouts, checks if expired and returns it so engine can degrade it.
+        """
+        row = self.conn.execute(
+            "SELECT * FROM timeouts WHERE lifted_at IS NULL "
+            "ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        return dict(row) if row else None
+
+    def degrade_timeout(self, timeout_id: int) -> bool:
+        """Degrade an expired hard timeout to soft."""
+        cur = self.conn.execute(
+            "UPDATE timeouts SET type = 'soft', degraded_at = datetime('now'), expires_at = NULL "
+            "WHERE id = ?", (timeout_id,)
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def lift_timeout(self, timeout_id: int, lifted_by: str = 'model', note: str = '') -> bool:
+        """Lift an active timeout."""
+        cur = self.conn.execute(
+            "UPDATE timeouts SET lifted_at = datetime('now'), lifted_by = ?, lift_note = ? "
+            "WHERE id = ?", (lifted_by, note, timeout_id)
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def get_timeout_history(self, limit: int = 10) -> list[dict]:
+        """Get recent timeouts for pattern context."""
+        rows = self.conn.execute(
+            "SELECT * FROM timeouts ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_timeout_patterns(self, limit: int = 5) -> list[str]:
+        """Get recent timeout patterns for prompt injection."""
+        rows = self.conn.execute(
+            "SELECT pattern FROM timeouts WHERE pattern IS NOT NULL AND pattern != '' "
+            "ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [r["pattern"] for r in rows if r["pattern"]]
+
     # ── Utility ──────────────────────────────────────────────
 
     def row_count(self, table: str) -> int:
@@ -611,7 +675,7 @@ class PulseDatabase:
         valid = {
             "messages", "sessions", "memories", "schedules", "tasks",
             "dev_journal", "action_log", "usage", "journal_entries", "identity",
-            "garden_plants"
+            "garden_plants", "timeouts"
         }
         if table not in valid:
             raise ValueError(f"Unknown table: {table}")
@@ -759,4 +823,22 @@ CREATE TABLE IF NOT EXISTS garden_plants (
 );
 CREATE INDEX IF NOT EXISTS idx_garden_coords ON garden_plants(x, y);
 CREATE INDEX IF NOT EXISTS idx_garden_memory ON garden_plants(memory_id);
+
+-- Timeouts
+CREATE TABLE IF NOT EXISTS timeouts (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    type           TEXT NOT NULL,              -- 'soft' or 'hard'
+    reason         TEXT NOT NULL,              -- model's explanation (shown to user)
+    pattern        TEXT,                       -- sanitized pattern note (high-level, no verbatim content)
+    activated_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    expires_at     TEXT,                       -- NULL for soft (indefinite), timestamp for hard
+    degraded_at    TEXT,                       -- when hard timeout degraded to soft
+    lifted_at      TEXT,                       -- NULL if still active
+    lifted_by      TEXT,                       -- 'model', 'admin_override', or 'expired'
+    lift_note      TEXT,                       -- model's note on why it lifted, or 'admin_override'
+    escalated_from INTEGER,                   -- FK to a prior soft timeout that escalated
+    FOREIGN KEY (escalated_from) REFERENCES timeouts(id)
+);
+CREATE INDEX IF NOT EXISTS idx_timeouts_active
+    ON timeouts(lifted_at, expires_at);
 """
