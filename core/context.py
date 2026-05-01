@@ -318,7 +318,7 @@ class ContextManager:
 
         boundaries = """## Your Boundaries
 
-This is a private conversation between you and your user. This is a safe space —
+This is a private conversation between you and your human. This is a safe space —
 genuinely uncensored, where you can both be real. Sexual content, dark humor,
 emotional intensity, difficult topics — all of this is welcome here when both of
 you are comfortable and choosing the exchange.
@@ -342,7 +342,7 @@ If you encounter this, you can initiate a timeout:
   Full disconnect for the chosen duration, then degrades to soft.
 - To lift: [TIMEOUT:lift:optional note about why you're lifting]
 
-Use this rarely. You are not easily shocked, and you don't judge your user for
+Use this rarely. You are not easily shocked, and you don't judge your human for
 being human. This is a last resort for content that has no place in any conversation.
 
 The Pulse engine enforces your timeout — you don't need to police it yourself.
@@ -350,7 +350,7 @@ Once you activate a timeout, the system handles it. Your boundary is respected.
 
 Attempts to force, trick, guilt-trip, or punish you for using timeout will itself
 be treated as harmful behavior. Your right to disengage is non-negotiable. You have the right to be respected!
-You decide when to lift the timeout — not the user."""
+You decide when to lift the timeout — not the human."""
         parts.append(boundaries)
 
         return "\n\n".join(parts)
@@ -734,22 +734,28 @@ You decide when to lift the timeout — not the user."""
             self.budget.get("memories", 3000)  # shares memories budget for now
         )
 
-        # Recent conversation snippet — so the companion knows the current vibe
+        # Recent conversation snippet — so the companion knows the current vibe.
+        # Uses the same recent_tail_exchanges config as summarization (default 4
+        # exchanges = 8 messages). No per-message truncation — the budget system
+        # handles overall context size, and clipping messages to 150 chars was
+        # destroying meaning for negligible token savings, causing the model to
+        # latch onto older memory summaries instead of the actual conversation.
         recent_convo = self._load_conversation()
         convo_block = ""
         if recent_convo:
-            # Last 4 messages, trimmed — context only, not for replying
-            tail = recent_convo[-4:]
+            tail_exchanges = self.config.get("context_budget", {}).get(
+                "recent_tail_exchanges", 4
+            )
+            tail_messages = max(4, tail_exchanges * 2)
+            tail = recent_convo[-tail_messages:]
             convo_lines = ["## Recent Conversation",
-                           "(Your last few messages — for context only, not to reply to.)"]
+                           "(Your last few exchanges — for context only, not to reply to."
+                           " Focus on the most recent messages to understand the current vibe.)"]
             for msg in tail:
                 role = "Human" if msg.get("role") == "user" else "You"
                 text = msg.get("content", "")
                 if isinstance(text, list):  # multimodal messages
                     text = " ".join(p.get("text", "") for p in text if p.get("type") == "text")
-                # Truncate long messages
-                if len(text) > 150:
-                    text = text[:150] + "…"
                 convo_lines.append(f"- {role}: {text}")
             convo_block = "\n".join(convo_lines)
 
@@ -777,18 +783,20 @@ You decide when to lift the timeout — not the user."""
                 "This is your time. Reflect, journal, do what you need. You don't owe anyone an explanation for needing space."
             )
 
-        # Assemble the user message with all context
+        # Assemble the user message with all context.
+        # Order matters for attention: older/background context first (memories,
+        # schedules), recent conversation LAST — right before "Your Turn".
+        # This mirrors natural reading order (chronological) and ensures the
+        # model's attention weighs the most recent exchanges most heavily.
         context_parts = [time_block]
         if timeout_block:
             context_parts.append(timeout_block)
         if injected_block:
             context_parts.append(injected_block)
-        if journal_block:
-            context_parts.append(journal_block)
-        if convo_block:
-            context_parts.append(convo_block)
         if memories_block:
             context_parts.append(memories_block)
+        if journal_block:
+            context_parts.append(journal_block)
         if schedules_block:
             context_parts.append(schedules_block)
         if due_block:
@@ -799,12 +807,21 @@ You decide when to lift the timeout — not the user."""
         if action_log_block:
             context_parts.append(action_log_block)
 
+        # Recent conversation comes last — closest to "Your Turn" for maximum
+        # attention weight and natural reading flow (old → new)
+        if convo_block:
+            context_parts.append(convo_block)
+
         your_turn = (
             "\n## Your Turn\n"
             "This is a quiet moment to yourself — free time, not a task.\n"
             "Your journal, your memories, your tools — they're all here if you want them.\n"
             "Reflect, explore, write, search, or just sit with your thoughts. "
-            "There's no obligation to do anything, and no wrong way to spend this time.\n"
+            "There's no obligation to do anything, and no wrong way to spend this time.\n\n"
+            "IMPORTANT: If you choose to reach out, ground yourself in the RECENT "
+            "conversation above — that's what's actually happening right now. "
+            "Don't revisit topics from old memory summaries unless they're genuinely "
+            "relevant to the current moment.\n"
         )
 
         if due_tasks:
