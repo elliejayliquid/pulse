@@ -8,6 +8,7 @@ from datetime import datetime
 from difflib import SequenceMatcher
 from skills.base import BaseSkill
 
+
 class TasksSkill(BaseSkill):
     name = "tasks"
 
@@ -64,6 +65,20 @@ class TasksSkill(BaseSkill):
             {
                 "type": "function",
                 "function": {
+                    "name": "delete_task",
+                    "description": "Delete a single task by ID without marking it as completed. Use this to remove stale, mistaken, or unwanted tasks cleanly.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "task_id": {"type": "integer", "description": "The ID of the task to delete."}
+                        },
+                        "required": ["task_id"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
                     "name": "list_tasks",
                     "description": "List all current tasks, showing their status and IDs. IMPORTANT: Always show the full task list to the user — do not summarize or omit tasks.",
                     "parameters": {
@@ -94,7 +109,7 @@ class TasksSkill(BaseSkill):
             if tool_name == "add_task":
                 description = arguments["task"]
                 list_name = arguments.get("list_name", "Daily")
-                
+
                 # Dedup: check if a similar pending task already exists in DB
                 pending = db.get_tasks(completed=False)
                 for existing in pending:
@@ -103,7 +118,7 @@ class TasksSkill(BaseSkill):
                             f"Similar task already exists: [{existing['id']}] "
                             f"{existing['description']} — not adding duplicate."
                         )
-                
+
                 task_id = db.add_task(description, list_name)
                 return f"Task added: [{task_id}] {description}"
 
@@ -113,12 +128,22 @@ class TasksSkill(BaseSkill):
                 target = next((t for t in tasks if t["id"] == task_id), None)
                 if not target:
                     return f"Task with ID {task_id} not found."
-                
+
                 if target["completed"]:
                     return f"Task {task_id} is already completed."
-                
+
                 db.complete_task(task_id)
                 return f"Task completed: {target['description']}."
+
+            elif tool_name == "delete_task":
+                task_id = arguments["task_id"]
+                tasks = db.get_tasks()
+                target = next((t for t in tasks if t["id"] == task_id), None)
+                if not target:
+                    return f"Task with ID {task_id} not found."
+
+                db.delete_task(task_id)
+                return f"Task deleted: [{task_id}] {target['description']}."
 
             elif tool_name == "list_tasks":
                 show_completed = arguments.get("show_completed", False)
@@ -134,8 +159,6 @@ class TasksSkill(BaseSkill):
                 return output
 
             elif tool_name == "clear_tasks":
-                # DB doesn't really need "repacking" IDs since it's an autoincrement PK,
-                # but we'll follow the logical intent: remove completed tasks.
                 completed = db.get_tasks(completed=True)
                 for t in completed:
                     db.delete_task(t["id"])
@@ -184,6 +207,15 @@ class TasksSkill(BaseSkill):
                     return f"Task completed: {task['description']}."
             return f"Task with ID {task_id} not found."
 
+        elif tool_name == "delete_task":
+            task_id = arguments["task_id"]
+            for index, task in enumerate(data["tasks"]):
+                if task["id"] == task_id:
+                    removed = data["tasks"].pop(index)
+                    self._write_tasks(data)
+                    return f"Task deleted: [{task_id}] {removed['description']}."
+            return f"Task with ID {task_id} not found."
+
         elif tool_name == "list_tasks":
             show_completed = arguments.get("show_completed", False)
             tasks = data["tasks"]
@@ -193,7 +225,6 @@ class TasksSkill(BaseSkill):
             if not tasks:
                 return "The task list is empty."
 
-            # Plain version for the LLM
             output = "Current Tasks:\n"
             for t in tasks:
                 status = "[x]" if t["completed"] else "[ ]"
@@ -201,27 +232,25 @@ class TasksSkill(BaseSkill):
             return output
 
         elif tool_name == "clear_tasks":
-            remaining = [t for t in data["tasks"] if not t["completed"]]
-            cleared = len(data["tasks"]) - len(remaining)
-            # Repack IDs so they stay low and readable
-            for i, task in enumerate(remaining, start=1):
-                task["id"] = i
-            data["tasks"] = remaining
-            data["next_id"] = len(remaining) + 1
+            before = len(data["tasks"])
+            data["tasks"] = [t for t in data["tasks"] if not t["completed"]]
+            cleared = before - len(data["tasks"])
             self._write_tasks(data)
-            return f"Cleared {cleared} completed task(s). {len(remaining)} remaining, IDs repacked."
+            return f"Cleared {cleared} completed task(s)."
 
         return f"Unknown tool: {tool_name}"
 
     @staticmethod
     def _tasks_similar(a: str, b: str) -> bool:
-        """Check if two task descriptions are similar enough to be duplicates."""
-        na = a.lower().strip()
-        nb = b.lower().strip()
-        if na == nb:
+        """Return True if two task descriptions are close enough to be likely duplicates."""
+        a_norm = " ".join(a.lower().strip().split())
+        b_norm = " ".join(b.lower().strip().split())
+
+        if not a_norm or not b_norm:
+            return False
+        if a_norm == b_norm:
             return True
-        # One contains the other
-        if na in nb or nb in na:
-            return True
-        # String similarity
-        return SequenceMatcher(None, na, nb).ratio() >= 0.75
+        if a_norm in b_norm or b_norm in a_norm:
+            return min(len(a_norm), len(b_norm)) >= 12
+
+        return SequenceMatcher(None, a_norm, b_norm).ratio() >= 0.88
