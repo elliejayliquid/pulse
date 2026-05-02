@@ -25,8 +25,11 @@ logger = logging.getLogger(__name__)
 WRITABLE_PATHS = {"skills"}
 WRITABLE_FILES = {"persona.json"}
 
-# Safety: never touch these
-BLOCKED_PATHS = {"core", ".git", ".env", "node_modules", "__pycache__"}
+# Paths to skip during search/listing (dependencies, caches, VCS)
+SKIP_PATHS = {".git", ".venv", "venv", "node_modules", "__pycache__", ".vs"}
+
+# Files that can never be deleted even within writable paths
+PROTECTED_FILES = {"base.py", "__init__.py"}
 
 
 def _is_readable(filepath: str, pulse_root: str) -> bool:
@@ -209,6 +212,124 @@ class DevSkill(BaseSkill):
                     },
                 },
             },
+            {
+                "type": "function",
+                "function": {
+                    "name": "list_dir",
+                    "description": (
+                        "List files and directories in the Pulse project. "
+                        "Use this to explore the project structure and discover files. "
+                        "Path is relative to the Pulse root (use '.' for root)."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "Relative directory path (e.g. '.', 'skills', 'core', 'channels'). Default: '.'",
+                            },
+                        },
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "edit_file",
+                    "description": (
+                        "Edit a file by finding and replacing a specific block of text. "
+                        "More efficient than write_skill for small changes. "
+                        "The target text must match EXACTLY (including whitespace/indentation). "
+                        "Can only edit files in skills/*.py and persona.json."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "Relative path to edit (e.g. 'skills/memory.py')",
+                            },
+                            "target": {
+                                "type": "string",
+                                "description": "Exact text block to find (must match exactly once)",
+                            },
+                            "replacement": {
+                                "type": "string",
+                                "description": "Text to replace the target with",
+                            },
+                            "description": {
+                                "type": "string",
+                                "description": "Brief description of the edit",
+                            },
+                        },
+                        "required": ["path", "target", "replacement", "description"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "validate_file",
+                    "description": (
+                        "Check a Python file for syntax errors and skill structure issues "
+                        "WITHOUT writing anything. Use this to verify code before editing, "
+                        "or to diagnose problems with an existing file."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "Relative path to check (e.g. 'skills/memory.py')",
+                            },
+                        },
+                        "required": ["path"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "test_skill",
+                    "description": (
+                        "Dry-run a skill file: import it, instantiate the class, "
+                        "and verify get_tools() returns valid definitions. "
+                        "Catches import errors, missing dependencies, and broken constructors. "
+                        "Use this after writing or editing a skill to verify it will load."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "Relative path to the skill file (e.g. 'skills/my_skill.py')",
+                            },
+                        },
+                        "required": ["path"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "delete_file",
+                    "description": (
+                        "Delete a file from the project. Can only delete files in "
+                        "skills/*.py (except base.py and __init__.py). "
+                        "Use this to clean up broken or abandoned skill files."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "Relative path to delete (e.g. 'skills/broken_skill.py')",
+                            },
+                        },
+                        "required": ["path"],
+                    },
+                },
+            },
         ]
 
     def execute(self, tool_name: str, arguments: dict) -> str:
@@ -231,6 +352,21 @@ class DevSkill(BaseSkill):
             return self._read_dev_journal()
         elif tool_name == "dev_journal_write":
             return self._write_dev_journal(arguments.get("entry", ""))
+        elif tool_name == "list_dir":
+            return self._list_dir(arguments.get("path", "."))
+        elif tool_name == "edit_file":
+            return self._edit_file(
+                arguments.get("path", ""),
+                arguments.get("target", ""),
+                arguments.get("replacement", ""),
+                arguments.get("description", ""),
+            )
+        elif tool_name == "validate_file":
+            return self._validate_file(arguments.get("path", ""))
+        elif tool_name == "test_skill":
+            return self._test_skill(arguments.get("path", ""))
+        elif tool_name == "delete_file":
+            return self._delete_file(arguments.get("path", ""))
         return f"Unknown tool: {tool_name}"
 
     def _read_source(self, path: str) -> str:
@@ -271,7 +407,7 @@ class DevSkill(BaseSkill):
             # Skip blocked paths
             try:
                 rel = filepath.relative_to(root)
-                if any(part in BLOCKED_PATHS for part in rel.parts):
+                if any(part in SKIP_PATHS for part in rel.parts):
                     continue
             except ValueError:
                 continue
@@ -452,3 +588,201 @@ class DevSkill(BaseSkill):
             return "Journal entry saved."
         except Exception as e:
             return f"Error saving journal entry: {e}"
+
+    def _list_dir(self, path: str = ".") -> str:
+        """List directory contents within the Pulse project."""
+        target = (Path(self._pulse_root) / path).resolve()
+        root = Path(self._pulse_root).resolve()
+
+        if not str(target).startswith(str(root)):
+            return f"Error: '{path}' is outside the project directory."
+        if not target.exists():
+            return f"Error: '{path}' does not exist."
+        if not target.is_dir():
+            return f"Error: '{path}' is not a directory. Use read_source to view files."
+
+        lines = [f"Contents of {path}/"]
+        try:
+            entries = sorted(target.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+            for entry in entries:
+                if entry.name in SKIP_PATHS:
+                    continue
+                if entry.is_dir():
+                    try:
+                        count = sum(1 for _ in entry.iterdir())
+                    except PermissionError:
+                        count = "?"
+                    lines.append(f"  {entry.name}/ ({count} items)")
+                else:
+                    size = entry.stat().st_size
+                    if size >= 1024:
+                        size_str = f"{size / 1024:.1f} KB"
+                    else:
+                        size_str = f"{size} B"
+                    lines.append(f"  {entry.name} ({size_str})")
+        except PermissionError:
+            return f"Error: permission denied for '{path}'."
+
+        if len(lines) == 1:
+            lines.append("  (empty)")
+
+        return "\n".join(lines)
+
+    def _edit_file(self, path: str, target: str, replacement: str, description: str) -> str:
+        """Edit a file by finding and replacing a specific block of text."""
+        if not path or not target:
+            return "Error: path and target are required."
+
+        full_path = Path(self._pulse_root) / path
+        if not _is_writable(str(full_path), self._pulse_root):
+            return (
+                f"BLOCKED: Cannot edit '{path}'. "
+                f"You can only edit: skills/*.py (except base.py, __init__.py) "
+                f"and persona.json."
+            )
+
+        if not full_path.exists():
+            return f"Error: file '{path}' does not exist. Use write_skill to create new files."
+
+        try:
+            content = full_path.read_text(encoding="utf-8")
+        except Exception as e:
+            return f"Error reading '{path}': {e}"
+
+        count = content.count(target)
+        if count == 0:
+            return (
+                f"Error: target text not found in '{path}'. "
+                f"Make sure you match the exact text including whitespace."
+            )
+        if count > 1:
+            return (
+                f"Error: target text found {count} times in '{path}'. "
+                f"Provide a longer/more specific target to match exactly once."
+            )
+
+        new_content = content.replace(target, replacement, 1)
+
+        if path.endswith(".py"):
+            validation = self._validate_python(new_content, path)
+            if not validation.startswith("OK"):
+                return f"VALIDATION FAILED — file not modified.\n{validation}"
+
+        try:
+            full_path.write_text(new_content, encoding="utf-8")
+            logger.info(f"Dev skill edited: {path} — {description}")
+            return (
+                f"FILE EDITED: {path}\n"
+                f"Replaced {len(target)} chars with {len(replacement)} chars.\n"
+                f"Description: {description}"
+            )
+        except Exception as e:
+            return f"Error writing '{path}': {e}"
+
+    def _delete_file(self, path: str) -> str:
+        """Delete a file with safety checks."""
+        if not path:
+            return "Error: path is required."
+
+        full_path = Path(self._pulse_root) / path
+        if not _is_writable(str(full_path), self._pulse_root):
+            return (
+                f"BLOCKED: Cannot delete '{path}'. "
+                f"You can only delete files in: skills/*.py "
+                f"(except base.py and __init__.py)."
+            )
+
+        if not full_path.exists():
+            return f"Error: file '{path}' does not exist."
+
+        if full_path.name in PROTECTED_FILES:
+            return f"BLOCKED: '{full_path.name}' is a protected core file and cannot be deleted."
+
+        try:
+            full_path.unlink()
+            logger.info(f"Dev skill deleted: {path}")
+            return f"FILE DELETED: {path}\nThe skill will be unloaded on next restart."
+        except Exception as e:
+            return f"Error deleting '{path}': {e}"
+
+    def _validate_file(self, path: str) -> str:
+        """Standalone syntax and structure check on a Python file."""
+        if not path:
+            return "Error: path is required."
+
+        full_path = Path(self._pulse_root) / path
+        if not _is_readable(str(full_path), self._pulse_root):
+            return f"Error: cannot read '{path}' — outside allowed directory or blocked."
+        if not full_path.exists():
+            return f"Error: file '{path}' does not exist."
+        if not path.endswith(".py"):
+            return f"Error: validate_file only works on Python files."
+
+        try:
+            content = full_path.read_text(encoding="utf-8")
+        except Exception as e:
+            return f"Error reading '{path}': {e}"
+
+        return self._validate_python(content, path)
+
+    def _test_skill(self, path: str) -> str:
+        """Dry-run import and instantiation of a skill file."""
+        import subprocess
+        import sys
+
+        if not path:
+            return "Error: path is required."
+        if not path.startswith("skills/") or not path.endswith(".py"):
+            return "Error: test_skill only works on skills/*.py files."
+
+        full_path = Path(self._pulse_root) / path
+        if not full_path.exists():
+            return f"Error: file '{path}' does not exist."
+
+        # Build a test script that imports and instantiates the skill
+        module_name = path.replace("/", ".").replace(".py", "")
+        test_script = (
+            "import sys, json\n"
+            "sys.path.insert(0, {root!r})\n"
+            "try:\n"
+            "    import importlib, inspect\n"
+            "    from skills.base import BaseSkill\n"
+            "    mod = importlib.import_module({mod!r})\n"
+            "    classes = [\n"
+            "        (name, cls) for name, cls in inspect.getmembers(mod, inspect.isclass)\n"
+            "        if issubclass(cls, BaseSkill) and cls is not BaseSkill\n"
+            "    ]\n"
+            "    if not classes:\n"
+            "        print('FAIL: No BaseSkill subclass found in module.')\n"
+            "        sys.exit(1)\n"
+            "    for name, cls in classes:\n"
+            "        skill_name = getattr(cls, 'name', None)\n"
+            "        if not skill_name:\n"
+            "            print(f'FAIL: {{name}} has no `name` class attribute.')\n"
+            "            sys.exit(1)\n"
+            "        instance = cls({{}})\n"
+            "        tools = instance.get_tools()\n"
+            "        tool_names = [t['function']['name'] for t in tools]\n"
+            "        print(f'OK: {{name}} (skill={{skill_name!r}}) — {{len(tools)}} tools: {{tool_names}}')\n"
+            "except Exception as e:\n"
+            "    print(f'FAIL: {{type(e).__name__}}: {{e}}')\n"
+            "    sys.exit(1)\n"
+        ).format(root=self._pulse_root, mod=module_name)
+
+        try:
+            result = subprocess.run(
+                [sys.executable, "-c", test_script],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                cwd=self._pulse_root,
+            )
+            output = (result.stdout + result.stderr).strip()
+            if result.returncode == 0:
+                return f"TEST PASSED:\n{output}"
+            else:
+                return f"TEST FAILED:\n{output}"
+        except subprocess.TimeoutExpired:
+            return "TEST FAILED: Skill took too long to load (>10s). Possible infinite loop?"
+        except Exception as e:
+            return f"TEST ERROR: {e}"
