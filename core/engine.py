@@ -536,7 +536,11 @@ class PulseEngine:
         history = self.context._load_conversation()
 
         # Build conversation prompt (with optional image)
-        messages = self.context.build_conversation_prompt(message, history, image_url=image_url, timeout_state=timeout_state)
+        skill_summary = self.skill_registry.get_skill_summary() if self.skill_registry else []
+        messages = self.context.build_conversation_prompt(
+            message, history, image_url=image_url, timeout_state=timeout_state,
+            skill_summary=skill_summary
+        )
         logger.info(f"Sending {len(messages)} messages to LLM for {source} reply"
                      f"{' (with image)' if image_url else ''}...")
 

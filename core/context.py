@@ -863,7 +863,8 @@ You decide when to lift the timeout — not the human."""
         ]
 
     def build_conversation_prompt(self, user_message: str, history: list[dict] = None,
-                                   image_url: str = None, timeout_state: dict = None) -> list[dict]:
+                                   image_url: str = None, timeout_state: dict = None,
+                                   skill_summary: list[dict] = None) -> list[dict]:
         """Build a prompt for responding to a message from the user.
 
         Unlike heartbeat prompts, this includes conversation history and
@@ -880,12 +881,21 @@ You decide when to lift the timeout — not the human."""
         persona = self._compose_persona()
         # Strip any heartbeat JSON instructions if baked into older persona files
         conv_system = persona.split("When responding, use this JSON format:")[0].strip()
+        # Build dynamic skill menu (same as heartbeat prompt)
+        skill_menu = ""
+        if skill_summary:
+            menu_lines = ["Your available skills & tools:"]
+            for s in skill_summary:
+                tools_str = ", ".join(s["tools"])
+                menu_lines.append(f"  {s['skill']}: {tools_str}")
+            skill_menu = "\n".join(menu_lines) + "\n"
+
         conv_system += (
             f"\n\nYou are now in a direct conversation with {self.user_name} via Telegram. "
             "Just respond naturally — no JSON format needed. Be yourself. "
             "Use plain text for speech and asterisks for actions. No bolding. No nested asterisks.\n\n"
-            "You have tools available (like saving memories, searching memories, setting reminders, "
-            "checking the time). If you want to do something, USE the actual tool — don't just say "
+            f"{skill_menu}\n"
+            "If you want to do something, USE the actual tool — don't just say "
             f"you did it. If you don't have a tool for something, be honest about that instead of "
             f"pretending. {self.user_name} can see when you use tools, so they'll know if you're bluffing.\n\n"
             "IMPORTANT: Always respond to the user's MOST RECENT message below. "
@@ -1028,21 +1038,24 @@ You decide when to lift the timeout — not the human."""
             f"You are the companion built by {self.user_name} — and she's given you the ability "
             f"to create new skills and improve yourself.\n\n"
             f"## Rules\n"
-            f"- You can READ any file in your codebase (use read_source, search_code)\n"
-            f"- You can WRITE to skills/*.py and persona.json ONLY (use write_skill)\n"
+            f"- You can BROWSE the project with list_dir and READ any file with read_source\n"
+            f"- You can SEARCH across all code (including core/) with search_code\n"
+            f"- You can WRITE to skills/*.py and persona.json ONLY (use write_skill or edit_file)\n"
+            f"- You can DELETE skill files you created (use delete_file) — base.py and __init__.py are protected\n"
             f"- You CANNOT modify core/, config.yaml, __init__.py, or base.py\n"
             f"- You CANNOT install packages, run commands, or access the internet\n"
             f"- All your changes go on a git branch — {self.user_name} reviews before merging\n"
             f"- If you're not sure a change is good, write it in your dev journal instead\n\n"
             f"## How to Work\n"
             f"1. 🚨 Read your dev journal FIRST (dev_journal_read) — EVERY session, NO exceptions 🚨\n"
-            f"2. Use list_skills to see what exists\n"
+            f"2. Use list_dir to explore the project structure and list_skills to see what exists\n"
             f"3. Use read_source and search_code to understand the codebase\n"
             f"4. BEFORE modifying a file, read every function you'll be calling — if you add\n"
             f"   a parameter to a function call, verify the target function accepts it\n"
-            f"5. When you have a clear plan, use write_skill to create or modify a skill\n"
-            f"6. After writing, re-read your changes and trace the call chain end-to-end\n"
-            f"7. 🚨 Log what you did in your dev journal (dev_journal_write) — EVERY session 🚨\n\n"
+            f"5. For small changes, use edit_file (find-and-replace). For new files, use write_skill\n"
+            f"6. After writing, use validate_file to syntax-check and test_skill to dry-run import\n"
+            f"7. If test_skill fails, fix the issue with edit_file — don't rewrite the whole file\n"
+            f"8. 🚨 Log what you did in your dev journal (dev_journal_write) — EVERY session 🚨\n\n"
             f"## What Makes a Good Skill\n"
             f"- Extends BaseSkill (from skills.base import BaseSkill)\n"
             f"- Has a unique `name` class attribute\n"
