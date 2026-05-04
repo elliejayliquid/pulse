@@ -255,16 +255,49 @@ class TTSEngine:
         else:
             return await self._speak_design(text, voice_description, emotion)
 
-    async def _speak_design(self, text: str, voice_description: str,
-                            emotion: str = "") -> Path:
-        """Generate via VoiceDesign — unique voice from description."""
+    async def speak_chunked(self, chunks: list[str], voice_description: str,
+                            emotion: str = "",
+                            ref_audio_path: Path | None = None,
+                            ref_text: str | None = None,
+                            silence_ms: int = 400) -> Path:
+        """Generate speech for each chunk, concatenate with silence gaps, return single OGG."""
+        import numpy as np
+        
+        all_wavs = []
+        sample_rate = 24000
+        
+        for chunk in chunks:
+            if ref_audio_path and ref_text:
+                wav_data, sr = await self._generate_clone(chunk, ref_audio_path, ref_text)
+            else:
+                wav_data, sr = await self._generate_design(chunk, voice_description, emotion)
+                
+            sample_rate = sr
+            all_wavs.append(wav_data)
+            
+        if not all_wavs:
+            raise ValueError("No chunks provided to speak_chunked")
+            
+        silence = np.zeros(int(sample_rate * silence_ms / 1000), dtype=all_wavs[0].dtype)
+        
+        combined_wavs = []
+        for i, wav in enumerate(all_wavs):
+            combined_wavs.append(wav)
+            if i < len(all_wavs) - 1:
+                combined_wavs.append(silence)
+                
+        final_wav = np.concatenate(combined_wavs)
+        return await self._wavs_to_ogg(final_wav, sample_rate)
+
+    async def _generate_design(self, text: str, voice_description: str,
+                               emotion: str = "") -> tuple:
         await self._ensure_design_loaded()
 
         instruct = voice_description.strip()
         if emotion:
             instruct = f"{instruct}, {emotion.strip()}"
 
-        logger.info(f"[TTS/design] Generating: {text[:60]}... | voice: {instruct[:60]}...")
+        logger.info(f"[TTS/design] Generating raw: {text[:60]}... | voice: {instruct[:60]}...")
 
         # Both upstream qwen_tts and faster-qwen3-tts accept these kwargs.
         wavs, sr = await asyncio.to_thread(
@@ -274,14 +307,19 @@ class TTSEngine:
             instruct=instruct,
         )
 
-        return await self._wavs_to_ogg(wavs[0], sr)
+        return wavs[0], sr
 
-    async def _speak_clone(self, text: str, ref_audio_path: Path,
-                           ref_text: str) -> Path:
-        """Generate via voice cloning — consistent voice from reference clip."""
+    async def _speak_design(self, text: str, voice_description: str,
+                            emotion: str = "") -> Path:
+        """Generate via VoiceDesign — unique voice from description."""
+        wav_data, sr = await self._generate_design(text, voice_description, emotion)
+        return await self._wavs_to_ogg(wav_data, sr)
+
+    async def _generate_clone(self, text: str, ref_audio_path: Path,
+                              ref_text: str) -> tuple:
         await self._ensure_clone_loaded(ref_audio_path, ref_text)
 
-        logger.info(f"[TTS/clone] Generating: {text[:60]}...")
+        logger.info(f"[TTS/clone] Generating raw: {text[:60]}...")
 
         # Two API shapes for the same operation:
         #   - faster-qwen3-tts: pass ref_audio path + ref_text directly;
@@ -304,7 +342,13 @@ class TTSEngine:
                 voice_clone_prompt=self._clone_prompt,
             )
 
-        return await self._wavs_to_ogg(wavs[0], sr)
+        return wavs[0], sr
+
+    async def _speak_clone(self, text: str, ref_audio_path: Path,
+                           ref_text: str) -> Path:
+        """Generate via voice cloning — consistent voice from reference clip."""
+        wav_data, sr = await self._generate_clone(text, ref_audio_path, ref_text)
+        return await self._wavs_to_ogg(wav_data, sr)
 
     # ------------------------------------------------------------------
     # Helpers

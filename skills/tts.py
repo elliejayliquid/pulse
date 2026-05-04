@@ -32,6 +32,22 @@ _RE_ITALIC_AST = re.compile(r'\*([^*\n]+)\*')
 _RE_ITALIC_UND = re.compile(r'(?<!\w)_([^_\n]+)_(?!\w)')
 _RE_DOUBLE_COMMA = re.compile(r',\s*,')
 _RE_WHITESPACE = re.compile(r'\s+')
+_RE_EMOJI = re.compile(
+    '['
+    '\U0001F600-\U0001F64F'   # emoticons
+    '\U0001F300-\U0001F5FF'   # symbols & pictographs
+    '\U0001F680-\U0001F6FF'   # transport & map
+    '\U0001F1E0-\U0001F1FF'   # flags
+    '\U00002702-\U000027B0'   # dingbats
+    '\U0000FE00-\U0000FE0F'   # variation selectors
+    '\U0000200D'              # ZWJ
+    '\U000E0020-\U000E007F'   # tag sequences
+    '\U00002600-\U000026FF'   # misc symbols (☀, ♥, etc.)
+    '\U0001F900-\U0001F9FF'   # supplemental symbols
+    '\U0001FA00-\U0001FA6F'   # chess, extended-A
+    '\U0001FA70-\U0001FAFF'   # extended symbols
+    ']+',
+)
 
 
 def clean_for_tts(text: str) -> str:
@@ -49,12 +65,93 @@ def clean_for_tts(text: str) -> str:
     """
     if not text:
         return text
+    text = _RE_EMOJI.sub('', text)
     text = _RE_BOLD.sub(r'\1', text)
     text = _RE_ITALIC_AST.sub(r', \1,', text)
     text = _RE_ITALIC_UND.sub(r', \1,', text)
     text = _RE_DOUBLE_COMMA.sub(',', text)
     text = _RE_WHITESPACE.sub(' ', text)
     return text.strip()
+
+
+def chunk_for_tts(text: str, max_chunk_chars: int = 300) -> list[str]:
+    """Split text into TTS-friendly chunks.
+
+    Strategy:
+      1. Split on paragraph breaks (\\n\\n)
+      2. If any paragraph exceeds max_chunk_chars, sub-split at sentence
+         boundaries (. ! ?)
+      3. If a single sentence still exceeds the limit, split at the last
+         comma or space before the limit (graceful fallback)
+
+    Each chunk is cleaned via clean_for_tts() before being returned.
+    Empty chunks (e.g. pure-emoji paragraphs) are dropped.
+    """
+    chunks = []
+    paragraphs = re.split(r'\n\s*\n', text)
+    
+    for para in paragraphs:
+        para = para.strip()
+        if not para:
+            continue
+            
+        if len(para) <= max_chunk_chars:
+            chunks.append(para)
+            continue
+            
+        sentences = re.split(r'(?<=[.!?])\s+', para)
+        current_chunk = ""
+        
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+                
+            if len(current_chunk) + len(sentence) + (1 if current_chunk else 0) <= max_chunk_chars:
+                if current_chunk:
+                    current_chunk += " " + sentence
+                else:
+                    current_chunk = sentence
+            else:
+                if current_chunk:
+                    chunks.append(current_chunk)
+                    
+                if len(sentence) > max_chunk_chars:
+                    # Graceful fallback for giant sentence
+                    # Split on comma or space
+                    parts = []
+                    while len(sentence) > max_chunk_chars:
+                        split_idx = sentence.rfind(', ', 0, max_chunk_chars)
+                        if split_idx != -1:
+                            # Include the comma in the left part, skip past ', '
+                            parts.append(sentence[:split_idx + 1].strip())
+                            sentence = sentence[split_idx + 2:].strip()
+                            continue
+                        split_idx = sentence.rfind(' ', 0, max_chunk_chars)
+                        if split_idx == -1:
+                            split_idx = max_chunk_chars
+                        
+                        parts.append(sentence[:split_idx].strip())
+                        sentence = sentence[split_idx:].strip()
+                    if sentence:
+                        parts.append(sentence)
+                    
+                    chunks.extend(parts)
+                    current_chunk = ""
+                else:
+                    current_chunk = sentence
+        
+        if current_chunk:
+            chunks.append(current_chunk)
+            
+    # Clean and filter
+    result = []
+    for chunk in chunks:
+        cleaned = clean_for_tts(chunk)
+        if cleaned:
+            result.append(cleaned)
+            
+    return result
 
 
 def _get_engine():
@@ -193,28 +290,35 @@ class TTSSkill(BaseSkill):
         if not self.voice_description and not self.clone_mode:
             return None
 
-        # Clean only the engine input — the Telegram message we're synthesizing
-        # from is unchanged; the user is replying to the original.
-        cleaned = clean_for_tts(text)
-        if not cleaned:
+        chunks = chunk_for_tts(text)
+        if not chunks:
             return None
 
         engine = _get_engine()
         import asyncio
         try:
-            ogg_path = asyncio.run(engine.speak(
-                text=cleaned,
-                voice_description=self.voice_description,
-                emotion=emotion,
-                ref_audio_path=self.voice_sample,
-                ref_text=self.voice_sample_text,
-            ))
+            if len(chunks) == 1:
+                ogg_path = asyncio.run(engine.speak(
+                    text=chunks[0],
+                    voice_description=self.voice_description,
+                    emotion=emotion,
+                    ref_audio_path=self.voice_sample,
+                    ref_text=self.voice_sample_text,
+                ))
+            else:
+                ogg_path = asyncio.run(engine.speak_chunked(
+                    chunks=chunks,
+                    voice_description=self.voice_description,
+                    emotion=emotion,
+                    ref_audio_path=self.voice_sample,
+                    ref_text=self.voice_sample_text,
+                ))
         except Exception as e:
             logger.error(f"[TTS] On-demand synthesis failed: {e}", exc_info=True)
             return None
 
         mode = "clone" if self.clone_mode else "design"
-        logger.info(f"[TTS/{mode}] On-demand synthesis: {cleaned[:50]}...")
+        logger.info(f"[TTS/{mode}] On-demand synthesis: {chunks[0][:50]}... ({len(chunks)} chunks)")
         return ogg_path
 
     @property
