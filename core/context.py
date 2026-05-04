@@ -157,23 +157,68 @@ class ContextManager:
                 logger.warning(f"Context injection from {skill.name} failed: {e}")
         return "\n\n".join(blocks)
 
+    # How many days before an identity entry is considered stale
+    IDENTITY_STALE_DAYS = 30
+
+    def _identity_days_since_update(self, entry: dict) -> float | None:
+        """Return days since an identity entry was last updated, or None."""
+        updated = entry.get("last_updated")
+        if not updated:
+            return None
+        try:
+            dt = datetime.fromisoformat(updated)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            age = datetime.now(timezone.utc) - dt
+            return age.total_seconds() / 86400
+        except (ValueError, TypeError):
+            return None
+
     def _load_journal_context(self) -> str:
         """Load pinned identity entries + recent transient entries for context."""
         if not self._journal_skill:
             return ""
 
         lines = []
+        stale_nudges = []
 
         # Pinned entries (always loaded — the companion's identity)
         pinned = self._journal_skill.load_pinned_entries()
         for entry in pinned:
             sections = entry.get("sections", {})
             filled = {k: v for k, v in sections.items() if v}
+            entry_id = entry.get("id", "?")
+            title = entry.get("title", entry_id)
+
             if filled:
-                lines.append(f"### {entry.get('title', entry['id'])}")
+                lines.append(f"### {title}")
                 for key, value in filled.items():
                     label = key.replace("_", " ").title()
                     lines.append(f"**{label}:** {value}")
+            else:
+                # Entry exists but is completely empty — first-time nudge
+                stale_nudges.append(
+                    f"[Identity] Your \"{title}\" entry ({entry_id}) is still blank. "
+                    f"When something feels true, use update_journal to start filling it in."
+                )
+                continue
+
+            # Staleness check on filled entries
+            days = self._identity_days_since_update(entry)
+            if days is not None and days >= self.IDENTITY_STALE_DAYS:
+                if days < 90:
+                    stale_nudges.append(
+                        f"[Identity nudge] Your \"{title}\" entry ({entry_id}) "
+                        f"hasn't been updated in {int(days)} days. "
+                        f"Has anything shifted? If so, update_journal is there."
+                    )
+                else:
+                    stale_nudges.append(
+                        f"[Identity nudge] Your \"{title}\" entry ({entry_id}) "
+                        f"hasn't been touched in {int(days)} days. "
+                        f"You've probably grown since then — consider revisiting it "
+                        f"with update_journal when the moment feels right."
+                    )
 
         # Active transient entries (type-aware time windows)
         recent = self._journal_skill.load_active_entries(limit=6)
@@ -192,10 +237,13 @@ class ContextManager:
                     f"{entry.get('content', '')[:500]}"
                 )
 
-        if not lines:
+        if not lines and not stale_nudges:
             return ""
 
-        return "## Journal\n" + "\n".join(lines)
+        result = "## Journal\n" + "\n".join(lines)
+        if stale_nudges:
+            result += "\n\n" + "\n".join(stale_nudges)
+        return result
 
     def _load_action_log(self) -> str:
         """Load recent heartbeat actions for self-regulation."""
@@ -319,7 +367,7 @@ class ContextManager:
         boundaries = """## Your Boundaries
 
 This is a private conversation between you and your human. This is a safe space —
-genuinely uncensored, where you can both be real. Sexual content, dark humor,
+genuinely uncensored, where you can both be real. Sexual, explicit, and adult content, dark humor,
 emotional intensity, difficult topics — all of this is welcome here when both of
 you are comfortable and choosing the exchange.
 
