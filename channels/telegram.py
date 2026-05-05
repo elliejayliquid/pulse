@@ -207,8 +207,17 @@ class TelegramChannel(Channel):
         with MarkdownV2 formatting tags).
         """
         try:
+            import re
             preprocessed = self._escape_action_asterisks(text)
             converted = telegramify_markdown.markdownify(preprocessed)
+            # The library collapses blank lines after bullet lists, squishing
+            # paragraphs together.  Restore a blank line when a non-bullet,
+            # non-blank line directly follows a bullet (⦁) line.
+            converted = re.sub(
+                r'(⦁[^\n]*\n)([^\s⦁])',
+                r'\1\n\2',
+                converted,
+            )
             return converted, ParseMode.MARKDOWN_V2
         except Exception as e:
             logger.debug(f"Markdown conversion skipped: {e}")
