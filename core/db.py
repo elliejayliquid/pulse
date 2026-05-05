@@ -811,7 +811,7 @@ CREATE TABLE IF NOT EXISTS garden_plants (
     memory_id    INTEGER,                              -- links to memories.id (nullable for decorative)
     species      TEXT NOT NULL DEFAULT 'wildflower',    -- tag category that determined bloom pool
     bloom_emoji  TEXT,                                  -- NULL until bloomed, then the surprise emoji
-    name         TEXT,                                  -- optional pet name Nova gives the plant
+    name         TEXT,                                  -- optional pet name the companion gives the plant
     x            INTEGER NOT NULL,
     y            INTEGER NOT NULL,
     growth       REAL NOT NULL DEFAULT 0.0,             -- 0.0 to 4.0 (stage thresholds: 1.0, 2.0)

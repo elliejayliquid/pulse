@@ -469,7 +469,7 @@ class PulseEngine:
                 try:
                     entry = self.scheduler.add(
                         task=response.schedule_task,
-                        created_by="nova-self",
+                        created_by=f"{self.context.ai_name.lower()}-self",
                         when=response.schedule_when
                     )
                     logger.info(f"Self-scheduled: {entry['id']} — {response.schedule_task}")
@@ -481,7 +481,7 @@ class PulseEngine:
             try:
                 entry = self.scheduler.add(
                     task=response.schedule_task,
-                    created_by="nova-self",
+                    created_by=f"{self.context.ai_name.lower()}-self",
                     when=response.schedule_when
                 )
                 logger.info(f"Also scheduled: {entry['id']} — {response.schedule_task}")
@@ -892,7 +892,8 @@ class PulseEngine:
             return
 
         # Create a git branch for isolation
-        branch_name = f"nova/dev-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        persona_slug = self.context.ai_name.lower().replace(" ", "-")
+        branch_name = f"{persona_slug}/dev-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
         try:
             # Check for uncommitted changes first
             status = subprocess.run(
@@ -962,7 +963,7 @@ class PulseEngine:
                     cwd=self._pulse_root, check=True
                 )
 
-                commit_msg = f"[nova-dev] {text[:100] if text else 'Dev tick changes'}"
+                commit_msg = f"[{persona_slug}-dev] {text[:100] if text else 'Dev tick changes'}"
                 subprocess.run(
                     ["git", "commit", "-m", commit_msg],
                     capture_output=True, text=True, cwd=self._pulse_root, check=True
@@ -977,7 +978,7 @@ class PulseEngine:
                     f"Have a look when you get a chance?"
                 )
                 if text:
-                    summary += f"\n\nMy notes: {text[:300]}"
+                    summary += f"\n\nMy notes: {text}"
 
                 telegram = self.channels.get("telegram")
                 if telegram:

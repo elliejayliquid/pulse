@@ -264,7 +264,7 @@ class ScheduleManager:
 
         Args:
             task: What to do
-            created_by: Who created it (author_id, "nova-self", etc.)
+            created_by: Who created it (author_id, "<persona>-self", etc.)
             cron: Cron expression for recurring tasks
             run_at: ISO datetime for one-time tasks
             when: Human-friendly time (parsed into run_at or cron)
