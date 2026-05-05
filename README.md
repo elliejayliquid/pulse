@@ -20,7 +20,9 @@ Pulse gives your AI companion a life of their own. It runs in the background, le
 - **Vision** — Optional image understanding via mmproj (model-dependent)
 - **Voice messages** — Send voice notes on Telegram; Pulse transcribes locally via whisper.cpp (auto-downloads everything on first use)
 - **Text-to-speech** — Companions can send voice messages back via [Qwen3-TTS](https://huggingface.co/collections/Qwen/qwen3-tts), with voice design (describe a voice) or voice cloning (lock in a reference sample)
+- **Rich text** — Companion messages render with Telegram MarkdownV2 formatting (bold, italic, code blocks, links) with automatic plain-text fallback; roleplay `*action*` asterisks stay literal
 - **Desktop notifications** — Windows toast notifications for proactive messages (optional, Windows-only for now)
+- **Timeout** — Companions can disengage from genuinely harmful conversations via model-initiated soft/hard timeouts (not censorship — the companion decides based on context)
 - **Quiet hours** — No notifications while you sleep
 
 ## Architecture

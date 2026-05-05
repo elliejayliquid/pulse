@@ -12,6 +12,7 @@ import asyncio
 import base64
 import logging
 from pathlib import Path
+import telegramify_markdown
 from telegram import InputFile, Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import (
@@ -181,21 +182,56 @@ class TelegramChannel(Channel):
 
         logger.info("Telegram bot started and polling for messages!")
 
+    def _escape_action_asterisks(self, text: str) -> str:
+        """Escape roleplay action asterisks so they render as literal *text*.
+
+        Companions use *action text* for roleplay (e.g. *leans back and smiles*),
+        but standard markdown treats single asterisks as italic.  We escape them
+        to preserve the literal asterisks while keeping **bold** formatting.
+        """
+        import re
+        # Protect **bold** by replacing with a placeholder
+        text = text.replace('**', '\x00BOLD\x00')
+        # Escape remaining single *action* pairs → \*action\*
+        text = re.sub(r'\*(.+?)\*', r'\\*\1\\*', text)
+        # Restore **bold**
+        text = text.replace('\x00BOLD\x00', '**')
+        return text
+
+    def _convert_markdown(self, text: str) -> tuple[str, str | None]:
+        """Convert standard markdown to Telegram MarkdownV2.
+
+        Returns (converted_text, ParseMode.MARKDOWN_V2) on success,
+        or (original_text, None) if conversion fails or the result is
+        too long for a single message (to avoid chunk-splitting issues
+        with MarkdownV2 formatting tags).
+        """
+        try:
+            preprocessed = self._escape_action_asterisks(text)
+            converted = telegramify_markdown.markdownify(preprocessed)
+            return converted, ParseMode.MARKDOWN_V2
+        except Exception as e:
+            logger.debug(f"Markdown conversion skipped: {e}")
+            return text, None
+
     async def send(self, message: str, **kwargs):
         """Send a message to the user via Telegram.
 
         Used by the engine for proactive messages (heartbeat, scheduled tasks).
+        Automatically converts markdown to Telegram MarkdownV2 with fallback.
         """
         if not self.app or not self.chat_id:
             logger.warning("Telegram: no chat_id yet. User needs to /start the bot first.")
             return
 
         try:
-            # Attach 🔊 button to the LAST chunk only (so multi-chunk replies
-            # don't get a button on every continuation)
             voice_markup = self._voice_markup()
+            converted, parse_mode = self._convert_markdown(message)
+            send_text = converted
+
             # Telegram has a 4096 char limit per message
-            if len(message) > 4000:
+            if len(send_text) > 4000:
+                # Skip markdown for long messages to avoid breaking format mid-tag
                 chunks = [message[i:i+4000] for i in range(0, len(message), 4000)]
                 last_idx = len(chunks) - 1
                 for i, chunk in enumerate(chunks):
@@ -205,11 +241,23 @@ class TelegramChannel(Channel):
                         reply_markup=voice_markup if i == last_idx else None,
                     )
             else:
-                await self.app.bot.send_message(
-                    chat_id=self.chat_id,
-                    text=message,
-                    reply_markup=voice_markup,
-                )
+                try:
+                    await self.app.bot.send_message(
+                        chat_id=self.chat_id,
+                        text=send_text,
+                        parse_mode=parse_mode,
+                        reply_markup=voice_markup,
+                    )
+                except Exception:
+                    if parse_mode:
+                        logger.warning("MarkdownV2 send failed, falling back to plain text")
+                        await self.app.bot.send_message(
+                            chat_id=self.chat_id,
+                            text=message,
+                            reply_markup=voice_markup,
+                        )
+                    else:
+                        raise
             logger.info(f"Telegram message sent: {message[:50]}...")
         except Exception as e:
             logger.error(f"Telegram send failed: {e}")
@@ -247,15 +295,33 @@ class TelegramChannel(Channel):
             pass
 
     async def _reply_with_retry(self, message, text: str, retries: int = 3,
-                                reply_markup=None):
+                                reply_markup=None, markdown: bool = False):
         """Send a reply with retry on timeout.
 
         Automatically splits messages that exceed Telegram's 4096-char limit.
         If `reply_markup` is provided, it's attached only to the LAST chunk
         (so the inline button doesn't repeat on every continuation).
+
+        If `markdown` is True, converts the text to Telegram MarkdownV2 for
+        rich formatting (bold, italic, code blocks, etc.). On parse failure,
+        automatically falls back to sending the original plain text.
         """
+        parse_mode = None
+        send_text = text
+        if markdown:
+            converted, pm = self._convert_markdown(text)
+            if pm:
+                send_text = converted
+                parse_mode = pm
+
         # Split into chunks if needed (same approach as send())
-        chunks = [text[i:i+4000] for i in range(0, len(text), 4000)] if len(text) > 4000 else [text]
+        # If markdown is active and text needs chunking, drop formatting
+        # to avoid breaking MarkdownV2 tags mid-chunk.
+        if len(send_text) > 4000 and parse_mode:
+            send_text = text
+            parse_mode = None
+
+        chunks = [send_text[i:i+4000] for i in range(0, len(send_text), 4000)] if len(send_text) > 4000 else [send_text]
         last_idx = len(chunks) - 1
         for i, chunk in enumerate(chunks):
             markup = reply_markup if i == last_idx else None
@@ -263,11 +329,19 @@ class TelegramChannel(Channel):
                 try:
                     await message.reply_text(
                         chunk, reply_markup=markup,
+                        parse_mode=parse_mode,
                         read_timeout=30, write_timeout=30,
                         connect_timeout=15, pool_timeout=15,
                     )
                     break
                 except Exception as e:
+                    # MarkdownV2 parse error — fall back to plain text
+                    if parse_mode and "parse" in str(e).lower():
+                        logger.warning(f"MarkdownV2 parse failed, falling back to plain text: {e}")
+                        return await self._reply_with_retry(
+                            message, text, retries=retries,
+                            reply_markup=reply_markup
+                        )
                     if attempt < retries:
                         logger.warning(f"Reply attempt {attempt}/{retries} failed ({e}), retrying in 3s...")
                         await asyncio.sleep(3)
@@ -709,7 +783,8 @@ class TelegramChannel(Channel):
 
             if reply:
                 await self._reply_with_retry(
-                    update.message, reply, reply_markup=self._voice_markup()
+                    update.message, reply, reply_markup=self._voice_markup(),
+                    markdown=True
                 )
             elif not voice_sent:
                 # Surface the specific error from the LLM client
@@ -751,7 +826,8 @@ class TelegramChannel(Channel):
 
             await self._reply_with_retry(
                 update.message, self._last_reply,
-                reply_markup=self._voice_markup()
+                reply_markup=self._voice_markup(),
+                markdown=True
             )
         except Exception as e:
             logger.error(f"Resend handler crashed: {e}", exc_info=True)
@@ -853,7 +929,8 @@ class TelegramChannel(Channel):
             if reply:
                 # Send text reply (even after voice — companion may want both)
                 await self._reply_with_retry(
-                    reply_update.message, reply, reply_markup=self._voice_markup()
+                    reply_update.message, reply, reply_markup=self._voice_markup(),
+                    markdown=True
                 )
             elif not voice_sent:
                 error = getattr(self._engine.llm, "last_error", "") if self._engine else ""
@@ -915,7 +992,8 @@ class TelegramChannel(Channel):
                 await self._reply_with_retry(update.message, f"🔧 {tool_names}")
             if reply:
                 await self._reply_with_retry(
-                    update.message, reply, reply_markup=self._voice_markup()
+                    update.message, reply, reply_markup=self._voice_markup(),
+                    markdown=True
                 )
             elif not voice_sent:
                 await self._reply_with_retry(
@@ -976,7 +1054,8 @@ class TelegramChannel(Channel):
                 await self._reply_with_retry(update.message, f"🔧 {tool_names}")
             if reply:
                 await self._reply_with_retry(
-                    update.message, reply, reply_markup=self._voice_markup()
+                    update.message, reply, reply_markup=self._voice_markup(),
+                    markdown=True
                 )
             elif not voice_sent:
                 await self._reply_with_retry(update.message, "(I'm having trouble thinking right now — llama-server might be down)")

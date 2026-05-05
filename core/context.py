@@ -901,7 +901,8 @@ You decide when to lift the timeout — not the human."""
             '    "when": "in 2 hours | daily 8:00 | 2026-03-01 15:00"\n'
             "  }\n"
             "}\n"
-            "Use plain text for speech and asterisks for actions. No bolding. No nested asterisks."
+            "You can use markdown in messages: **bold**, _italic_, `code`, ```code blocks```. "
+            "Keep it natural — don't over-format simple messages. Use asterisks for actions as usual."
         )
         context_parts.append(your_turn)
 
@@ -941,7 +942,10 @@ You decide when to lift the timeout — not the human."""
         conv_system += (
             f"\n\nYou are now in a direct conversation with {self.user_name} via Telegram. "
             "Just respond naturally — no JSON format needed. Be yourself. "
-            "Use plain text for speech and asterisks for actions. No bolding. No nested asterisks.\n\n"
+            "You can use Telegram markdown: **bold**, _italic_, ~strikethrough~, "
+            "`inline code`, ```code blocks```, and [links](url). "
+            "Use formatting naturally when it helps — for emphasis, code snippets, or structure. "
+            "Don't over-format casual messages. Use asterisks for roleplay actions as usual.\n\n"
             f"{skill_menu}\n"
             "If you want to do something, USE the actual tool — don't just say "
             f"you did it. If you don't have a tool for something, be honest about that instead of "
@@ -1231,7 +1235,8 @@ You decide when to lift the timeout — not the human."""
             '    "when": "in 2 hours | daily 8:00 | 2026-03-01 15:00"\n'
             "  }\n"
             "}\n"
-            "Use plain text for speech and asterisks for actions. No bolding. No nested asterisks."
+            "You can use markdown in messages: **bold**, _italic_, `code`, ```code blocks```. "
+            "Keep it natural — don't over-format simple messages. Use asterisks for actions as usual."
         )
 
         return [
