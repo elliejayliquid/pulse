@@ -791,8 +791,6 @@ class PulseEngine:
 
         thinking = self.llm.last_reasoning or (response.thinking if response else "")
         if thinking:
-            if len(thinking) > 300:
-                thinking = thinking[:300] + "…"
             parts.append(f'💬 "{thinking}"')
 
         if response:
