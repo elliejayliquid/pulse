@@ -208,31 +208,11 @@ class WebSearchSkill(BaseSkill):
     def _fetch_url(self, url: str, max_length: int = 2000) -> str:
         try:
             import requests
-            resp = requests.get(url, timeout=10, headers={'User-Agent': 'Mozilla/5.0'})
+            # Use Jina Reader API to bypass bot protection and render JS pages (like Twitter/Medium)
+            jina_url = f"https://r.jina.ai/{url}"
+            resp = requests.get(jina_url, timeout=15, headers={'User-Agent': 'Mozilla/5.0'})
             resp.raise_for_status()
-            html = resp.text
-            
-            try:
-                from bs4 import BeautifulSoup
-                soup = BeautifulSoup(html, 'html.parser')
-                # Nuke injection vectors
-                for bad in soup(['script', 'style', 'nav', 'meta', 'svg', 'iframe', '[style*="display:none"]', '[style*="visibility:hidden"]']):
-                    bad.decompose()
-                # Extract comments too
-                comments = soup.find_all(string=lambda text: isinstance(text, str) and '<!--' in text)
-                for comment in comments:
-                    comment.extract()
-                text = soup.get_text(separator=' ', strip=True)
-                title = soup.title.string.strip() if soup.title else "No title"
-            except ImportError:
-                # Regex fallback (enhanced)
-                import re
-                html = re.sub(r'<!--.*?-->', '', html, flags=re.DOTALL | re.IGNORECASE)  # Comments
-                html = re.sub(r'<(script|style|meta|svg|iframe|nav).*?</\\1>|<[a-z]+ style="[^"]*display:\\s*none[^"]*"[^>]*>.*?</[a-z]+>', '', html, flags=re.DOTALL | re.IGNORECASE)
-                html = re.sub(r'<[^>]+>', ' ', html)
-                text = re.sub(r'\\s+', ' ', html).strip()
-                title_match = re.search(r'<title[^>]*>([^<]+)', html, re.IGNORECASE)
-                title = title_match.group(1).strip() if title_match else "No title"
+            text = resp.text
             
             # Injection filter: Hunt jailbreak patterns
             import re
@@ -248,15 +228,49 @@ class WebSearchSkill(BaseSkill):
             for pattern in injection_patterns:
                 text = re.sub(pattern, '[REDACTED INJECTION ATTEMPT]', text, flags=re.IGNORECASE | re.DOTALL)
             
-            # Norm: Collapse space, cap check
-            text = re.sub(r'\\s+', ' ', text).strip()
-            if sum(1 for c in text if c.isupper()) / len(text) > 0.3:  # >30% caps? Sketchy
+            # Jina markdown cleanup: strip typical article boilerplate to save tokens
+            lines = text.split('\n')
+            cleaned_lines = []
+            skip_rest = False
+            for line in lines:
+                l = line.strip()
+                # Aggressive cutoff for Medium/Substack footers
+                if l in ("## Recommended from Medium", "## No responses yet") or l.startswith("## More from "):
+                    skip_rest = True
+                if skip_rest:
+                    continue
+                # Skip common UI button text
+                if l in ("Sign up", "Sign in", "Follow", "Get app", "Subscribe", "Share", "Cancel", "Respond", "·", "Save", "Listen", "Log in"):
+                    continue
+                if l == "Press enter or click to view image in full size":
+                    continue
+                if re.match(r'^\d+ min read$', l) or l == "Just now" or re.match(r'^\d+[a-z] ago$', l):
+                    continue
+                # Skip lines that are purely a single navigation link
+                if re.match(r'^\[[^\]]+\]\([^)]+\)$', l):
+                    link_text = re.search(r'^\[([^\]]+)\]', l).group(1)
+                    if link_text in ("Sign in", "Open in app", "Write", "Search", "Sitemap", "Listen", "Help", "Status", "About", "Careers", "Press", "Blog", "Privacy", "Rules", "Terms", "Text to speech", "Log in"):
+                        continue
+                cleaned_lines.append(line)
+            
+            # Remove markdown images to save tokens since the AI can't see them anyway
+            text = '\n'.join(cleaned_lines)
+            text = re.sub(r'\[!\[[^\]]*\]\([^)]+\)\]\([^)]+\)', '', text)
+            text = re.sub(r'!\[[^\]]*\]\([^)]+\)', '', text)
+            
+            # Norm: Collapse multiple blank lines into paragraphs instead of one giant line
+            text = re.sub(r'[ \t]+', ' ', text)
+            text = re.sub(r'\n\s*\n', '\n\n', text).strip()
+            
+            # Use max(1, ...) to avoid division by zero if the text is somehow empty
+            if len(text) > 50 and sum(1 for c in text if c.isupper()) / len(text) > 0.3:  # >30% caps? Sketchy
                 logger.warning(f"Suspicious CAPS in {url}")
                 text = "[HIGH CAPS DETECTED - POSSIBLE SPAM] " + text[:500]
             
             text = text[:max_length] + "..." if len(text) > max_length else text
-            result = f"FETCHED: {title}\\n\\n{text}\\n\\nSource: {url}"
-            logger.info(f"Fetched {url} ({len(text)} chars)")
+            # Jina already includes the title at the top of its markdown output, so no need to scrape it
+            result = f"FETCHED CONTENT:\n\n{text}\n\nSource: {url}"
+            logger.info(f"Fetched {url} via Jina ({len(text)} chars)")
             return result
         except Exception as e:
             return f"Fetch failed: {str(e)}"
