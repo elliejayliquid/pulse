@@ -421,7 +421,7 @@ class PulseEngine:
 
     def _save_heartbeat_to_history(self, voice_text: str | None,
                                    response: PulseResponse | None,
-                                   prefix: str = "[Heartbeat] "):
+                                   prefix: str = "[Heartbeat] ") -> list[int]:
         """Save what the companion said during a heartbeat/task to conversation history.
 
         Without this, the companion forgets what it said aloud (or as a
@@ -433,27 +433,28 @@ class PulseEngine:
         if response and response.action == "notify" and response.message:
             parts.append(f"{prefix}{response.message}")
         if not parts:
-            return
+            return []
 
         history = self.context._load_conversation()
         history.append({
             "role": "assistant",
             "content": "\n".join(parts)
         })
-        self.context.save_conversation(history)
+        return self.context.save_conversation(history)
 
-    async def _dispatch(self, response: PulseResponse):
+    async def _dispatch(self, response: PulseResponse) -> int | None:
         """Route a response to the appropriate channel."""
+        tg_msg_id = None
         if response.action == "silent":
             logger.info("Companion chose to stay silent.")
-            return
+            return tg_msg_id
 
         if response.action == "notify":
             # Send via toast AND Telegram (if available)
             sent = False
             telegram = self.channels.get("telegram")
             if telegram:
-                await telegram.send(response.message)
+                tg_msg_id = await telegram.send(response.message)
                 sent = True
             toast = self.channels.get("toast")
             if toast:
@@ -488,8 +489,11 @@ class PulseEngine:
             except ValueError as e:
                 logger.warning(f"Tried to schedule without a valid time: {e}")
 
+        return tg_msg_id
+
     async def handle_message(self, message: str, source: str = "telegram",
-                            image_url: str = None) -> tuple[str, list[str], str]:
+                            image_url: str = None,
+                            channel_message_id: int = None) -> tuple[str, list[str], str, list[int]]:
         """Handle an incoming message and return the companion's response.
 
         This is for bidirectional chat (Telegram, future voice, etc.).
@@ -524,13 +528,13 @@ class PulseEngine:
         if timeout_state and timeout_state.get("type") == "hard":
             # Hard timeout — block completely, don't even touch the LLM
             logger.info("Blocked by active hard timeout.")
-            return self._format_timeout_message(timeout_state, is_new=False), [], ""
+            return self._format_timeout_message(timeout_state, is_new=False), [], "", []
 
         # is_available() is a sync HTTP call — run in thread to not block
         available = await asyncio.to_thread(self.llm.is_available)
         if not available:
             logger.warning(f"LLM server not available — can't respond to {source} message.")
-            return None, [], ""
+            return None, [], "", []
 
         # Load conversation history
         history = self.context._load_conversation()
@@ -608,7 +612,7 @@ class PulseEngine:
         else:
             history_reply = reply or skill_text
         if not history_reply:
-            return None, tools_used, reasoning
+            return None, tools_used, reasoning, []
 
         # Update conversation history (store text only — images are too large to persist)
         # Timestamps help the companion understand temporal flow
@@ -655,10 +659,16 @@ class PulseEngine:
                 logger.warning("Summarization failed — trimming conversation to last 10 messages.")
                 history = history[-10:]
 
-        self.context.save_conversation(history)
+        new_db_ids = self.context.save_conversation(history)
+        # Even after summarization clear-and-reinsert, the user message and
+        # assistant reply are preserved at the end of `recent_tail`, so index -2 
+        # correctly points to the newly inserted user message row.
+        if channel_message_id and len(new_db_ids) >= 2:
+            self.db.update_message_channel_id(new_db_ids[-2], channel_message_id)
+
         log_reply = reply or skill_text or "(voice-only)"
         logger.info(f"Replied to {source}: {log_reply[:50]}...")
-        return reply, tools_used, reasoning
+        return reply, tools_used, reasoning, new_db_ids
 
     async def _summarize_conversation(self, history: list[dict]) -> str:
         """Summarize the conversation so far (for context compression)."""
@@ -733,6 +743,7 @@ class PulseEngine:
             messages = self.context.build_task_prompt(task, has_tools=bool(tools))
 
             response = None
+            tg_msg_id = None
             if tools:
                 text, tools_used = await asyncio.to_thread(
                     self.llm.chat_with_tools, messages, tools, self.skill_registry,
@@ -742,11 +753,11 @@ class PulseEngine:
                     logger.info(f"Task tools used: {', '.join(tools_used)}")
                 if text:
                     response = PulseResponse.from_llm_output(text)
-                    await self._dispatch(response)
+                    tg_msg_id = await self._dispatch(response)
             else:
                 response = await asyncio.to_thread(self.llm.chat, messages)
                 if response:
-                    await self._dispatch(response)
+                    tg_msg_id = await self._dispatch(response)
 
             # Capture voice text BEFORE flushing (flush clears the queue)
             voice_text = self._capture_pending_skill_text()
@@ -758,7 +769,9 @@ class PulseEngine:
 
             # Log the notification + voice into conversation history so the
             # companion remembers what it said
-            self._save_heartbeat_to_history(voice_text, response, prefix="[Scheduled reminder] ")
+            db_ids = self._save_heartbeat_to_history(voice_text, response, prefix="[Scheduled reminder] ")
+            if tg_msg_id and db_ids:
+                self.db.update_message_channel_id(db_ids[-1], tg_msg_id)
 
             self.scheduler.mark_completed(task["id"])
 
@@ -776,8 +789,8 @@ class PulseEngine:
             unique_tools = ", ".join(dict.fromkeys(tools_used))
             parts.append(f"🔧 {unique_tools}")
 
-        if response and response.thinking:
-            thinking = response.thinking
+        thinking = self.llm.last_reasoning or (response.thinking if response else "")
+        if thinking:
             if len(thinking) > 300:
                 thinking = thinking[:300] + "…"
             parts.append(f'💬 "{thinking}"')
@@ -820,6 +833,7 @@ class PulseEngine:
         t0 = time.time()
         response = None
         tools_used = []
+        tg_msg_id = None
 
         if tools:
             # Tool-calling mode: companion can use tools, then gives JSON decision
@@ -838,7 +852,7 @@ class PulseEngine:
 
             if text:
                 response = PulseResponse.from_llm_output(text)
-                await self._dispatch(response)
+                tg_msg_id = await self._dispatch(response)
                 self._log_action(response.action, tools_used, response.message)
             else:
                 self._log_action("silent", tools_used)
@@ -848,7 +862,9 @@ class PulseEngine:
 
             # Save voice (and notification text) to conversation history so the
             # companion remembers what it said — prevents repeating itself
-            self._save_heartbeat_to_history(voice_text, response)
+            db_ids = self._save_heartbeat_to_history(voice_text, response)
+            if tg_msg_id and db_ids:
+                self.db.update_message_channel_id(db_ids[-1], tg_msg_id)
         else:
             # Plain mode: no tools, just JSON response
             result = await asyncio.to_thread(self.llm.chat, messages)
@@ -856,8 +872,11 @@ class PulseEngine:
             logger.info(f"Heartbeat tick completed in {elapsed:.1f}s")
             if result:
                 response = result
-                await self._dispatch(response)
+                tg_msg_id = await self._dispatch(response)
                 self._log_action(response.action, summary=response.message)
+                db_ids = self._save_heartbeat_to_history(None, response)
+                if tg_msg_id and db_ids:
+                    self.db.update_message_channel_id(db_ids[-1], tg_msg_id)
 
         # Debug: send heartbeat inner monologue to Telegram
         if self._heartbeat_debug:

@@ -31,6 +31,17 @@ class PulseDatabase:
     def _init_tables(self):
         """Create all tables if they don't exist."""
         self.conn.executescript(_SCHEMA)
+        
+        for stmt in [
+            "ALTER TABLE messages ADD COLUMN channel_message_id INTEGER",
+            "ALTER TABLE sessions ADD COLUMN summary_first_msg_id INTEGER",
+            "ALTER TABLE sessions ADD COLUMN summary_last_msg_id INTEGER",
+        ]:
+            try:
+                self.conn.execute(stmt)
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+                
         self.conn.commit()
 
     def close(self):
@@ -58,6 +69,15 @@ class PulseDatabase:
             )
         self.conn.commit()
         return cur.lastrowid
+
+    def update_message_channel_id(self, msg_db_id: int, channel_message_id: int) -> bool:
+        """Set the channel_message_id for a message row. Returns True if updated."""
+        cur = self.conn.execute(
+            "UPDATE messages SET channel_message_id = ? WHERE id = ?",
+            (channel_message_id, msg_db_id)
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
 
     def get_messages(self, session_id: str, limit: int = 0,
                      offset: int = 0) -> list[dict]:
@@ -138,11 +158,14 @@ class PulseDatabase:
         )
         self.conn.commit()
 
-    def close_session(self, session_id: str, summary: Optional[str] = None) -> None:
-        """Close a session, optionally storing a summary."""
+    def close_session(self, session_id: str, summary: Optional[str] = None,
+                      summary_first_msg_id: Optional[int] = None,
+                      summary_last_msg_id: Optional[int] = None) -> None:
+        """Close a session, optionally storing a summary and its boundaries."""
         self.conn.execute(
-            "UPDATE sessions SET summary = ?, closed_at = datetime('now') WHERE id = ?",
-            (summary, session_id)
+            "UPDATE sessions SET summary = ?, closed_at = datetime('now'), "
+            "summary_first_msg_id = ?, summary_last_msg_id = ? WHERE id = ?",
+            (summary, summary_first_msg_id, summary_last_msg_id, session_id)
         )
         self.conn.commit()
 

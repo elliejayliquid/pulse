@@ -122,6 +122,17 @@ class LanternSkill(BaseSkill):
         if not parts and not stale:
             return ""
 
+        # Calculate age for better LLM time perception
+        hours = self._hours_since(row["updated_at"])
+        age_str = ""
+        if hours is not None:
+            if hours < 1:
+                age_str = f" ({int(hours * 60)} mins ago)"
+            elif hours < 48:
+                age_str = f" ({int(hours)} hours ago)"
+            else:
+                age_str = f" ({int(hours / 24)} days ago)"
+
         # Build the lantern line
         lines = []
         if parts:
@@ -129,12 +140,11 @@ class LanternSkill(BaseSkill):
             lines.append(
                 f"[{prefix}] {row['resident_id']}: "
                 + "; ".join(parts)
-                + f". Updated: {row['updated_at']}."
+                + f". Updated: {row['updated_at']}{age_str}."
             )
 
         # Gentle nudge when stale
         if stale:
-            hours = self._hours_since(row["updated_at"])
             if hours is not None and hours < 48:
                 lines.append(
                     "[Lantern nudge] It's been a while since you updated your lantern. "

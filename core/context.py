@@ -538,7 +538,7 @@ You decide when to lift the timeout — not the human."""
         except (json.JSONDecodeError, IOError):
             return []
 
-    def save_conversation(self, messages: list[dict]):
+    def save_conversation(self, messages: list[dict]) -> list[int]:
         """Save conversation history to DB (or JSON fallback).
 
         Smart diff: appends only new messages when the list grew (normal case),
@@ -547,11 +547,12 @@ You decide when to lift the timeout — not the human."""
         if self._db:
             session_id = self._ensure_active_session()
             if not session_id:
-                return
+                return []
             existing = self._db.get_messages(session_id)
             existing_count = len(existing)
             if len(messages) >= existing_count:
                 # Normal case: append only new messages
+                new_ids = []
                 for msg in messages[existing_count:]:
                     content = msg.get("content", "")
                     if isinstance(content, list):
@@ -559,11 +560,14 @@ You decide when to lift the timeout — not the human."""
                             p.get("text", "") for p in content if p.get("type") == "text"
                         )
                     is_summary = isinstance(content, str) and content.startswith("[Context]")
-                    self._db.save_message(session_id, msg["role"], content,
+                    row_id = self._db.save_message(session_id, msg["role"], content,
                                           is_summary=is_summary)
+                    new_ids.append(row_id)
+                return new_ids
             else:
                 # History was trimmed (summarization fallback) — clear and reinsert
                 self._db.clear_session_messages(session_id)
+                new_ids = []
                 for msg in messages:
                     content = msg.get("content", "")
                     if isinstance(content, list):
@@ -571,20 +575,23 @@ You decide when to lift the timeout — not the human."""
                             p.get("text", "") for p in content if p.get("type") == "text"
                         )
                     is_summary = isinstance(content, str) and content.startswith("[Context]")
-                    self._db.save_message(session_id, msg["role"], content,
+                    row_id = self._db.save_message(session_id, msg["role"], content,
                                           is_summary=is_summary)
-            return
+                    new_ids.append(row_id)
+                return new_ids
 
         # JSON fallback
         conv_path = self.paths.get("conversation", "")
         if not conv_path:
-            return
+            return []
         try:
             Path(conv_path).parent.mkdir(parents=True, exist_ok=True)
             with open(conv_path, "w", encoding="utf-8") as f:
                 json.dump(messages, f, indent=2, ensure_ascii=False)
+            return []
         except IOError as e:
             logger.error(f"Failed to save conversation: {e}")
+            return []
 
     def archive_conversation(self, messages: list[dict], summary: str = ""):
         """Archive the current conversation session.
@@ -597,8 +604,15 @@ You decide when to lift the timeout — not the human."""
         if self._db:
             # Close current session with summary
             if self._active_session_id:
-                msg_count = len(self._db.get_messages(self._active_session_id))
-                self._db.close_session(self._active_session_id, summary=summary)
+                existing_msgs = self._db.get_messages(self._active_session_id)
+                msg_count = len(existing_msgs)
+                first_id = existing_msgs[0]["id"] if existing_msgs else None
+                last_id = existing_msgs[-1]["id"] if existing_msgs else None
+                self._db.close_session(
+                    self._active_session_id, summary=summary,
+                    summary_first_msg_id=first_id,
+                    summary_last_msg_id=last_id
+                )
                 logger.info(
                     f"Closed session {self._active_session_id} "
                     f"({msg_count} messages, summary: {len(summary)} chars)"

@@ -13,7 +13,7 @@ import base64
 import logging
 from pathlib import Path
 import telegramify_markdown
-from telegram import InputFile, Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import InputFile, Update, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
@@ -223,7 +223,7 @@ class TelegramChannel(Channel):
             logger.debug(f"Markdown conversion skipped: {e}")
             return text, None
 
-    async def send(self, message: str, **kwargs):
+    async def send(self, message: str, **kwargs) -> int | None:
         """Send a message to the user via Telegram.
 
         Used by the engine for proactive messages (heartbeat, scheduled tasks).
@@ -231,7 +231,7 @@ class TelegramChannel(Channel):
         """
         if not self.app or not self.chat_id:
             logger.warning("Telegram: no chat_id yet. User needs to /start the bot first.")
-            return
+            return None
 
         try:
             voice_markup = self._voice_markup()
@@ -243,33 +243,39 @@ class TelegramChannel(Channel):
                 # Skip markdown for long messages to avoid breaking format mid-tag
                 chunks = [message[i:i+4000] for i in range(0, len(message), 4000)]
                 last_idx = len(chunks) - 1
+                last_sent = None
                 for i, chunk in enumerate(chunks):
-                    await self.app.bot.send_message(
+                    last_sent = await self.app.bot.send_message(
                         chat_id=self.chat_id,
                         text=chunk,
                         reply_markup=voice_markup if i == last_idx else None,
                     )
+                return last_sent.message_id if last_sent else None
             else:
                 try:
-                    await self.app.bot.send_message(
+                    sent_msg = await self.app.bot.send_message(
                         chat_id=self.chat_id,
                         text=send_text,
                         parse_mode=parse_mode,
                         reply_markup=voice_markup,
                     )
+                    logger.info(f"Telegram message sent: {message[:50]}...")
+                    return sent_msg.message_id
                 except Exception:
                     if parse_mode:
                         logger.warning("MarkdownV2 send failed, falling back to plain text")
-                        await self.app.bot.send_message(
+                        sent_msg = await self.app.bot.send_message(
                             chat_id=self.chat_id,
                             text=message,
                             reply_markup=voice_markup,
                         )
+                        logger.info(f"Telegram message sent: {message[:50]}...")
+                        return sent_msg.message_id
                     else:
                         raise
-            logger.info(f"Telegram message sent: {message[:50]}...")
         except Exception as e:
             logger.error(f"Telegram send failed: {e}")
+            return None
 
     async def send_voice_file(self, ogg_path: Path):
         """Send a voice message directly to the chat (no incoming message to reply to).
@@ -304,7 +310,7 @@ class TelegramChannel(Channel):
             pass
 
     async def _reply_with_retry(self, message, text: str, retries: int = 3,
-                                reply_markup=None, markdown: bool = False):
+                                reply_markup=None, markdown: bool = False) -> Message | None:
         """Send a reply with retry on timeout.
 
         Automatically splits messages that exceed Telegram's 4096-char limit.
@@ -332,11 +338,12 @@ class TelegramChannel(Channel):
 
         chunks = [send_text[i:i+4000] for i in range(0, len(send_text), 4000)] if len(send_text) > 4000 else [send_text]
         last_idx = len(chunks) - 1
+        last_sent = None
         for i, chunk in enumerate(chunks):
             markup = reply_markup if i == last_idx else None
             for attempt in range(1, retries + 1):
                 try:
-                    await message.reply_text(
+                    last_sent = await message.reply_text(
                         chunk, reply_markup=markup,
                         parse_mode=parse_mode,
                         read_timeout=30, write_timeout=30,
@@ -356,8 +363,8 @@ class TelegramChannel(Channel):
                         await asyncio.sleep(3)
                     else:
                         logger.error(f"Reply failed after {retries} attempts: {e}")
-                        return False
-        return True
+                        return None
+        return last_sent
 
     async def _send_reasoning(self, message, reasoning: str):
         """Send the model's chain of thought as an expandable blockquote.
@@ -767,8 +774,9 @@ class TelegramChannel(Channel):
             typing_task = self._start_typing_loop(update.effective_chat)
             try:
                 # Route to companion via the engine using the stashed message
-                reply, tools_used, reasoning = await self._engine.handle_message(
-                    self._last_user_message, source="telegram"
+                reply, tools_used, reasoning, msg_db_ids = await self._engine.handle_message(
+                    self._last_user_message, source="telegram",
+                    channel_message_id=update.message.message_id
                 )
             finally:
                 typing_task.cancel()
@@ -791,10 +799,12 @@ class TelegramChannel(Channel):
                 await self._reply_with_retry(update.message, f"🔧 {tool_names}")
 
             if reply:
-                await self._reply_with_retry(
+                sent = await self._reply_with_retry(
                     update.message, reply, reply_markup=self._voice_markup(),
                     markdown=True
                 )
+                if sent and msg_db_ids:
+                    self._engine.db.update_message_channel_id(msg_db_ids[-1], sent.message_id)
             elif not voice_sent:
                 # Surface the specific error from the LLM client
                 error = getattr(self._engine.llm, "last_error", "") if self._engine else ""
@@ -910,8 +920,9 @@ class TelegramChannel(Channel):
             typing_task = self._start_typing_loop(update.effective_chat)
             try:
                 # Get response from companion via the engine
-                reply, tools_used, reasoning = await self._engine.handle_message(
-                    full_message, source="telegram"
+                reply, tools_used, reasoning, msg_db_ids = await self._engine.handle_message(
+                    full_message, source="telegram",
+                    channel_message_id=reply_update.message.message_id
                 )
             finally:
                 typing_task.cancel()
@@ -937,10 +948,12 @@ class TelegramChannel(Channel):
                 await self._reply_with_retry(reply_update.message, f"🔧 {tool_names}")
             if reply:
                 # Send text reply (even after voice — companion may want both)
-                await self._reply_with_retry(
+                sent = await self._reply_with_retry(
                     reply_update.message, reply, reply_markup=self._voice_markup(),
                     markdown=True
                 )
+                if sent and msg_db_ids:
+                    self._engine.db.update_message_channel_id(msg_db_ids[-1], sent.message_id)
             elif not voice_sent:
                 error = getattr(self._engine.llm, "last_error", "") if self._engine else ""
                 reason = f": {error}" if error else ""
@@ -985,8 +998,9 @@ class TelegramChannel(Channel):
                 logger.info(f"Photo downloaded: {len(photo_bytes)} bytes, sending to LLM...")
 
                 # Get response from companion via the engine (with image)
-                reply, tools_used, reasoning = await self._engine.handle_message(
-                    caption, source="telegram", image_url=image_url
+                reply, tools_used, reasoning, msg_db_ids = await self._engine.handle_message(
+                    caption, source="telegram", image_url=image_url,
+                    channel_message_id=update.message.message_id
                 )
             finally:
                 typing_task.cancel()
@@ -1000,10 +1014,12 @@ class TelegramChannel(Channel):
                 tool_names = ", ".join(dict.fromkeys(tools_used))
                 await self._reply_with_retry(update.message, f"🔧 {tool_names}")
             if reply:
-                await self._reply_with_retry(
+                sent = await self._reply_with_retry(
                     update.message, reply, reply_markup=self._voice_markup(),
                     markdown=True
                 )
+                if sent and msg_db_ids:
+                    self._engine.db.update_message_channel_id(msg_db_ids[-1], sent.message_id)
             elif not voice_sent:
                 await self._reply_with_retry(
                     update.message,
@@ -1049,7 +1065,10 @@ class TelegramChannel(Channel):
                 self._last_user_message = f"🎙️ {text}"
 
                 # Route to companion with voice hint so they know transcription may be imperfect
-                reply, tools_used, reasoning = await self._engine.handle_message(f"🎙️ {text}", source="telegram")
+                reply, tools_used, reasoning, msg_db_ids = await self._engine.handle_message(
+                    f"🎙️ {text}", source="telegram",
+                    channel_message_id=update.message.message_id
+                )
             finally:
                 typing_task.cancel()
 
@@ -1062,10 +1081,12 @@ class TelegramChannel(Channel):
                 tool_names = ", ".join(dict.fromkeys(tools_used))
                 await self._reply_with_retry(update.message, f"🔧 {tool_names}")
             if reply:
-                await self._reply_with_retry(
+                sent = await self._reply_with_retry(
                     update.message, reply, reply_markup=self._voice_markup(),
                     markdown=True
                 )
+                if sent and msg_db_ids:
+                    self._engine.db.update_message_channel_id(msg_db_ids[-1], sent.message_id)
             elif not voice_sent:
                 await self._reply_with_retry(update.message, "(I'm having trouble thinking right now — llama-server might be down)")
         except Exception as e:
