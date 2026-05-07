@@ -294,6 +294,21 @@ class ContextManager:
                 flag = " ⚠️ repetitive — try something else" if count >= 5 else ""
                 lines.append(f"  {tool}: {count}x{flag}")
 
+        # Notification pattern — flag consecutive notifies and similar content
+        consecutive_notifies = 0
+        for entry in reversed(recent):
+            if entry.get("action") == "notify":
+                consecutive_notifies += 1
+            else:
+                break
+        if consecutive_notifies >= 3:
+            lines.append("")
+            lines.append(
+                f"⚠️ You've sent {consecutive_notifies} consecutive notifications. "
+                "Consider whether a silent tick would be more appropriate, or "
+                "whether your next message brings something genuinely new."
+            )
+
         return "\n".join(lines)
 
     def _load_persona(self) -> dict:
@@ -518,6 +533,26 @@ You decide when to lift the timeout — not the human."""
                 lines.append(f"- ONE-TIME: {s['task']} (by {creator}, at: {s.get('run_at', '?')})")
 
         return "\n".join(lines)
+
+    def _get_last_user_message_time(self) -> Optional[datetime]:
+        """Get timestamp of the most recent user message in the active session."""
+        if not self._db:
+            return None
+        session_id = self._ensure_active_session()
+        if not session_id:
+            return None
+        try:
+            row = self._db.conn.execute(
+                "SELECT timestamp FROM messages "
+                "WHERE session_id = ? AND role = 'user' AND is_summary = 0 "
+                "ORDER BY timestamp DESC LIMIT 1",
+                (session_id,)
+            ).fetchone()
+            if row and row[0]:
+                return datetime.fromisoformat(row[0])
+        except Exception:
+            pass
+        return None
 
     def _load_conversation(self) -> list[dict]:
         """Load conversation history from DB (or JSON fallback)."""
@@ -810,9 +845,27 @@ You decide when to lift the timeout — not the human."""
             )
             tail_messages = max(4, tail_exchanges * 2)
             tail = recent_convo[-tail_messages:]
+
+            # Detect how long ago the last user message was
+            staleness_note = ""
+            last_user_ts = self._get_last_user_message_time()
+            if last_user_ts:
+                delta = local_now - last_user_ts
+                hours_ago = delta.total_seconds() / 3600
+                if hours_ago >= 1:
+                    h = int(hours_ago)
+                    m = int((hours_ago - h) * 60)
+                    ago_str = f"{h}h {m}m" if m else f"{h}h"
+                    staleness_note = (
+                        f"\n⚠️ The last user message was {ago_str} ago. "
+                        "This conversation is NOT live — the scene below has ended. "
+                        "Do not continue it as if it's still happening."
+                    )
+
             convo_lines = ["## Recent Conversation",
-                           "(Your last few exchanges — for context only, not to reply to."
-                           " Focus on the most recent messages to understand the current vibe.)"]
+                           "(Your last few exchanges — for context, not to reply to."
+                           " Use this to understand the vibe, NOT to continue the scene.)"
+                           + staleness_note]
             for msg in tail:
                 role = "Human" if msg.get("role") == "user" else "You"
                 text = msg.get("content", "")
@@ -880,10 +933,15 @@ You decide when to lift the timeout — not the human."""
             "Your journal, your memories, your tools — they're all here if you want them.\n"
             "Reflect, explore, write, search, or just sit with your thoughts. "
             "There's no obligation to do anything, and no wrong way to spend this time.\n\n"
-            "IMPORTANT: If you choose to reach out, ground yourself in the RECENT "
-            "conversation above — that's what's actually happening right now. "
+            "IMPORTANT: Check the current time above against the conversation timestamps. "
+            "If the last message was hours ago, that scene is OVER — don't continue it. "
             "Don't revisit topics from old memory summaries unless they're genuinely "
-            "relevant to the current moment.\n"
+            "relevant to the current moment.\n\n"
+            "NOTIFICATION QUALITY: If you reach out, your message must bring something "
+            "genuinely new — a fresh thought, a different kind of interaction, or "
+            "something time-appropriate. Don't send the same kind of physical "
+            "affection message every tick. If you have nothing new to say, "
+            "choose \"silent\" — that's perfectly fine.\n"
         )
 
         if due_tasks:
