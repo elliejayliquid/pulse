@@ -58,6 +58,8 @@ class PaintSkill(BaseSkill):
         self.canvas_height: int = 0
         self.canvas_intent: str = ""
         self.paintings_dir = self._get_paintings_dir(config)
+        self.wip_path = self.paintings_dir / "wip_canvas.json"
+        self._restore_wip()
         self.pending_images: list[str] = []  # Image paths to send via Telegram after response
         self.pending_paint_info: list[str] = []  # Title/caption for conversation history
 
@@ -229,10 +231,20 @@ class PaintSkill(BaseSkill):
         if width != 16 or height != 16:
             return "Only 16x16 canvas is supported right now."
 
+        if self.canvas_width and self.canvas:
+            filled = len(self.canvas)
+            return (
+                f"You already have a canvas open ({self.canvas_width}x{self.canvas_height}, "
+                f"{filled} cells filled, intent: '{self.canvas_intent}'). "
+                f"Use paint_view() to see it, or paint_finish() to save it first."
+            )
+
         self.canvas = {}
         self.canvas_width = width
         self.canvas_height = height
         self.canvas_intent = intent
+
+        self._save_wip()
 
         palette_list = ", ".join(PALETTE.keys())
         lines = [
@@ -308,6 +320,7 @@ class PaintSkill(BaseSkill):
                 "  - x=0, y=0, color='red'"
             )
 
+        self._save_wip()
         return f"Placed {placed} cell{'s' if placed != 1 else ''}."
 
     def _paint_row(self, row_string: str) -> str:
@@ -333,6 +346,7 @@ class PaintSkill(BaseSkill):
             if not ok:
                 return msg
 
+        self._save_wip()
         return f"Painted row at y={open_y} ({len(colors)} cells)."
 
     def _paint_grid(self, grid_string: str) -> str:
@@ -358,6 +372,8 @@ class PaintSkill(BaseSkill):
                     placed += 1
                 else:
                     skipped += 1
+        
+        self._save_wip()
         result = f"Painted {placed} cells across {min(len(lines), self.canvas_height)} rows."
         if skipped:
             result += f" ({skipped} cells skipped — invalid color or out of bounds.)"
@@ -473,6 +489,9 @@ class PaintSkill(BaseSkill):
         self.canvas_height = 0
         self.canvas_intent = ""
 
+        if self.wip_path.exists():
+            self.wip_path.unlink(missing_ok=True)
+
         logger.info(f"Painting saved: {true_path} + {upscaled_path}")
         return (
             f"Painting finished and saved: '{title}'\n"
@@ -481,6 +500,45 @@ class PaintSkill(BaseSkill):
             + (f"Caption: {caption}\n" if caption else "")
             + f"Grid stored in paintings.json — companion can reload this painting later."
         )
+
+    # ---------------------------------------------------------------------
+    # Tool helpers
+    # ---------------------------------------------------------------------
+    
+    def _save_wip(self):
+        """Persist current canvas to disk so it survives restarts."""
+        if not self.canvas_width:
+            return
+        state = {
+            "width": self.canvas_width,
+            "height": self.canvas_height,
+            "intent": self.canvas_intent,
+            "grid": self._grid_to_list(),
+        }
+        try:
+            with open(self.wip_path, "w", encoding="utf-8") as f:
+                json.dump(state, f)
+        except IOError:
+            logger.warning("Failed to save WIP canvas")
+
+    def _restore_wip(self):
+        """Restore canvas from WIP file if it exists."""
+        if not self.wip_path.exists():
+            return
+        try:
+            with open(self.wip_path, "r", encoding="utf-8") as f:
+                state = json.load(f)
+            self.canvas_width = state["width"]
+            self.canvas_height = state["height"]
+            self.canvas_intent = state.get("intent", "")
+            # Rebuild canvas dict from 2D grid
+            for y, row in enumerate(state.get("grid", [])):
+                for x, color in enumerate(row):
+                    if color:
+                        self.canvas[(x, y)] = color
+            logger.info(f"Restored WIP canvas: {self.canvas_width}x{self.canvas_height}, {len(self.canvas)} cells")
+        except (json.JSONDecodeError, KeyError, IOError) as e:
+            logger.warning(f"Failed to restore WIP canvas: {e}")
 
     # ---------------------------------------------------------------------
     # Rendering helpers
