@@ -49,6 +49,7 @@ TARGET_PX = 384  # Upscaled size for Telegram/human viewing
 
 class PaintSkill(BaseSkill):
     name = "paint"
+    tool_loop_mode = "unlimited"
 
     def __init__(self, config: dict):
         super().__init__(config)

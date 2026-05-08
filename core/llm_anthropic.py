@@ -7,6 +7,7 @@ to get native features: prompt caching, proper tool_use format, etc.
 Same interface as LLMClient so the engine can swap them transparently.
 """
 
+import hashlib
 import json
 import logging
 import time
@@ -14,7 +15,7 @@ from typing import Optional
 
 from anthropic import Anthropic, APIConnectionError, APIStatusError, InternalServerError
 
-from core.llm import PulseResponse, extract_think_content, strip_think_tags
+from core.llm import PulseResponse, extract_think_content, strip_think_tags, detect_tool_loop
 
 logger = logging.getLogger(__name__)
 
@@ -266,7 +267,7 @@ class AnthropicClient:
             return None
 
     def chat_with_tools(self, messages: list[dict], tools: list[dict],
-                        skill_registry, max_rounds: int = 5) -> tuple[Optional[str], list[str]]:
+                        skill_registry, max_rounds: int = 5, loop_mode: str = "capped") -> tuple[Optional[str], list[str]]:
         """Chat with native Anthropic tool_use support.
 
         Implements the same agentic loop as LLMClient but using
@@ -283,9 +284,17 @@ class AnthropicClient:
         self.last_error = ""
         self.last_reasoning = ""
 
+        if loop_mode == "unlimited":
+            effective_max = 999
+        else:
+            effective_max = max_rounds
+
+        recent_calls: list[tuple[str, str]] = []
+        loop_warned = False
+
         system_blocks = self._build_system_blocks(system_text)
 
-        for round_num in range(max_rounds):
+        for round_num in range(effective_max):
             try:
                 create_kwargs = dict(
                     model=self.model_name,
@@ -368,6 +377,25 @@ class AnthropicClient:
                         "content": str(result),
                     })
 
+                    args_str = json.dumps(args)
+                    args_hash = hashlib.md5(args_str.encode()).hexdigest()[:8]
+                    recent_calls.append((func_name, args_hash))
+
+                loop_warning = detect_tool_loop(recent_calls)
+                if loop_warning:
+                    if loop_warned:
+                        logger.warning("Loop persisted after warning — forcing stop")
+                        break
+                    loop_warned = True
+                    tool_results.append({"type": "text", "text": f"[SYSTEM: {loop_warning}]"})
+
+                if loop_mode == "capped" and round_num == effective_max - 3:
+                    wind_down_msg = (
+                        "⚠️ You have 2 tool rounds remaining. Wrap up your current work — "
+                        "call paint_finish() if painting, or produce your final response."
+                    )
+                    tool_results.append({"type": "text", "text": f"[SYSTEM: {wind_down_msg}]"})
+
                 # Add tool results as a user message
                 anthropic_msgs.append({"role": "user", "content": tool_results})
 
@@ -380,8 +408,9 @@ class AnthropicClient:
                 logger.error(self.last_error)
                 return None, tools_used
 
-        # Exhausted max rounds — force final response without tools
-        logger.warning(f"Tool loop hit max rounds ({max_rounds}), requesting final response...")
+        # Exhausted rounds or loop force-stop — produce clean silent response
+        logger.warning(f"Tool loop ended after {round_num + 1} rounds (mode={loop_mode})")
+
         try:
             create_kwargs = dict(
                 model=self.model_name,
@@ -407,17 +436,22 @@ class AnthropicClient:
                     else:
                         self.last_error = f"Anthropic 500 in final response after 3 retries: {e}"
                         logger.error(self.last_error)
-                        return None, tools_used
+                        return '{"action": "silent", "thinking": "Tool loop limit reached, wrapping up."}', tools_used
 
             if not response:
-                return None, tools_used
+                return '{"action": "silent", "thinking": "Tool loop limit reached, wrapping up."}', tools_used
+                
             self._track(response)
             text = ""
             for block in response.content:
                 if block.type == "text":
                     text += block.text
-            return (strip_think_tags(text) or None), tools_used
+            cleaned = strip_think_tags(text)
+            if cleaned:
+                return cleaned, tools_used
         except Exception as e:
             self.last_error = f"Final response after tool loop failed: {e}"
             logger.error(self.last_error)
-            return None, tools_used
+
+        logger.warning("Forced final response was empty/failed — returning clean silent")
+        return '{"action": "silent", "thinking": "Tool loop limit reached, wrapping up."}', tools_used

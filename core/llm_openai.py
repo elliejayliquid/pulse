@@ -8,6 +8,7 @@ on the standard Chat Completions endpoint for these models.
 Same interface as LLMClient so the engine can swap them transparently.
 """
 
+import hashlib
 import json
 import logging
 import time
@@ -15,7 +16,7 @@ from typing import Optional
 
 from openai import OpenAI, APIError, APIConnectionError
 
-from core.llm import PulseResponse, strip_think_tags
+from core.llm import PulseResponse, strip_think_tags, detect_tool_loop
 
 logger = logging.getLogger(__name__)
 
@@ -181,14 +182,22 @@ class OpenAIResponsesClient:
             return None
 
     def chat_with_tools(self, messages: list[dict], tools: list[dict],
-                        skill_registry, max_rounds: int = 5) -> tuple[Optional[str], list[str]]:
+                        skill_registry, max_rounds: int = 5, loop_mode: str = "capped") -> tuple[Optional[str], list[str]]:
         """Conversation call with tool-calling loop."""
         input_items = _convert_messages_for_responses(messages)
         tools_used = []
         self.last_reasoning = ""
         self.last_error = ""
         
-        for round_num in range(max_rounds):
+        if loop_mode == "unlimited":
+            effective_max = 999
+        else:
+            effective_max = max_rounds
+
+        recent_calls: list[tuple[str, str]] = []
+        loop_warned = False
+
+        for round_num in range(effective_max):
             try:
                 create_kwargs = dict(
                     model=self.model_name,
@@ -267,13 +276,32 @@ class OpenAIResponsesClient:
                         "output": str(result),
                     })
 
+                    args_str = fc.arguments
+                    args_hash = hashlib.md5(args_str.encode()).hexdigest()[:8]
+                    recent_calls.append((fc.name, args_hash))
+
+                loop_warning = detect_tool_loop(recent_calls)
+                if loop_warning:
+                    if loop_warned:
+                        logger.warning("Loop persisted after warning — forcing stop")
+                        break
+                    loop_warned = True
+                    input_items.append({"role": "user", "content": f"[SYSTEM: {loop_warning}]"})
+
+                if loop_mode == "capped" and round_num == effective_max - 3:
+                    wind_down_msg = (
+                        "⚠️ You have 2 tool rounds remaining. Wrap up your current work — "
+                        "call paint_finish() if painting, or produce your final response."
+                    )
+                    input_items.append({"role": "user", "content": f"[SYSTEM: {wind_down_msg}]"})
+
             except Exception as e:
                 self.last_error = f"OpenAI tool loop failed (round {round_num + 1}): {e}"
                 logger.error(self.last_error)
                 return None, tools_used
 
-        # Exhausted max rounds — force final response without tools
-        logger.warning(f"Tool loop hit max rounds ({max_rounds}), requesting final response...")
+        # Exhausted rounds or loop force-stop — produce clean silent response
+        logger.warning(f"Tool loop ended after {round_num + 1} rounds (mode={loop_mode})")
         try:
             # Omit sampling params here too
             kwargs = dict(
@@ -294,11 +322,15 @@ class OpenAIResponsesClient:
             response = self.client.responses.create(**kwargs)
             self._track(response)
             text = response.output_text or ""
-            return (strip_think_tags(text) or None), tools_used
+            cleaned = strip_think_tags(text)
+            if cleaned:
+                return cleaned, tools_used
         except Exception as e:
             self.last_error = f"Final response after tool loop failed: {e}"
             logger.error(self.last_error)
-            return None, tools_used
+
+        logger.warning("Forced final response was empty/failed — returning clean silent")
+        return '{"action": "silent", "thinking": "Tool loop limit reached, wrapping up."}', tools_used
 
     def _collect_reasoning(self, response) -> str:
         """Extract reasoning summaries from Responses API output items."""

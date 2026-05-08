@@ -23,6 +23,8 @@ class BaseSkill(ABC):
     """
 
     name: str = ""
+    tool_loop_mode: str = ""       # "" = use engine default, "capped", "unlimited"
+    tool_loop_budget: int = 0      # 0 = use engine default. Only used when mode is "capped"
 
     def __init__(self, config: dict):
         """

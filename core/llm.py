@@ -9,9 +9,11 @@ Two call modes:
 - chat_with_tools() → Telegram conversations (tool-calling loop, returns plain text)
 """
 
+import hashlib
 import json
 import logging
 import re
+from collections import Counter
 from dataclasses import dataclass
 from typing import Optional
 
@@ -80,6 +82,39 @@ def strip_think_tags(text: str) -> str:
     cleaned = cleaned.replace('</s>', '')
     
     return cleaned.strip()
+
+
+def detect_tool_loop(recent_calls: list[tuple[str, str]]) -> Optional[str]:
+    """Check recent tool calls for stuck patterns.
+    
+    Returns a warning message if a loop is detected, None otherwise.
+    """
+    if len(recent_calls) < 4:
+        return None
+    
+    last_5 = recent_calls[-5:]
+    
+    # Pattern 1: exact same (tool, args) repeated 3+ times in last 5
+    counts = Counter(last_5)
+    for call, count in counts.items():
+        if count >= 3:
+            return (
+                f"⚠️ LOOP DETECTED: You've called {call[0]} with identical arguments "
+                f"{count} times. You appear to be stuck. Stop calling tools and "
+                f"produce your final response now."
+            )
+    
+    # Pattern 2: same tool name 5 times in a row (even with different args)
+    if len(last_5) >= 5:
+        names = [c[0] for c in last_5]
+        if len(set(names)) == 1:
+            return (
+                f"⚠️ LOOP DETECTED: You've called {names[0]} 5 times in a row. "
+                f"Review your approach — are you making progress? If not, stop "
+                f"and produce your final response."
+            )
+    
+    return None
 
 
 @dataclass
@@ -317,7 +352,7 @@ class LLMClient:
             return None
 
     def chat_with_tools(self, messages: list[dict], tools: list[dict],
-                        skill_registry, max_rounds: int = 5) -> tuple[Optional[str], list[str]]:
+                        skill_registry, max_rounds: int = 5, loop_mode: str = "capped") -> tuple[Optional[str], list[str]]:
         """Chat with tool-calling support for Telegram conversations.
 
         Implements an agentic loop:
@@ -330,6 +365,7 @@ class LLMClient:
             tools: Tool definitions (from SkillRegistry.get_all_tools())
             skill_registry: SkillRegistry instance for executing tool calls
             max_rounds: Max tool-calling rounds before forcing a text response
+            loop_mode: "capped" or "unlimited"
 
         Returns:
             Tuple of (final response text, list of tool names used)
@@ -342,7 +378,15 @@ class LLMClient:
         self.last_reasoning = ""
         self.last_error = ""
 
-        for round_num in range(max_rounds):
+        if loop_mode == "unlimited":
+            effective_max = 999  # effectively unlimited, loop detector is the safety net
+        else:
+            effective_max = max_rounds
+
+        recent_calls: list[tuple[str, str]] = []  # (tool_name, args_hash)
+        loop_warned = False
+
+        for round_num in range(effective_max):
             try:
                 response = self.client.chat.completions.create(
                     model=self.model_name,
@@ -413,6 +457,25 @@ class LLMClient:
                         "content": str(result),
                     })
 
+                    args_str = tc.function.arguments
+                    args_hash = hashlib.md5(args_str.encode()).hexdigest()[:8]
+                    recent_calls.append((func_name, args_hash))
+
+                loop_warning = detect_tool_loop(recent_calls)
+                if loop_warning:
+                    if loop_warned:
+                        logger.warning("Loop persisted after warning — forcing stop")
+                        break
+                    loop_warned = True
+                    msgs.append({"role": "user", "content": f"[SYSTEM: {loop_warning}]"})
+
+                if loop_mode == "capped" and round_num == effective_max - 3:
+                    wind_down_msg = (
+                        "⚠️ You have 2 tool rounds remaining. Wrap up your current work — "
+                        "call paint_finish() if painting, or produce your final response."
+                    )
+                    msgs.append({"role": "user", "content": f"[SYSTEM: {wind_down_msg}]"})
+
             except APIConnectionError:
                 self.last_error = "LLM server disconnected during tool loop"
                 logger.warning(self.last_error)
@@ -422,8 +485,9 @@ class LLMClient:
                 logger.error(self.last_error)
                 return None, tools_used
 
-        # Exhausted max rounds — force a final response without tools
-        logger.warning(f"Tool loop hit max rounds ({max_rounds}), requesting final response...")
+        # Exhausted rounds or loop force-stop — produce clean silent response
+        logger.warning(f"Tool loop ended after {round_num + 1} rounds (mode={loop_mode})")
+
         try:
             response = self.client.chat.completions.create(
                 model=self.model_name,
@@ -435,8 +499,12 @@ class LLMClient:
             )
             self._track(response)
             text = response.choices[0].message.content or ""
-            return (strip_think_tags(text) or None), tools_used
+            cleaned = strip_think_tags(text)
+            if cleaned:
+                return cleaned, tools_used
         except Exception as e:
             self.last_error = f"Final response after tool loop failed: {e}"
             logger.error(self.last_error)
-            return None, tools_used
+
+        logger.warning("Forced final response was empty/failed — returning clean silent")
+        return '{"action": "silent", "thinking": "Tool loop limit reached, wrapping up."}', tools_used

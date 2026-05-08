@@ -136,3 +136,7 @@ class SkillRegistry:
     def get_skill(self, name: str) -> BaseSkill | None:
         """Get a specific skill instance by name."""
         return self.skills.get(name)
+
+    def get_all_skills(self) -> list[BaseSkill]:
+        """Return all registered skills."""
+        return list(self.skills.values())

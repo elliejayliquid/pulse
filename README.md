@@ -426,6 +426,28 @@ context:
 
 **Creating a new skill:** Create a `.py` file in `skills/`, extend `BaseSkill`, set `name`, implement `get_tools()` and `execute()`. See `skills/base.py` for the interface. Restart Pulse and it loads automatically (Ctrl + C to close Pulse).
 
+### Tool Loop Modes
+
+By default, the companion can use tools back-to-back in a single "turn" up to a fixed cap (e.g., 5 rounds) to prevent run-away loops and save tokens. However, some skills (like `paint` or `dev`) require many rounds to complete their work. 
+
+Pulse supports dynamic tool loop modes based on the skills available:
+- **Capped**: The default mode. The loop ends after `max_tool_rounds` (configurable in `config.yaml`). You can configure a skill to override this budget (e.g., allow 8 rounds instead of 5 if a specific skill is loaded).
+- **Unlimited**: If any loaded skill requires it, the cap is removed.
+
+Even in `unlimited` mode, Pulse has a built-in safety net: it actively monitors the companion's tool calls for repetitive patterns (e.g., getting stuck calling the same tool with the exact same arguments). If a loop is detected, Pulse injects a system warning to nudge the companion, and if they ignore it, forcefully and cleanly terminates the loop.
+
+**Configuring Loop Modes:**
+You can override a skill's loop mode and budget in your `config.yaml` or persona overlay:
+
+```yaml
+skills:
+  memory:
+    tool_loop_mode: "capped"
+    tool_loop_budget: 8      # give the memory skill up to 8 rounds instead of default 5
+  paint:
+    tool_loop_mode: "unlimited"  # this is the default for paint, but you can override it here
+```
+
 ### Dev ticks (autonomous self-improvement)
 
 Your companion can periodically review their own code and create or improve skills — autonomously. This is opt-in and heavily sandboxed:

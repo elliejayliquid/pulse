@@ -105,6 +105,7 @@ class PulseEngine:
         self.llm._provider_name = provider_type
 
         self.max_tool_rounds = model_config.get("max_tool_rounds", 5)
+        self.default_tool_loop_mode = model_config.get("tool_loop_mode", "capped")
         self.context = ContextManager(config)
         self.scheduler = ScheduleManager(config)
 
@@ -160,6 +161,36 @@ class PulseEngine:
             config.get("paths", {}).get("action_log", "data/action_log.json")
         )
         self._action_log_max = 20  # keep last 20 actions
+
+    def _resolve_tool_loop_params(self) -> tuple[str, int]:
+        """Resolve tool loop mode and budget based on skills in play.
+        
+        Priority: persona config override > skill class default > engine default.
+        If ANY active skill is 'unlimited', the session is unlimited.
+        For 'capped', use the highest budget among active skills.
+        """
+        mode = self.default_tool_loop_mode
+        budget = self.max_tool_rounds
+        
+        if not self.skill_registry:
+            return mode, budget
+        
+        skills_config = self.config.get("skills", {})
+        
+        # Check all registered skills (not just used — we don't know what
+        # the model will call in advance)
+        for skill in self.skill_registry.get_all_skills():
+            # Persona config override takes priority
+            skill_conf = skills_config.get(skill.name, {})
+            skill_mode = skill_conf.get("tool_loop_mode", "") or skill.tool_loop_mode
+            skill_budget = skill_conf.get("tool_loop_budget", 0) or skill.tool_loop_budget
+            
+            if skill_mode == "unlimited":
+                mode = "unlimited"
+            if skill_budget > budget:
+                budget = skill_budget
+        
+        return mode, budget
 
     def _roll_heartbeat_interval(self, fixed: int = 0) -> int:
         """Pick the next heartbeat interval in seconds.
@@ -555,9 +586,10 @@ class PulseEngine:
         t0 = time.time()
         if tools:
             logger.info(f"Tool-calling mode: {len(tools)} tools available")
+            tool_mode, tool_budget = self._resolve_tool_loop_params()
             reply, tools_used = await asyncio.to_thread(
                 self.llm.chat_with_tools, messages, tools, self.skill_registry,
-                max_rounds=self.max_tool_rounds
+                max_rounds=tool_budget, loop_mode=tool_mode
             )
         else:
             response = await asyncio.to_thread(self.llm.chat, messages)
@@ -745,9 +777,10 @@ class PulseEngine:
             response = None
             tg_msg_id = None
             if tools:
+                tool_mode, tool_budget = self._resolve_tool_loop_params()
                 text, tools_used = await asyncio.to_thread(
                     self.llm.chat_with_tools, messages, tools, self.skill_registry,
-                    max_rounds=self.max_tool_rounds
+                    max_rounds=tool_budget, loop_mode=tool_mode
                 )
                 if tools_used:
                     logger.info(f"Task tools used: {', '.join(tools_used)}")
@@ -836,9 +869,10 @@ class PulseEngine:
         if tools:
             # Tool-calling mode: companion can use tools, then gives JSON decision
             logger.info(f"Heartbeat with {len(tools)} tools available")
+            tool_mode, tool_budget = self._resolve_tool_loop_params()
             text, tools_used = await asyncio.to_thread(
                 self.llm.chat_with_tools, messages, tools, self.skill_registry,
-                max_rounds=self.max_tool_rounds
+                max_rounds=tool_budget, loop_mode=tool_mode
             )
             elapsed = time.time() - t0
             if tools_used:
