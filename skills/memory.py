@@ -42,8 +42,9 @@ class MemorySkill(BaseSkill):
 
     def __init__(self, config: dict):
         super().__init__(config)
-        # DB reference — shared DB for Claude personas, persona DB otherwise
+        # Shared DB for memories/journals (Claude personas share); persona DB for conversations
         self._db = config.get("_shared_db") or config.get("_db")
+        self._persona_db = config.get("_db")
         # Store config for things like legacy_db path
         self._config = config
         # JSON fallback path
@@ -689,14 +690,14 @@ class MemorySkill(BaseSkill):
         return "\n".join(results)
 
     def _search_conversations(self, query: str, limit: int = 10) -> str:
-        """Search message history via the database."""
-        if not self._db:
+        """Search message history via the persona database."""
+        if not self._persona_db:
             return "Conversation search is only available when the SQLite database is active."
 
         if not query.strip():
             return "Please provide a search query."
 
-        results = self._db.search_messages(query, limit=limit)
+        results = self._persona_db.search_messages(query, limit=limit)
         if not results:
             return f"No messages found matching '{query}'."
 
@@ -718,13 +719,13 @@ class MemorySkill(BaseSkill):
 
     def _get_conversation_context(self, message_id: int, window: int = 5) -> str:
         """Get surrounding context for a message."""
-        if not self._db:
+        if not self._persona_db:
             return "Conversation context is only available when the SQLite database is active."
 
         if message_id is None:
             return "message_id is required."
 
-        results = self._db.get_message_context(message_id, window=window)
+        results = self._persona_db.get_message_context(message_id, window=window)
         if not results:
             return f"Message ID {message_id} not found or no context available."
 

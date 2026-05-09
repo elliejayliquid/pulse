@@ -153,6 +153,7 @@ class JournalSkill(BaseSkill):
         self.entries_dir = (
             Path(entries_override) if entries_override else self.journal_dir / "entries"
         )
+        self._entries_shared = bool(entries_override)
         self.identity_dir = self.journal_dir / "identity"
         # Remember persona name for entry authorship
         self._author_name = config.get("_persona_name") or "Pulse"
@@ -162,9 +163,9 @@ class JournalSkill(BaseSkill):
 
         # Create directories (needed for latest.md even in DB mode)
         self.journal_dir.mkdir(parents=True, exist_ok=True)
-        if not self._db:
-            # File mode needs entries and identity dirs
+        if not self._db or self._entries_shared:
             self.entries_dir.mkdir(parents=True, exist_ok=True)
+        if not self._db:
             self.identity_dir.mkdir(parents=True, exist_ok=True)
 
         self._ensure_pinned_entries()
@@ -460,9 +461,9 @@ class JournalSkill(BaseSkill):
 
     def _get_next_entry_id(self) -> str:
         """Get the next available transient entry ID."""
-        if self._db:
-            # Query all journal entries and find max numeric ID
-            entries = self._db.get_journal_entries(limit=9999)
+        db = self._shared_db or self._db
+        if db:
+            entries = db.get_journal_entries(limit=9999)
             ids = []
             for e in entries:
                 try:
@@ -534,9 +535,9 @@ class JournalSkill(BaseSkill):
 
         resolved = False if entry_type in ("open_thread", "follow_up") else None
 
-        if self._db:
-            # Save to DB
-            self._db.save_journal_entry(
+        db = self._shared_db or self._db
+        if db:
+            db.save_journal_entry(
                 entry_id=entry_id,
                 author=self._author_name,
                 title=title,
@@ -549,6 +550,22 @@ class JournalSkill(BaseSkill):
                 resolved=resolved,
                 date=now,
             )
+            # Mirror to shared entries dir for claude.ai MCP compatibility
+            if self._entries_shared:
+                mirror_meta = {
+                    "date": now, "author": self._author_name, "title": title,
+                    "entry_type": entry_type,
+                    "why_it_mattered": why_it_mattered.strip(),
+                    "tags": tag_list, "importance": 5,
+                    "pinned": pinned, "resolved": resolved,
+                }
+                try:
+                    _write_markdown_entry(
+                        self.entries_dir / f"{entry_id}.md",
+                        mirror_meta, content.strip(),
+                    )
+                except IOError:
+                    logger.warning(f"Failed to mirror entry {entry_id} to shared dir")
             # Create companion memory for search
             self._create_companion_memory(entry_id, content.strip(), tag_list, now)
             self._generate_latest()
@@ -695,14 +712,13 @@ class JournalSkill(BaseSkill):
                 return f"Pinned entry '{entry_id}' not found."
             return self._format_pinned_entry(entry)
 
-        if self._db:
-            # Transient entry from DB
-            entry = self._db.get_journal_entry(entry_id)
+        db = self._shared_db or self._db
+        if db:
+            entry = db.get_journal_entry(entry_id)
             if entry:
                 return self._format_transient_entry(entry)
-            return f"Journal entry '{entry_id}' not found."
 
-        # File fallback
+        # Check shared entries dir (always in file mode, fallback in DB mode)
         md_path = self.entries_dir / f"{entry_id}.md"
         if md_path.exists():
             entry = _parse_markdown_entry(md_path)
@@ -737,9 +753,22 @@ class JournalSkill(BaseSkill):
         )
 
     def _load_transient_entries(self) -> list[dict]:
-        """Load all transient journal entries."""
-        if self._db:
-            return self._db.get_journal_entries()
+        """Load all transient journal entries.
+
+        Shared personas read from _shared_db (shared between Claudes) + file
+        fallback for entries written by claude.ai MCP.  Local personas read
+        from _db only.
+        """
+        db = self._shared_db or self._db
+        if db:
+            entries = db.get_journal_entries()
+            if self._entries_shared:
+                db_ids = {e.get("id") for e in entries}
+                for filepath in self.entries_dir.glob("*.md"):
+                    file_entry = _parse_markdown_entry(filepath)
+                    if file_entry and file_entry.get("id") not in db_ids:
+                        entries.append(file_entry)
+            return entries
 
         # File fallback
         entries = []
@@ -869,10 +898,10 @@ class JournalSkill(BaseSkill):
         journal_memories = self._load_companion_memories()
 
         # Filter by entry_type if requested
-        if entry_type and self._db:
-            # DB mode: filter by querying journal_entries for matching type
+        _je_db = self._shared_db or self._db
+        if entry_type and _je_db:
             typed_ids = set()
-            typed_entries = self._db.get_journal_entries(entry_type=entry_type, limit=9999)
+            typed_entries = _je_db.get_journal_entries(entry_type=entry_type, limit=9999)
             for e in typed_entries:
                 typed_ids.add(f"entries/{e['id']}.md")
             journal_memories = [m for m in journal_memories if m.get("journal_file") in typed_ids]
@@ -929,8 +958,9 @@ class JournalSkill(BaseSkill):
         # Extract entry ID from journal_file path (e.g. "entries/001.md" -> "001")
         entry_id = jfile.rsplit("/", 1)[-1].removesuffix(".md") if "/" in jfile else jfile
 
-        if self._db:
-            return self._db.get_journal_entry(entry_id)
+        db = self._shared_db or self._db
+        if db:
+            return db.get_journal_entry(entry_id)
 
         # File fallback
         md_path = self.journal_dir / jfile
@@ -1082,44 +1112,46 @@ class JournalSkill(BaseSkill):
                 f"Use update_journal to revise them instead."
             )
 
-        if self._db:
-            # DB mode
-            entry = self._db.get_journal_entry(entry_id)
-            if not entry:
-                return f"Journal entry '{entry_id}' not found."
+        db = self._shared_db or self._db
+        if db:
+            entry = db.get_journal_entry(entry_id)
+            if entry:
+                if not confirm:
+                    preview = entry.get("content", "")[:200]
+                    preview += "…" if len(entry.get("content", "")) > 200 else ""
+                    date_str = entry.get("date", "")[:10]
+                    etype = entry.get("entry_type", "?")
+                    return (
+                        f"⚠️ Are you sure? This will permanently delete entry '{entry_id}':\n"
+                        f"  Date: {date_str}\n"
+                        f"  Type: {etype}\n"
+                        f'  Content: "{preview}"\n\n'
+                        f"This cannot be undone. To proceed, call delete_journal again "
+                        f"with confirm=true (and a reason if you have one)."
+                    )
 
-            if not confirm:
-                preview = entry.get("content", "")[:200]
-                preview += "…" if len(entry.get("content", "")) > 200 else ""
-                date_str = entry.get("date", "")[:10]
-                etype = entry.get("entry_type", "?")
-                return (
-                    f"⚠️ Are you sure? This will permanently delete entry '{entry_id}':\n"
-                    f"  Date: {date_str}\n"
-                    f"  Type: {etype}\n"
-                    f'  Content: "{preview}"\n\n'
-                    f"This cannot be undone. To proceed, call delete_journal again "
-                    f"with confirm=true (and a reason if you have one)."
-                )
+                journal_file = f"entries/{entry_id}.md"
+                all_memories = db.get_all_memories(include_superseded=True)
+                for mem in all_memories:
+                    if mem.get("journal_file") == journal_file:
+                        db.delete_memory(mem["id"])
+                        break
 
-            # Delete companion memory from DB
-            db = self._shared_db or self._db
-            journal_file = f"entries/{entry_id}.md"
-            all_memories = db.get_all_memories(include_superseded=True)
-            for mem in all_memories:
-                if mem.get("journal_file") == journal_file:
-                    db.delete_memory(mem["id"])
-                    break
+                db.delete_journal_entry(entry_id)
+                if self._entries_shared:
+                    mirror = self.entries_dir / f"{entry_id}.md"
+                    if mirror.exists():
+                        try:
+                            mirror.unlink()
+                        except IOError:
+                            logger.warning(f"Failed to remove shared mirror for {entry_id}")
+                self._generate_latest()
 
-            # Delete the journal entry
-            self._db.delete_journal_entry(entry_id)
-            self._generate_latest()
+                reason_str = f" Reason: {reason}" if reason else ""
+                logger.info(f"Journal entry deleted from DB: {entry_id}.{reason_str}")
+                return f"Journal entry '{entry_id}' deleted.{reason_str}"
 
-            reason_str = f" Reason: {reason}" if reason else ""
-            logger.info(f"Journal entry deleted from DB: {entry_id}.{reason_str}")
-            return f"Journal entry '{entry_id}' deleted.{reason_str}"
-
-        # File fallback
+        # File fallback (also handles shared file entries not yet in DB)
         md_path = self.entries_dir / f"{entry_id}.md"
         if not md_path.exists():
             return f"Journal entry '{entry_id}' not found."
@@ -1254,39 +1286,58 @@ class JournalSkill(BaseSkill):
     def _update_transient(self, entry_id: str, content: str, resolved: bool | None,
                           now: str) -> str:
         """Update a transient journal entry."""
-        if self._db:
-            entry = self._db.get_journal_entry(entry_id)
-            if not entry:
-                return f"Journal entry '{entry_id}' not found."
+        db = self._shared_db or self._db
+        if db:
+            entry = db.get_journal_entry(entry_id)
+            if entry:
+                new_content = content.strip() if content.strip() else entry["content"]
+                new_resolved = entry.get("resolved")
+                if resolved is not None and new_resolved is not None:
+                    new_resolved = resolved
 
-            new_content = content.strip() if content.strip() else entry["content"]
-            new_resolved = entry.get("resolved")
-            if resolved is not None and new_resolved is not None:
-                new_resolved = resolved
+                db.save_journal_entry(
+                    entry_id=entry_id,
+                    author=entry.get("author", self._author_name),
+                    title=entry.get("title"),
+                    entry_type=entry["entry_type"],
+                    content=new_content,
+                    why_it_mattered=entry.get("why_it_mattered"),
+                    tags=entry.get("tags", []),
+                    importance=entry.get("importance", 5),
+                    pinned=bool(entry.get("pinned", False)),
+                    resolved=new_resolved,
+                    date=now,
+                )
 
-            self._db.save_journal_entry(
-                entry_id=entry_id,
-                author=entry.get("author", self._author_name),
-                title=entry.get("title"),
-                entry_type=entry["entry_type"],
-                content=new_content,
-                why_it_mattered=entry.get("why_it_mattered"),
-                tags=entry.get("tags", []),
-                importance=entry.get("importance", 5),
-                pinned=bool(entry.get("pinned", False)),
-                resolved=new_resolved,
-                date=now,
-            )
+                # Mirror update to shared dir
+                if self._entries_shared:
+                    mirror_meta = {
+                        "date": now,
+                        "author": entry.get("author", self._author_name),
+                        "title": entry.get("title"),
+                        "entry_type": entry["entry_type"],
+                        "why_it_mattered": entry.get("why_it_mattered"),
+                        "tags": entry.get("tags", []),
+                        "importance": entry.get("importance", 5),
+                        "pinned": bool(entry.get("pinned", False)),
+                        "resolved": new_resolved,
+                    }
+                    try:
+                        _write_markdown_entry(
+                            self.entries_dir / f"{entry_id}.md",
+                            mirror_meta, new_content,
+                        )
+                    except IOError:
+                        logger.warning(f"Failed to mirror update {entry_id} to shared dir")
 
-            # Update companion memory embedding
-            if content.strip():
-                self._update_companion_memory(entry_id, content.strip(), now)
+                if content.strip():
+                    self._update_companion_memory(entry_id, content.strip(), now)
 
-            self._generate_latest()
-            logger.info(f"Updated journal entry in DB: {entry_id}")
-            return f"Journal entry {entry_id} updated: '{content[:80]}'"
+                self._generate_latest()
+                logger.info(f"Updated journal entry in DB: {entry_id}")
+                return f"Journal entry {entry_id} updated: '{content[:80]}'"
 
-        # File fallback
+        # File fallback (also handles shared file entries not yet in DB)
         md_path = self.entries_dir / f"{entry_id}.md"
         if not md_path.exists():
             return f"Journal entry '{entry_id}' not found."
