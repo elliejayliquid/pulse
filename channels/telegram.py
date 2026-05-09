@@ -31,6 +31,13 @@ _VOICE_BUTTON_MARKUP = InlineKeyboardMarkup(
     [[InlineKeyboardButton("🔊", callback_data="tts")]]
 )
 
+_VOICE_REVIEW_MARKUP = InlineKeyboardMarkup(
+    [[InlineKeyboardButton("✅ Send", callback_data="voice_send"),
+      InlineKeyboardButton("🗑️ Cancel", callback_data="voice_cancel")]]
+)
+
+_VOICE_REVIEW_HINT = "\n\n_Reply to this message to edit_"
+
 from channels.base import Channel
 
 logger = logging.getLogger(__name__)
@@ -85,6 +92,9 @@ class TelegramChannel(Channel):
         self._pending_update = None
         self._accumulate_task: asyncio.Task | None = None
         self._accumulate_delay = 1.5  # seconds to wait for more parts
+        # Voice review: pending transcriptions awaiting Send/Cancel.
+        # Maps bot_message_id -> {"text": str, "user_msg": Message}
+        self._pending_transcriptions: dict[int, dict] = {}
 
     def set_engine(self, engine):
         """Connect the engine so incoming messages can trigger responses."""
@@ -873,6 +883,17 @@ class TelegramChannel(Channel):
             user_message = update.message.text
             logger.info(f"Telegram message from user: {user_message[:50]}...")
 
+            # Reply-to-edit: if user replies to a pending voice draft, apply correction and send
+            reply_to = update.message.reply_to_message
+            if reply_to and reply_to.message_id in self._pending_transcriptions:
+                pending = self._pending_transcriptions[reply_to.message_id]
+                corrected = user_message.replace("Reply to this message to edit", "")
+                corrected = corrected.lstrip("🎙️").strip()
+                pending["text"] = corrected
+                logger.info(f"Voice draft edited via reply (msg {reply_to.message_id}), auto-sending")
+                await self._process_voice_transcription(pending, reply_to.message_id)
+                return
+
             # Accumulate: add this part and reset the debounce timer.
             # If another part arrives within _accumulate_delay, the timer
             # resets and we keep collecting. When the timer fires, we
@@ -1034,7 +1055,7 @@ class TelegramChannel(Channel):
                 pass
 
     async def _on_voice(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle incoming voice messages — transcribe locally, then route to companion."""
+        """Handle incoming voice messages — transcribe and show draft for review."""
         try:
             if not self._engine:
                 await update.message.reply_text("I'm still starting up, give me a moment...")
@@ -1042,16 +1063,16 @@ class TelegramChannel(Channel):
 
             logger.info(f"Telegram voice message ({update.message.voice.duration}s)")
 
-            # Keep typing indicator alive through transcription + generation
+            # Auto-confirm any previous pending transcription
+            await self._auto_confirm_pending_voice()
+
             typing_task = self._start_typing_loop(update.effective_chat)
             try:
-                # Download the .ogg file
                 voice = update.message.voice
                 file = await voice.get_file()
                 ogg_path = Path(self._transcriber.data_dir) / f"_voice_{update.message.message_id}.ogg"
                 await file.download_to_drive(str(ogg_path))
 
-                # Transcribe
                 text = await self._transcriber.transcribe(ogg_path)
 
                 if not text:
@@ -1059,36 +1080,22 @@ class TelegramChannel(Channel):
                     return
 
                 logger.info(f"Voice transcribed: {text[:80]}...")
-
-                # Show what we heard (so the user can verify)
-                await self._reply_with_retry(update.message, f"🎙️ {text}")
-                self._last_user_message = f"🎙️ {text}"
-
-                # Route to companion with voice hint so they know transcription may be imperfect
-                reply, tools_used, reasoning, msg_db_ids = await self._engine.handle_message(
-                    f"🎙️ {text}", source="telegram",
-                    channel_message_id=update.message.message_id
-                )
             finally:
                 typing_task.cancel()
 
-            voice_sent = await self._send_pending_skill_output(
-                update.message, reply or "", tools_used
+            # Post draft with review buttons instead of routing immediately
+            draft_text = f"🎙️ {text}{_VOICE_REVIEW_HINT}"
+            sent = await self._reply_with_retry(
+                update.message, draft_text,
+                reply_markup=_VOICE_REVIEW_MARKUP, markdown=True
             )
-            if self._show_reasoning and reasoning:
-                await self._send_reasoning(update.message, reasoning)
-            if tools_used:
-                tool_names = ", ".join(dict.fromkeys(tools_used))
-                await self._reply_with_retry(update.message, f"🔧 {tool_names}")
-            if reply:
-                sent = await self._reply_with_retry(
-                    update.message, reply, reply_markup=self._voice_markup(),
-                    markdown=True
-                )
-                if sent and msg_db_ids:
-                    self._engine.db.update_message_channel_id(msg_db_ids[-1], sent.message_id)
-            elif not voice_sent:
-                await self._reply_with_retry(update.message, "(I'm having trouble thinking right now — llama-server might be down)")
+            if sent:
+                self._pending_transcriptions[sent.message_id] = {
+                    "text": text,
+                    "user_msg": update.message,
+                }
+                logger.info(f"Voice draft posted (msg {sent.message_id}), awaiting review")
+
         except Exception as e:
             logger.error(f"Voice handler crashed: {e}", exc_info=True)
             try:
@@ -1096,15 +1103,59 @@ class TelegramChannel(Channel):
             except Exception:
                 pass
 
-    async def _on_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle inline keyboard button taps.
+    async def _auto_confirm_pending_voice(self):
+        """Auto-confirm all pending voice transcriptions (e.g. when a new voice arrives)."""
+        for bot_msg_id, pending in list(self._pending_transcriptions.items()):
+            logger.info(f"Auto-confirming pending voice draft (msg {bot_msg_id})")
+            await self._process_voice_transcription(pending, bot_msg_id)
 
-        Currently just the 🔊 voice button: when the user taps it on any
-        assistant text reply, we synthesize that text as a voice message
-        and reply-to the original. The original text stays put — Telegram
-        doesn't allow inserting messages above existing ones, so the voice
-        appears at the bottom with a "↳ replying to: ..." link instead.
-        """
+    async def _process_voice_transcription(self, pending: dict, bot_msg_id: int):
+        """Route a confirmed voice transcription to the companion."""
+        self._pending_transcriptions.pop(bot_msg_id, None)
+        text = pending["text"]
+        user_msg = pending["user_msg"]
+
+        # Remove the review buttons and hint from the draft message
+        try:
+            await self.app.bot.edit_message_text(
+                chat_id=user_msg.chat.id,
+                message_id=bot_msg_id,
+                text=f"🎙️ {text}",
+            )
+        except Exception:
+            pass
+
+        self._last_user_message = f"🎙️ {text}"
+
+        typing_task = self._start_typing_loop(user_msg.chat)
+        try:
+            reply, tools_used, reasoning, msg_db_ids = await self._engine.handle_message(
+                f"🎙️ {text}", source="telegram",
+                channel_message_id=user_msg.message_id
+            )
+        finally:
+            typing_task.cancel()
+
+        voice_sent = await self._send_pending_skill_output(
+            user_msg, reply or "", tools_used
+        )
+        if self._show_reasoning and reasoning:
+            await self._send_reasoning(user_msg, reasoning)
+        if tools_used:
+            tool_names = ", ".join(dict.fromkeys(tools_used))
+            await self._reply_with_retry(user_msg, f"🔧 {tool_names}")
+        if reply:
+            sent = await self._reply_with_retry(
+                user_msg, reply, reply_markup=self._voice_markup(),
+                markdown=True
+            )
+            if sent and msg_db_ids:
+                self._engine.db.update_message_channel_id(msg_db_ids[-1], sent.message_id)
+        elif not voice_sent:
+            await self._reply_with_retry(user_msg, "(I'm having trouble thinking right now — llama-server might be down)")
+
+    async def _on_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle inline keyboard button taps (TTS, voice review)."""
         query = update.callback_query
         if not query:
             return
@@ -1114,6 +1165,36 @@ class TelegramChannel(Channel):
             await query.answer()
         except Exception:
             pass
+
+        # --- Voice review buttons ---
+        if query.data == "voice_send":
+            if not query.message:
+                return
+            pending = self._pending_transcriptions.get(query.message.message_id)
+            if not pending:
+                try:
+                    await query.answer("Already processed!", show_alert=False)
+                except Exception:
+                    pass
+                return
+            await self._process_voice_transcription(pending, query.message.message_id)
+            return
+
+        if query.data == "voice_cancel":
+            if not query.message:
+                return
+            pending = self._pending_transcriptions.pop(query.message.message_id, None)
+            if not pending:
+                return
+            try:
+                await query.message.edit_text("~🎙️ Cancelled~", parse_mode="MarkdownV2")
+            except Exception:
+                try:
+                    await query.message.delete()
+                except Exception:
+                    pass
+            logger.info(f"Voice draft cancelled (msg {query.message.message_id})")
+            return
 
         if query.data != "tts":
             return
