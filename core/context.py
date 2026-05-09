@@ -850,7 +850,8 @@ You decide when to lift the timeout — not the human."""
             staleness_note = ""
             last_user_ts = self._get_last_user_message_time()
             if last_user_ts:
-                delta = local_now - last_user_ts
+                # DB timestamps are UTC (SQLite datetime('now')), so compare in UTC
+                delta = now - last_user_ts.replace(tzinfo=timezone.utc)
                 hours_ago = delta.total_seconds() / 3600
                 if hours_ago >= 1:
                     h = int(hours_ago)
