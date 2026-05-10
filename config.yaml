@@ -63,7 +63,7 @@ provider:
   # gaps between calls. Pays off if a written cache is read at least one
   # extra time before expiring — ideal for personas with heartbeats every
   # ≤60 min, where most ticks would otherwise miss the 5-minute window.
-  cache_ttl: "5m"
+  cache_ttl: "1h"
 
 # --- Heartbeat ---
 heartbeat:

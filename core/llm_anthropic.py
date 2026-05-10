@@ -37,7 +37,7 @@ def _openai_tools_to_anthropic(tools: list[dict]) -> list[dict]:
     return converted
 
 
-def _convert_messages(messages: list[dict]) -> tuple[str, list[dict]]:
+def _convert_messages(messages: list[dict]) -> tuple[list[str], list[dict]]:
     """Convert OpenAI-format messages to Anthropic format.
 
     Key differences:
@@ -45,7 +45,9 @@ def _convert_messages(messages: list[dict]) -> tuple[str, list[dict]]:
     - Anthropic doesn't support "system" role in messages array
     - Tool results use "tool_result" content blocks
 
-    Returns (system_prompt, anthropic_messages).
+    Returns (system_parts, anthropic_messages).
+    system_parts is an ordered list so the caller can apply cache_control
+    selectively (e.g. only on the first stable block).
     """
     system_parts = []
     anthropic_msgs = []
@@ -139,8 +141,7 @@ def _convert_messages(messages: list[dict]) -> tuple[str, list[dict]]:
             else:
                 anthropic_msgs.append({"role": "user", "content": content or ""})
 
-    system_prompt = "\n\n".join(system_parts)
-    return system_prompt, anthropic_msgs
+    return system_parts, anthropic_msgs
 
 
 class AnthropicClient:
@@ -219,23 +220,28 @@ class AnthropicClient:
             self._available = False
             return False
 
-    def _build_system_blocks(self, system_text: str) -> list[dict]:
-        """Build system prompt as content blocks with optional caching.
+    def _build_system_blocks(self, system_parts: list[str]) -> list[dict]:
+        """Build system prompt as content blocks with selective caching.
 
-        Marks the system prompt for prompt caching — Anthropic caches
-        the prefix up to the cache_control breakpoint, giving ~90% cost
-        reduction on repeated calls with the same system prompt.
+        Only the FIRST block (stable persona/instructions) gets cache_control.
+        Subsequent blocks (dynamic context: time, memories, journal) are left
+        uncached so they don't bust the prefix hash every call.
         """
-        if not system_text:
+        if not system_parts:
             return []
 
-        block = {"type": "text", "text": system_text}
-        if self._enable_caching:
-            cache_control = {"type": "ephemeral"}
-            if self._cache_ttl == "1h":
-                cache_control["ttl"] = "1h"
-            block["cache_control"] = cache_control
-        return [block]
+        blocks = []
+        for i, text in enumerate(system_parts):
+            if not text:
+                continue
+            block = {"type": "text", "text": text}
+            if self._enable_caching and i == 0:
+                cache_control = {"type": "ephemeral"}
+                if self._cache_ttl == "1h":
+                    cache_control["ttl"] = "1h"
+                block["cache_control"] = cache_control
+            blocks.append(block)
+        return blocks
 
     def chat(self, messages: list[dict]) -> Optional[PulseResponse]:
         """Send messages and get a parsed PulseResponse.
@@ -244,12 +250,12 @@ class AnthropicClient:
         """
         self.last_error = ""
         try:
-            system_text, anthropic_msgs = _convert_messages(messages)
+            system_parts, anthropic_msgs = _convert_messages(messages)
 
             create_kwargs = dict(
                 model=self.model_name,
                 max_tokens=self.max_tokens,
-                system=self._build_system_blocks(system_text),
+                system=self._build_system_blocks(system_parts),
                 messages=anthropic_msgs,
                 temperature=self.temperature,
             )
@@ -309,7 +315,7 @@ class AnthropicClient:
         Returns:
             Tuple of (final response text, list of tool names used)
         """
-        system_text, anthropic_msgs = _convert_messages(messages)
+        system_parts, anthropic_msgs = _convert_messages(messages)
         anthropic_tools = _openai_tools_to_anthropic(tools) if tools else []
         tools_used = []
         # Reset captured reasoning and error per call so a previous chain
@@ -325,7 +331,7 @@ class AnthropicClient:
         recent_calls: list[tuple[str, str]] = []
         loop_warned = False
 
-        system_blocks = self._build_system_blocks(system_text)
+        system_blocks = self._build_system_blocks(system_parts)
 
         for round_num in range(effective_max):
             try:

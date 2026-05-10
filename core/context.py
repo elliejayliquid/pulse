@@ -960,7 +960,12 @@ You decide when to lift the timeout — not the human."""
             your_turn += f"\n{skill_menu}"
 
         your_turn += (
-            "\nWhen you're done, respond in this JSON format:\n"
+            "\nIMPORTANT: If you want to do something (set your lantern, write a journal entry, "
+            "search memories, check LoR, tend your garden, etc.) — USE THE TOOLS NOW. "
+            "Don't just describe what you'd like to do in your thinking. Call the tools, "
+            "get results, THEN produce your final response. \"silent\" means \"don't message "
+            "Lena\" — it does NOT mean \"don't do anything.\"\n\n"
+            "When you're done (after any tool calls), respond in this JSON format:\n"
             "{\n"
             '  "thinking": "your internal reasoning (not shown to anyone)",\n'
             '  "action": "notify | schedule | silent",\n'
@@ -1066,7 +1071,9 @@ You decide when to lift the timeout — not the human."""
                 "- ESCALATE to hard if it gets worse: [TIMEOUT:hard:1h:reason] / [TIMEOUT:hard:4h:reason] / [TIMEOUT:hard:12h:reason]"
             )
 
-        # Build a single system message (many models only support one system message)
+        # Split into stable system (persona+instructions, cacheable) and dynamic context
+        # (time, memories, journal — changes every call). Two system messages let the
+        # Anthropic client cache the stable prefix without the dynamic content busting it.
         context_parts = [time_block]
         if timeout_block:
             context_parts.append(timeout_block)
@@ -1076,9 +1083,12 @@ You decide when to lift the timeout — not the human."""
             context_parts.append(journal_block)
         if memories_block:
             context_parts.append(memories_block)
-        conv_system += "\n\n--- Context ---\n" + "\n\n".join(context_parts)
+        dynamic_context = "--- Context ---\n" + "\n\n".join(context_parts)
 
-        messages = [{"role": "system", "content": conv_system}]
+        messages = [
+            {"role": "system", "content": conv_system},
+            {"role": "system", "content": dynamic_context},
+        ]
 
         # Add conversation history (filter out system messages — many models
         # only support one system message and choke on extras in the middle)
