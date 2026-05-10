@@ -104,7 +104,40 @@ def _convert_messages(messages: list[dict]) -> tuple[str, list[dict]]:
                 })
 
         elif role == "user":
-            anthropic_msgs.append({"role": "user", "content": content or ""})
+            if isinstance(content, list):
+                # Multi-part content (e.g. text + image) — convert from OpenAI format
+                blocks = []
+                for part in content:
+                    if part.get("type") == "text":
+                        blocks.append({"type": "text", "text": part.get("text", "")})
+                    elif part.get("type") == "image_url":
+                        # OpenAI: {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,..."}}
+                        # Anthropic: {"type": "image", "source": {"type": "base64", "media_type": "...", "data": "..."}}
+                        url = part.get("image_url", {}).get("url", "")
+                        if url.startswith("data:"):
+                            # Parse data URI: data:<media_type>;base64,<data>
+                            header, b64_data = url.split(",", 1)
+                            media_type = header.split(":")[1].split(";")[0]
+                            blocks.append({
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": media_type,
+                                    "data": b64_data,
+                                },
+                            })
+                        else:
+                            # URL-based image
+                            blocks.append({
+                                "type": "image",
+                                "source": {
+                                    "type": "url",
+                                    "url": url,
+                                },
+                            })
+                anthropic_msgs.append({"role": "user", "content": blocks})
+            else:
+                anthropic_msgs.append({"role": "user", "content": content or ""})
 
     system_prompt = "\n\n".join(system_parts)
     return system_prompt, anthropic_msgs
