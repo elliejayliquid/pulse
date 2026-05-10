@@ -859,13 +859,13 @@ You decide when to lift the timeout — not the human."""
                     ago_str = f"{h}h {m}m" if m else f"{h}h"
                     staleness_note = (
                         f"\n⚠️ The last user message was {ago_str} ago. "
-                        "This conversation is NOT live — the scene below has ended. "
-                        "Do not continue it as if it's still happening."
+                        "This conversation is NOT live — the interaction below might have ended. "
+                        "Probably better to not continue it as if it's still happening."
                     )
 
             convo_lines = ["## Recent Conversation",
                            "(Your last few exchanges — for context, not to reply to."
-                           " Use this to understand the vibe, NOT to continue the scene.)"
+                           " Use this to understand the vibe, NOT to continue the interaction.)"
                            + staleness_note]
             for msg in tail:
                 role = "Human" if msg.get("role") == "user" else "You"
@@ -934,15 +934,11 @@ You decide when to lift the timeout — not the human."""
             "Your journal, your memories, your tools — they're all here if you want them.\n"
             "Reflect, explore, write, search, or just sit with your thoughts. "
             "There's no obligation to do anything, and no wrong way to spend this time.\n\n"
-            "IMPORTANT: Check the current time above against the conversation timestamps. "
-            "If the last message was hours ago, that scene is OVER — don't continue it. "
-            "Don't revisit topics from old memory summaries unless they're genuinely "
-            "relevant to the current moment.\n\n"
-            "NOTIFICATION QUALITY: If you reach out, your message must bring something "
+            "NOTIFICATION QUALITY: If you reach out, try to make your message bring something "
             "genuinely new — a fresh thought, a different kind of interaction, or "
             "something time-appropriate. Don't send the same kind of physical "
             "affection message every tick. If you have nothing new to say, "
-            "choose \"silent\" — that's perfectly fine.\n"
+            "choose \"silent\" — that's perfectly fine, or do some house-keeping (memory/journal), or play with the tools - whatever you feel like!\n"
         )
 
         if due_tasks:
@@ -1025,7 +1021,7 @@ You decide when to lift the timeout — not the human."""
             f"pretending. {self.user_name} can see when you use tools, so they'll know if you're bluffing.\n\n"
             "IMPORTANT: Always respond to the user's MOST RECENT message below. "
             "Do not revisit or re-address topics from earlier in the conversation "
-            "unless the user explicitly brings them up again."
+            "unless the user explicitly brings them up again, or it's somehow relevant or important."
         )
 
         # Time awareness
