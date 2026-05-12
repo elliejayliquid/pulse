@@ -228,7 +228,7 @@ class PulseEngine:
             "time": timestamp,
             "action": action,
             "tools": tools_used or [],
-            "summary": summary[:120],
+            "summary": (summary or "")[:120],
         })
 
         # Keep only the most recent entries
