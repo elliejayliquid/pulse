@@ -1,0 +1,25 @@
+# Example sticker pack YAML — copy and fill in for your own packs.
+#
+# Required fields: pack, title, stickers[].file_id, stickers[].keywords, stickers[].description
+# Optional fields: stickers[].image (filename in stickers/previews/{pack}/), supports .png, .jpg, .webp
+#
+# To build:  python scripts/build_stickers.py
+# To rebuild one pack:  python scripts/build_stickers.py cherry
+
+pack: cherry
+title: "Cherry the Bear"
+stickers:
+  - file_id: "CAACAgIAAx...REPLACE_ME_1"
+    keywords: "happy, smiling, cheerful, content"
+    description: "Cherry smiling warmly with rosy cheeks"
+    image: "happy.webp"         # optional — place in stickers/previews/cherry/
+
+  - file_id: "CAACAgIAAx...REPLACE_ME_2"
+    keywords: "sad, crying, upset, tears"
+    description: "Cherry wiping away tears with a little paw"
+    # image field omitted — preview_sticker will show description only
+
+  - file_id: "CAACAgIAAx...REPLACE_ME_3"
+    keywords: "love, heart, affection, hug"
+    description: "Cherry holding a big red heart, blushing"
+    image: "love.webp"

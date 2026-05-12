@@ -422,6 +422,15 @@ class PulseEngine:
                 for img_path in queued:
                     await telegram.send_photo(img_path)
 
+        # Stickers — send any queued stickers
+        sticker_skill = self.skill_registry.get_skill("sticker")
+        if sticker_skill and sticker_skill.pending_stickers:
+            queued = list(sticker_skill.pending_stickers)
+            sticker_skill.pending_stickers.clear()
+            if telegram and hasattr(telegram, "send_sticker"):
+                for sticker_id in queued:
+                    await telegram.send_sticker(sticker_id)
+
         # Web search — clear (not useful standalone)
         web_skill = self.skill_registry.get_skill("web_search")
         if web_skill:

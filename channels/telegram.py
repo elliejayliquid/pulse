@@ -461,6 +461,15 @@ class TelegramChannel(Channel):
         except Exception as e:
             logger.warning(f"Failed to send photo: {e}")
 
+    async def send_sticker(self, sticker_id: str):
+        """Send a sticker to the user via Telegram file_id."""
+        if not self.app or not self.chat_id:
+            return
+        try:
+            await self.app.bot.send_sticker(chat_id=self.chat_id, sticker=sticker_id)
+        except Exception as e:
+            logger.warning(f"Failed to send sticker: {e}")
+
     async def _send_voice(self, message, ogg_path: Path, retries: int = 3):
         """Send an OGG voice message and clean up the temp file.
 
@@ -535,6 +544,13 @@ class TelegramChannel(Channel):
             for img_url in paint_skill.pending_images:
                 await self.send_photo(img_url)
             paint_skill.pending_images.clear()
+
+        # Stickers — send queued stickers
+        sticker_skill = self._engine.skill_registry.get_skill("sticker")
+        if sticker_skill and sticker_skill.pending_stickers:
+            for sticker_id in sticker_skill.pending_stickers:
+                await self.send_sticker(sticker_id)
+            sticker_skill.pending_stickers.clear()
 
         # Garden — send snapshots
         garden_skill = self._engine.skill_registry.get_skill("garden")

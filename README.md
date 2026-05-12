@@ -20,6 +20,7 @@ Pulse gives your AI companion a life of their own. It runs in the background, le
 - **Vision** — Optional image understanding via mmproj (model-dependent)
 - **Voice messages** — Send voice notes on Telegram; Pulse transcribes locally via whisper.cpp (auto-downloads everything on first use)
 - **Text-to-speech** — Companions can send voice messages back via [Qwen3-TTS](https://huggingface.co/collections/Qwen/qwen3-tts), with voice design (describe a voice) or voice cloning (lock in a reference sample)
+- **Stickers** — Companions can send Telegram stickers matched by mood/context via semantic search over curated packs. Add your own packs with a simple YAML + build script
 - **Rich text** — Companion messages render with Telegram MarkdownV2 formatting (bold, italic, code blocks, links) with automatic plain-text fallback; roleplay `*action*` asterisks stay literal
 - **Desktop notifications** — Windows toast notifications for proactive messages (optional, Windows-only for now)
 - **Timeout** — Companions can disengage from genuinely harmful conversations via model-initiated soft/hard timeouts (not censorship — the companion decides based on context)
@@ -53,6 +54,7 @@ skills/                   # Auto-discovered — just drop a .py file here
   lor.py                  # LoR forum integration (optional)
   web_search.py           # Web search via DuckDuckGo (free)
   paint.py                # Pixel art canvas (16×16 emoji grid + PNG)
+  sticker.py              # Mood-matched Telegram stickers
   garden.py               # Memory garden (plant memories, watch them grow)
   dev.py                  # Autonomous skill creation (dev ticks)
 personas/                 # Per-persona config, identity, and data
@@ -63,6 +65,7 @@ scripts/
   migrate_persona.py        # Set up a persona from existing data
   migrate_json_to_db.py     # Migrate persona JSON files to SQLite
   migrate_journal_phase2.py # Migrate journal from JSON to markdown format
+  build_stickers.py          # Build sticker DB from YAML packs (with embeddings)
   backfill_embeddings.py    # Regenerate memory/journal embeddings
   export_chatgpt.py         # Stage 1: Export ChatGPT conversations.json to markdown
   export_claude.py          # Stage 1: Export Claude conversations.json to markdown
@@ -387,6 +390,41 @@ On first startup after installing it, you'll see something like:
 
 That warmup takes 30–90s on first start because CUDA graphs capture once. It happens in the background during Pulse startup, so it shouldn't block anything — and after that, every 🔊 generation runs at full speed.
 
+### Stickers (optional)
+
+Companions can send Telegram stickers that match the mood of the conversation. Sticker packs are defined as YAML files with keywords and descriptions, then compiled into a SQLite database with pre-computed embeddings for semantic search.
+
+```yaml
+skills:
+  sticker:
+    enabled: true
+```
+
+**Adding a sticker pack:**
+
+1. Create a YAML file in `stickers/packs/` (see `cherry_example.yaml` for the format):
+
+   ```yaml
+   pack: cherry
+   title: "Cherry the Bear"
+   stickers:
+     - file_id: "CAACAgIAAx..."    # Telegram sticker file_id
+       keywords: "happy, smiling, cheerful"
+       description: "Cherry smiling warmly with rosy cheeks"
+       image: "happy.png"           # optional preview image
+   ```
+
+2. Optionally place preview images (PNG/JPG/WebP) in `stickers/previews/<pack_name>/` — these are auto-resized to 128×128 for vision models
+3. Build the database:
+
+   ```bash
+   python scripts/build_stickers.py              # build all packs
+   python scripts/build_stickers.py cherry        # build one pack
+   python scripts/build_stickers.py --list        # list packs in DB
+   ```
+
+The compiled `stickers.db` is committed to Git with pre-computed embeddings, so other users can use stickers without needing an embedding model. The companion gets two tools: `send_sticker` (describe a mood, best match is sent) and `preview_sticker` (peek at the image before sending, for vision-capable models).
+
 ### Skills
 
 Skills are **auto-discovered** — any `.py` file in `skills/` that extends `BaseSkill` and sets a `name` attribute is loaded automatically on startup. No manual registration needed; just drop a file in and restart.
@@ -405,6 +443,7 @@ Built-in skills:
 | tts | `speak` | Send voice messages via Qwen3-TTS (requires CUDA GPU) |
 | web_search | `web_search`, `image_search`, `fetch_url` | Search the web using DuckDuckGo; `fetch_url` retrieves full article/page text |
 | paint | `paint_start`, `paint_set`, `paint_view`, `paint_finish` | Tiny pixel art (16×16) as a creative medium — emoji grid + PNG export |
+| sticker | `send_sticker`, `preview_sticker` | Mood-matched Telegram stickers — semantic search over pre-built sticker packs with optional image previews |
 | garden | `garden_plant`, `garden_water`, `garden_prune`, `garden_view`, `garden_info` | Plant memories as seedlings and watch them grow — surprise blooms based on memory tags, wilting from neglect, PNG snapshots via Telegram |
 | dev | `read_source`, `search_code`, `write_skill`, `list_skills`, `dev_journal_read`, `dev_journal_write` | Autonomous skill creation (used by dev ticks) |
 

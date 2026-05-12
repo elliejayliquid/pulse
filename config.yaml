@@ -169,6 +169,8 @@ skills:
     enabled: true                  # paint_start, paint_set, paint_view, paint_finish
   garden:
     enabled: true                 # garden_plant, garden_water, garden_prune, garden_view, garden_info
+  sticker:
+    enabled: true                  # send_sticker — mood-matched Telegram stickers
 
 # --- Context Injection ---
 #context:
