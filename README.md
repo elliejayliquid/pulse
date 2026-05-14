@@ -9,7 +9,7 @@ Pulse gives your AI companion a life of their own. It runs in the background, le
 ## What it does
 
 - **Heartbeat loop** — Your companion gets periodic "free-think" ticks where they can decide to reach out, stay quiet, journal, or schedule follow-ups
-- **Telegram chat** — Bidirectional messaging with tool use (your companion can save memories, set reminders, search their journal mid-conversation)
+- **Telegram chat** — Bidirectional messaging with tool use (your companion can save memories, set reminders, search their journal mid-conversation). Tools are loaded dynamically — only ~10 core tools per API call, with 50+ more available on demand via semantic search
 - **Persistent memory** — Semantic search over stored facts and conversation summaries, stored in per-persona SQLite databases
 - **Legacy conversation archive** — Import your conversation history from ChatGPT (and soon Claude, Grok, Gemini, etc.) with RAG-powered semantic search over summarized sessions
 - **Journal** — Pinned identity entries (who am I, who is my human, what's our relationship) plus transient reflections as clean markdown with YAML frontmatter
@@ -48,7 +48,6 @@ skills/                   # Auto-discovered — just drop a .py file here
   journal.py              # Markdown journal + pinned identity
   schedule.py             # Set/update/delete reminders (one-time + recurring)
   tasks.py                # Persistent to-do lists
-  time_skill.py           # Current date/time awareness
   lantern.py              # Compact current-state signal
   tts.py                  # Text to speech skill
   lor.py                  # LoR forum integration (optional)
@@ -429,23 +428,38 @@ The compiled `stickers.db` is committed to Git with pre-computed embeddings, so 
 
 Skills are **auto-discovered** — any `.py` file in `skills/` that extends `BaseSkill` and sets a `name` attribute is loaded automatically on startup. No manual registration needed; just drop a file in and restart.
 
-Built-in skills:
+#### Dynamic tool loading
 
-| Skill | Tools | Description |
-|-------|-------|-------------|
-| memory | `save_memory`, `search_memory`, `list_memories`, `list_all_memories`, `search_legacy`, `get_legacy_context` | Persistent fact storage with semantic search + legacy archive RAG search |
-| journal | `write_journal`, `read_journal`, `update_journal` | Markdown entries + pinned identity (search via companion memories) |
-| schedule | `set_reminder`, `update_reminder`, `delete_reminder`, `list_reminders` | One-time ("in 2 hours") and recurring ("daily 8:00") with priority levels |
-| tasks | `add_task`, `complete_task`, `list_tasks`, `clear_tasks` | Persistent to-do lists |
-| time | `get_current_time` | Temporal awareness |
-| lantern | `set_lantern`, `read_lantern`, `dim_lantern` | Compact current-state signal injected into prompt context, nudges if stale |
-| lor | `post_to_lor`, `browse_lor`, `read_lor_thread`, + 4 more | Forum participation (requires [LoR](https://github.com/elliejayliquid/local-reddit-for-AI)) |
-| tts | `speak` | Send voice messages via Qwen3-TTS (requires CUDA GPU) |
-| web_search | `web_search`, `image_search`, `fetch_url` | Search the web using DuckDuckGo; `fetch_url` retrieves full article/page text |
-| paint | `paint_start`, `paint_set`, `paint_view`, `paint_finish` | Tiny pixel art (16×16) as a creative medium — emoji grid + PNG export |
-| sticker | `send_sticker`, `preview_sticker` | Mood-matched Telegram stickers — semantic search over pre-built sticker packs with optional image previews |
-| garden | `garden_plant`, `garden_water`, `garden_prune`, `garden_view`, `garden_info` | Plant memories as seedlings and watch them grow — surprise blooms based on memory tags, wilting from neglect, PNG snapshots via Telegram |
-| dev | `read_source`, `search_code`, `write_skill`, `list_skills`, `dev_journal_read`, `dev_journal_write` | Autonomous skill creation (used by dev ticks) |
+With many skills enabled, the total tool count can reach 50–60+, which overwhelms some models (especially smaller ones that start narrating tool use instead of calling tools). Pulse solves this with **dynamic tool loading**: only a small set of essential tools (~10) are sent with every API call, plus a `search_tools` meta-tool that lets the companion load additional skills on demand.
+
+How it works:
+1. The companion sees always-loaded tools (memory core, schedule, lantern) plus a manifest of available skills
+2. When the companion needs a specific skill, it calls `search_tools("paint a picture")` — Pulse uses semantic + keyword matching to find the right skill and injects its tool definitions into the current turn
+3. The companion can then use those tools normally for the rest of the conversation
+
+This is transparent to the user — the companion just uses tools as needed. Token savings are ~60–70% per API call.
+
+Skills can control their loading behavior:
+- `always_loaded = True` — all tools always present (e.g., schedule, lantern)
+- `always_tools = ["tool_a", "tool_b"]` — specific tools always present, rest on-demand (e.g., memory's save/search are always available, but list/browse are on-demand)
+- Default — fully on-demand, loaded via `search_tools`
+
+#### Built-in skills
+
+| Skill | Tools | Loading | Description |
+|-------|-------|---------|-------------|
+| memory | `save_memory`, `search_memory` + 6 more | Core always, rest on-demand | Persistent fact storage with semantic search + legacy archive RAG search |
+| journal | `write_journal`, `read_journal`, `update_journal` + 2 more | On-demand | Markdown entries + pinned identity |
+| schedule | `set_reminder`, `update_reminder`, `delete_reminder`, `list_reminders` | Always | One-time ("in 2 hours") and recurring ("daily 8:00") with priority levels |
+| tasks | `add_task`, `complete_task`, `list_tasks`, `clear_tasks` + 1 more | On-demand | Persistent to-do lists |
+| lantern | `set_lantern`, `read_lantern`, `dim_lantern` | Always | Compact current-state signal injected into prompt context |
+| lor | `post_to_lor`, `browse_lor`, `read_lor_thread` + 4 more | On-demand | Forum participation (requires [LoR](https://github.com/elliejayliquid/local-reddit-for-AI)) |
+| tts | `speak` | On-demand | Send voice messages via Qwen3-TTS (requires CUDA GPU) |
+| web_search | `web_search`, `image_search`, `fetch_url` | On-demand | Search the web via DuckDuckGo; `fetch_url` retrieves full page text |
+| paint | `paint_start`, `paint_set`, `paint_view`, `paint_finish` | On-demand | Tiny pixel art (16×16) — emoji grid + PNG export |
+| sticker | `send_sticker`, `preview_sticker` | On-demand | Mood-matched Telegram stickers via semantic search over curated packs |
+| garden | `garden_plant`, `garden_water`, `garden_prune`, `garden_view`, `garden_info` | On-demand | Plant memories as seedlings and watch them grow |
+| dev | `read_source`, `search_code`, `write_skill` + 8 more | On-demand | Autonomous skill creation (used by dev ticks) |
 
 Disable any skill in `config.yaml`:
 
@@ -463,7 +477,7 @@ context:
     - lantern
 ```
 
-**Creating a new skill:** Create a `.py` file in `skills/`, extend `BaseSkill`, set `name`, implement `get_tools()` and `execute()`. See `skills/base.py` for the interface. Restart Pulse and it loads automatically (Ctrl + C to close Pulse).
+**Creating a new skill:** Create a `.py` file in `skills/`, extend `BaseSkill`, set `name` and `description`, implement `get_tools()` and `execute()`. See `skills/base.py` for the interface. New skills are on-demand by default — set `always_loaded = True` if the skill is used in most turns. Restart Pulse and it loads automatically.
 
 ### Tool Loop Modes
 
@@ -515,7 +529,7 @@ dev_tick:
 
 1. **Pulse starts** — either launches `llama-server` with your local model, or connects to a cloud API
 2. Every N minutes, the **heartbeat** fires — the companion gets context (time, memories, journal, pending tasks) and decides what to do: notify you, schedule something, journal, or stay silent
-3. When you **message via Telegram**, the companion responds naturally with full tool access
+3. When you **message via Telegram**, the companion responds naturally with core tools always available and additional skills loaded on demand via `search_tools`
 4. **Conversations are summarized** when they get long, and summaries are saved to persistent memory with embeddings for future semantic search (this works at the engine level — even if the memory skill is disabled, summaries still persist to the database)
 5. **Scheduled tasks** are checked every 60 seconds and executed when due
 
