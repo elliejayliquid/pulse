@@ -281,20 +281,22 @@ class LLMClient:
             )
             # Log prompt cache stats (OpenAI/OpenRouter automatic caching)
             details = getattr(response.usage, "prompt_tokens_details", None)
-            cached = getattr(details, "cached_tokens", 0) if details else 0
-            written = getattr(details, "cache_write_tokens", 0) if details else 0
-            prompt_total = response.usage.prompt_tokens or 0
-            if cached or written:
-                parts = []
-                if cached:
-                    pct = cached * 100 // prompt_total if prompt_total else 0
-                    parts.append(f"{cached} read ({pct}% hit)")
-                if written:
-                    parts.append(f"{written} written")
-                logger.info(
-                    f"Prompt cache: {', '.join(parts)} of "
-                    f"{prompt_total} prompt tokens"
-                )
+            if details:
+                cached = getattr(details, "cached_tokens", 0) or 0
+                written = getattr(details, "cache_write_tokens", 0) or 0
+                prompt_total = response.usage.prompt_tokens or 0
+                if cached or written:
+                    parts = []
+                    if cached:
+                        pct = cached * 100 // prompt_total if prompt_total else 0
+                        parts.append(f"{cached} read ({pct}% hit)")
+                    if written:
+                        parts.append(f"{written} written")
+                    logger.info(
+                        f"Prompt cache: {', '.join(parts)} of "
+                        f"{prompt_total} prompt tokens"
+                    )
+                logger.debug(f"Prompt token details: {details}")
 
     def is_available(self) -> bool:
         """Check if the LLM server is reachable."""
