@@ -279,14 +279,21 @@ class LLMClient:
                 provider=self._provider_name,
                 model=self.model_name,
             )
-            # Log prompt cache stats (OpenAI automatic caching)
+            # Log prompt cache stats (OpenAI/OpenRouter automatic caching)
             details = getattr(response.usage, "prompt_tokens_details", None)
             cached = getattr(details, "cached_tokens", 0) if details else 0
-            if cached:
+            written = getattr(details, "cache_write_tokens", 0) if details else 0
+            prompt_total = response.usage.prompt_tokens or 0
+            if cached or written:
+                parts = []
+                if cached:
+                    pct = cached * 100 // prompt_total if prompt_total else 0
+                    parts.append(f"{cached} read ({pct}% hit)")
+                if written:
+                    parts.append(f"{written} written")
                 logger.info(
-                    f"Prompt cache: {cached} cached of "
-                    f"{response.usage.prompt_tokens} prompt tokens "
-                    f"({cached * 100 // response.usage.prompt_tokens}% hit)"
+                    f"Prompt cache: {', '.join(parts)} of "
+                    f"{prompt_total} prompt tokens"
                 )
 
     def is_available(self) -> bool:
@@ -299,6 +306,33 @@ class LLMClient:
             logger.debug(f"LLM server not available: {e}")
             self._available = False
             return False
+
+    @staticmethod
+    def _merge_leading_system_messages(messages: list[dict]) -> list[dict]:
+        """Merge consecutive system messages at the start into one.
+
+        OpenAI/OpenRouter automatic prompt caching is prefix-based — the
+        cache key is the token sequence from the start of the request.
+        Multiple system messages can break this because some providers
+        restart the prefix counter at each system boundary. Merging them
+        into a single block gives the largest possible stable prefix for
+        cache hits.
+        """
+        if not messages or messages[0].get("role") != "system":
+            return messages
+        system_parts = []
+        rest_start = 0
+        for i, msg in enumerate(messages):
+            if msg.get("role") == "system":
+                system_parts.append(msg["content"])
+                rest_start = i + 1
+            else:
+                break
+        if len(system_parts) <= 1:
+            return messages
+        merged = [{"role": "system", "content": "\n\n".join(system_parts)}]
+        merged.extend(messages[rest_start:])
+        return merged
 
     def chat(self, messages: list[dict]) -> Optional[PulseResponse]:
         """Send messages to the LLM and get a parsed response.
@@ -318,7 +352,7 @@ class LLMClient:
         try:
             response = self.client.chat.completions.create(
                 model=self.model_name,
-                messages=messages,
+                messages=self._merge_leading_system_messages(messages),
                 temperature=self.temperature,
                 top_p=self.top_p,
                 frequency_penalty=self.frequency_penalty,
@@ -370,8 +404,8 @@ class LLMClient:
         Returns:
             Tuple of (final response text, list of tool names used)
         """
-        # Work on a copy so we don't mutate the caller's messages
-        msgs = list(messages)
+        # Merge leading system messages for better prefix caching, then copy
+        msgs = list(self._merge_leading_system_messages(messages))
         tools_used = []
         # Reset captured reasoning at the start of each call so a previous
         # call's chain of thought never leaks forward.
