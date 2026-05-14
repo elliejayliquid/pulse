@@ -781,6 +781,7 @@ You decide when to lift the timeout — not the human."""
     def build_heartbeat_prompt(self, due_tasks: list[dict] = None,
                                has_tools: bool = False,
                                skill_summary: list[dict] = None,
+                               on_demand_manifest: list[dict] = None,
                                timeout_state: dict = None) -> list[dict]:
         """Build a context-budgeted prompt for a heartbeat tick.
 
@@ -951,11 +952,17 @@ You decide when to lift the timeout — not the human."""
             # Build a grouped skill/tool menu
             skill_menu = ""
             if skill_summary:
-                menu_lines = ["## Available Skills & Tools"]
+                menu_lines = ["## Your Tools (always available)"]
                 for s in skill_summary:
                     tools_str = ", ".join(s["tools"])
                     menu_lines.append(f"  {s['skill']}: {tools_str}")
                 skill_menu = "\n".join(menu_lines) + "\n\n"
+
+            if on_demand_manifest:
+                od_lines = ["## More skills (call search_tools to load)"]
+                for s in on_demand_manifest:
+                    od_lines.append(f"  {s['skill']}: {s['description']} ({s['tool_count']} tools)")
+                skill_menu += "\n".join(od_lines) + "\n\n"
 
             your_turn += f"\n{skill_menu}"
 
@@ -987,7 +994,8 @@ You decide when to lift the timeout — not the human."""
 
     def build_conversation_prompt(self, user_message: str, history: list[dict] = None,
                                    image_url: str = None, timeout_state: dict = None,
-                                   skill_summary: list[dict] = None) -> list[dict]:
+                                   skill_summary: list[dict] = None,
+                                   on_demand_manifest: list[dict] = None) -> list[dict]:
         """Build a prompt for responding to a message from the user.
 
         Unlike heartbeat prompts, this includes conversation history and
@@ -1007,11 +1015,17 @@ You decide when to lift the timeout — not the human."""
         # Build dynamic skill menu (same as heartbeat prompt)
         skill_menu = ""
         if skill_summary:
-            menu_lines = ["Your available skills & tools:"]
+            menu_lines = ["Your tools (always available):"]
             for s in skill_summary:
                 tools_str = ", ".join(s["tools"])
                 menu_lines.append(f"  {s['skill']}: {tools_str}")
             skill_menu = "\n".join(menu_lines) + "\n"
+
+        if on_demand_manifest:
+            od_lines = ["More skills (call search_tools to load):"]
+            for s in on_demand_manifest:
+                od_lines.append(f"  {s['skill']}: {s['description']} ({s['tool_count']} tools)")
+            skill_menu += "\n".join(od_lines) + "\n"
 
         conv_system += (
             f"\n\nYou are now in a direct conversation with {self.user_name} via Telegram. "

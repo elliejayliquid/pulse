@@ -19,6 +19,8 @@ STALE_HOURS = 24
 
 class LanternSkill(BaseSkill):
     name = "lantern"
+    description = "Track and update persistent emotional or contextual state"
+    always_loaded = True
 
     def __init__(self, config: dict):
         super().__init__(config)

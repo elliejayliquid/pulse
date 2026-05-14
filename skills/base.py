@@ -23,6 +23,10 @@ class BaseSkill(ABC):
     """
 
     name: str = ""
+    description: str = ""          # one-line summary for search + prompt display
+    always_loaded: bool = False    # True = all tools always in API calls
+    always_tools: list[str] = []   # specific tool names always loaded even if skill is on-demand
+    workflow: str = ""             # usage hints injected when skill is loaded via search_tools
     tool_loop_mode: str = ""       # "" = use engine default, "capped", "unlimited"
     tool_loop_budget: int = 0      # 0 = use engine default. Only used when mode is "capped"
 

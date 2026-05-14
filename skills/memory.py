@@ -39,6 +39,8 @@ def _blob_to_vec(blob: bytes | None) -> np.ndarray | None:
 
 class MemorySkill(BaseSkill):
     name = "memory"
+    description = "Save, recall, and search persistent memories, facts, and conversation history"
+    always_tools = ["save_memory", "search_memory"]
 
     def __init__(self, config: dict):
         super().__init__(config)

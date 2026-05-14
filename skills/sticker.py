@@ -27,6 +27,7 @@ def _blob_to_vec(blob: bytes | None) -> np.ndarray | None:
 
 class StickerSkill(BaseSkill):
     name = "sticker"
+    description = "Send mood-matched Telegram stickers"
 
     def __init__(self, config: dict):
         super().__init__(config)

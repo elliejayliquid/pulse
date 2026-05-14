@@ -581,9 +581,10 @@ class PulseEngine:
 
         # Build conversation prompt (with optional image)
         skill_summary = self.skill_registry.get_skill_summary() if self.skill_registry else []
+        on_demand_manifest = self.skill_registry.get_on_demand_manifest() if self.skill_registry else []
         messages = self.context.build_conversation_prompt(
             message, history, image_url=image_url, timeout_state=timeout_state,
-            skill_summary=skill_summary
+            skill_summary=skill_summary, on_demand_manifest=on_demand_manifest
         )
         logger.info(f"Sending {len(messages)} messages to LLM for {source} reply"
                      f"{' (with image)' if image_url else ''}...")
@@ -591,7 +592,7 @@ class PulseEngine:
         # Get response — run in thread so we don't block the event loop!
         # If skills are available, use tool-calling mode; otherwise plain chat.
         tools_used = []
-        tools = self.skill_registry.get_all_tools() if self.skill_registry else []
+        tools = self.skill_registry.get_always_tools() if self.skill_registry else []
         t0 = time.time()
         if tools:
             logger.info(f"Tool-calling mode: {len(tools)} tools available")
@@ -862,11 +863,13 @@ class PulseEngine:
             return
 
         # Free-think tick — companion decides what to do
-        tools = self.skill_registry.get_all_tools() if self.skill_registry else []
+        tools = self.skill_registry.get_always_tools() if self.skill_registry else []
         skill_summary = self.skill_registry.get_skill_summary() if self.skill_registry else []
+        on_demand_manifest = self.skill_registry.get_on_demand_manifest() if self.skill_registry else []
 
         messages = self.context.build_heartbeat_prompt(
             has_tools=bool(tools), skill_summary=skill_summary,
+            on_demand_manifest=on_demand_manifest,
             timeout_state=self._check_timeout_state()
         )
 

@@ -409,7 +409,14 @@ class AnthropicClient:
                     args = tu.input or {}
                     logger.info(f"Executing tool: {func_name}({args})")
                     tools_used.append(func_name)
-                    result = skill_registry.execute(func_name, args)
+
+                    if func_name == "search_tools" and hasattr(skill_registry, 'search_tools'):
+                        found_tools, result = skill_registry.search_tools(args.get("query", ""))
+                        if found_tools:
+                            tools.extend(found_tools)
+                            anthropic_tools.extend(_openai_tools_to_anthropic(found_tools))
+                    else:
+                        result = skill_registry.execute(func_name, args)
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": tu.id,

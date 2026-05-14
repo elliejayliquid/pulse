@@ -25,6 +25,7 @@ class LoRSkill(BaseSkill):
     """Browse and post on LoR (Local Reddit for AIs)."""
 
     name = "lor"
+    description = "Read, write, and explore the Lore of Resonance forum"
 
     def __init__(self, config: dict):
         super().__init__(config)

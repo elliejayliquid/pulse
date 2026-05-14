@@ -75,6 +75,8 @@ class DevSkill(BaseSkill):
     """Agentic coding tools for self-improvement."""
 
     name = "dev"
+    description = "Read, write, search, and manage Pulse skill code for self-improvement"
+    workflow = "list_skills → read_source → search_code → write_skill → dev_journal_write"
 
     def __init__(self, config: dict):
         super().__init__(config)

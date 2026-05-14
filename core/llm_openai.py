@@ -267,7 +267,13 @@ class OpenAIResponsesClient:
                         args = {}
                         logger.warning(f"Failed to parse tool arguments for {fc.name}: {fc.arguments}")
                     tools_used.append(fc.name)
-                    result = skill_registry.execute(fc.name, args)
+
+                    if fc.name == "search_tools" and hasattr(skill_registry, 'search_tools'):
+                        found_tools, result = skill_registry.search_tools(args.get("query", ""))
+                        if found_tools:
+                            tools.extend(found_tools)
+                    else:
+                        result = skill_registry.execute(fc.name, args)
                     
                     # Append tool result for this function call
                     input_items.append({

@@ -13,6 +13,8 @@ logger = logging.getLogger(__name__)
 
 class ScheduleSkill(BaseSkill):
     name = "schedule"
+    description = "Create, list, and manage reminders and scheduled tasks"
+    always_loaded = True
 
     def __init__(self, config: dict, scheduler=None):
         super().__init__(config)

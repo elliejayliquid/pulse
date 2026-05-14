@@ -155,8 +155,6 @@ skills:
     enabled: true                 # save_memory, search_memory
   schedule:
     enabled: true                 # set_reminder
-  time:
-    enabled: true                 # get_current_time
   journal:
     enabled: true                 # write_journal, read_journal, update_journal
   lor:

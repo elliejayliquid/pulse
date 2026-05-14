@@ -11,6 +11,7 @@ from skills.base import BaseSkill
 
 class TasksSkill(BaseSkill):
     name = "tasks"
+    description = "Manage persistent to-do lists with completion tracking"
 
     def __init__(self, config: dict):
         super().__init__(config)

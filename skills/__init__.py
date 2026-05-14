@@ -5,16 +5,22 @@ Skills are auto-discovered: any .py file in this directory that contains
 a BaseSkill subclass with a `name` attribute will be found and loaded.
 Skills are enabled/disabled via config.yaml's `skills:` section.
 
+Tools are split into always-loaded (every API call) and on-demand (loaded
+via the search_tools meta-tool). This reduces per-call token cost by ~60-70%.
+
 Usage:
     registry = SkillRegistry(config)
-    tools = registry.get_all_tools()       # For the OpenAI API `tools` param
-    result = registry.execute("save_memory", {"text": "..."})  # Run a tool call
+    tools = registry.get_always_tools()    # Core tools + search_tools meta-tool
+    tools = registry.get_all_tools()       # Everything (for scheduled tasks)
+    result = registry.execute("save_memory", {"text": "..."})
 """
 
 import importlib
 import inspect
 import logging
 import pkgutil
+
+import numpy as np
 
 from skills.base import BaseSkill
 
@@ -47,12 +53,22 @@ def _discover_skills() -> list[type[BaseSkill]]:
 
 
 class SkillRegistry:
-    """Loads enabled skills and routes tool calls to the right skill."""
+    """Loads enabled skills and routes tool calls to the right skill.
+
+    Tools are categorized into:
+    - Always-loaded: present in every API call (core tools like memory, schedule)
+    - On-demand: discovered and loaded via the search_tools meta-tool
+    """
 
     def __init__(self, config: dict):
         self.config = config
         self.skills: dict[str, BaseSkill] = {}
         self._tool_map: dict[str, BaseSkill] = {}  # tool_name -> skill instance
+
+        # Always vs on-demand tool separation
+        self._always_tools: list[dict] = []     # tool defs always in API calls
+        self._on_demand_tools: dict[str, list[dict]] = {}  # skill_name -> tool defs
+        self._on_demand_skills: dict[str, BaseSkill] = {}  # skill_name -> instance
 
         skills_config = config.get("skills", {})
         discovered = _discover_skills()
@@ -61,7 +77,6 @@ class SkillRegistry:
             skill_name = cls.name
             skill_conf = skills_config.get(skill_name, {})
 
-            # Default to enabled if not specified
             if not skill_conf.get("enabled", True):
                 logger.info(f"Skill '{skill_name}' is disabled in config.")
                 continue
@@ -70,56 +85,197 @@ class SkillRegistry:
                 skill = cls(config)
                 self.skills[skill_name] = skill
 
-                # Map each tool name to its skill
-                for tool_def in skill.get_tools():
+                all_tools = skill.get_tools()
+                always_tool_names = set(cls.always_tools) if cls.always_tools else set()
+
+                for tool_def in all_tools:
                     tool_name = tool_def["function"]["name"]
                     self._tool_map[tool_name] = skill
-                    logger.debug(f"Registered tool: {tool_name} (from {skill_name})")
 
-                logger.info(f"Skill loaded: {skill_name} ({len(skill.get_tools())} tools)")
+                if cls.always_loaded:
+                    self._always_tools.extend(all_tools)
+                elif always_tool_names:
+                    for td in all_tools:
+                        tn = td["function"]["name"]
+                        if tn in always_tool_names:
+                            self._always_tools.append(td)
+                        else:
+                            self._on_demand_tools.setdefault(skill_name, []).append(td)
+                    self._on_demand_skills[skill_name] = skill
+                else:
+                    self._on_demand_tools[skill_name] = all_tools
+                    self._on_demand_skills[skill_name] = skill
+
+                logger.info(f"Skill loaded: {skill_name} ({len(all_tools)} tools)")
             except Exception as e:
                 logger.error(f"Failed to load skill '{skill_name}': {e}")
 
+        always_count = len(self._always_tools)
+        on_demand_count = sum(len(t) for t in self._on_demand_tools.values())
         logger.info(
             f"SkillRegistry ready: {len(self.skills)} skills, "
-            f"{len(self._tool_map)} tools"
+            f"{always_count} always-loaded + {on_demand_count} on-demand tools"
         )
 
-    def get_all_tools(self) -> list[dict]:
-        """Collect tool definitions from all enabled skills.
+    # ── Tool retrieval ──────────────────────────────────────────
 
-        Returns a flat list suitable for the OpenAI API `tools` parameter.
-        """
+    def get_always_tools(self) -> list[dict]:
+        """Tools for always-loaded skills + the search_tools meta-tool."""
+        tools = list(self._always_tools)
+        if self._on_demand_skills:
+            tools.append(self._search_tools_definition())
+        return tools
+
+    def get_all_tools(self) -> list[dict]:
+        """All tool definitions (for scheduled tasks that might need anything)."""
         tools = []
         for skill in self.skills.values():
             tools.extend(skill.get_tools())
         return tools
 
     def get_skill_summary(self) -> list[dict]:
-        """Return a compact summary of skills and their tool names.
-
-        Used in heartbeat prompts so the companion knows what's available
-        without seeing full schemas in the prompt text.
-        """
+        """Compact summary of always-loaded skills and their tool names."""
         summary = []
+        seen_tools = set()
         for name, skill in self.skills.items():
             tool_names = [
                 t.get("function", {}).get("name", "?")
                 for t in skill.get_tools()
+                if t.get("function", {}).get("name", "?") in
+                {td["function"]["name"] for td in self._always_tools}
             ]
-            summary.append({"skill": name, "tools": tool_names})
+            if tool_names:
+                summary.append({"skill": name, "tools": tool_names})
         return summary
 
-    def execute(self, tool_name: str, arguments: dict) -> str:
-        """Execute a tool call by routing to the appropriate skill.
+    def get_on_demand_manifest(self) -> list[dict]:
+        """Compact summaries for prompt injection."""
+        manifest = []
+        for name, skill in self._on_demand_skills.items():
+            tool_count = len(self._on_demand_tools.get(name, []))
+            tool_names = [
+                td["function"]["name"]
+                for td in self._on_demand_tools.get(name, [])
+            ]
+            manifest.append({
+                "skill": name,
+                "description": skill.description or name,
+                "tool_count": tool_count,
+                "tools": tool_names,
+            })
+        return manifest
 
-        Args:
-            tool_name: The function name from the model's tool call
-            arguments: Parsed arguments dict
+    # ── search_tools meta-tool ──────────────────────────────────
 
-        Returns:
-            Result string from the skill.
+    def _search_tools_definition(self) -> dict:
+        manifest = self.get_on_demand_manifest()
+        skill_list = ", ".join(
+            f"{s['skill']} ({s['tool_count']} tools)"
+            for s in manifest
+        )
+        return {
+            "type": "function",
+            "function": {
+                "name": "search_tools",
+                "description": (
+                    "Load additional tools by describing what you need. "
+                    "Available: " + skill_list + ". "
+                    "Describe what you want to do and the matching tools "
+                    "will be added for you to use on your next step."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": (
+                                "What you want to do, e.g. 'paint a picture', "
+                                "'search the web', 'write in my journal', "
+                                "'send a sticker', 'manage my tasks'"
+                            ),
+                        },
+                    },
+                    "required": ["query"],
+                },
+            },
+        }
+
+    def search_tools(self, query: str, top_k: int = 2) -> tuple[list[dict], str]:
+        """Find on-demand tools matching a query.
+
+        Returns (tool_defs, result_text) — tool_defs to extend the tools list,
+        result_text to feed back to the model.
         """
+        if not query.strip():
+            return [], "Please describe what you want to do."
+
+        query_lower = query.lower()
+        scored = []
+
+        # Try semantic search first
+        model = self._get_embedding_model()
+        if model:
+            query_vec = model.encode(query)
+            norm_q = np.linalg.norm(query_vec)
+            if norm_q > 0:
+                for name, skill in self._on_demand_skills.items():
+                    desc = (skill.description or name).lower()
+                    tool_text = " ".join(
+                        td["function"].get("description", "")
+                        for td in self._on_demand_tools.get(name, [])
+                    )
+                    embed_text = f"{name} {desc} {tool_text}"
+                    vec = model.encode(embed_text)
+                    norm_v = np.linalg.norm(vec)
+                    if norm_v == 0:
+                        continue
+                    cosine = float(np.dot(query_vec, vec) / (norm_q * norm_v))
+                    scored.append((cosine, name))
+
+        if not scored:
+            # Keyword fallback
+            for name, skill in self._on_demand_skills.items():
+                desc = (skill.description or "").lower()
+                tool_names = " ".join(
+                    td["function"]["name"].replace("_", " ")
+                    for td in self._on_demand_tools.get(name, [])
+                )
+                searchable = f"{name} {desc} {tool_names}".lower()
+                overlap = sum(1 for word in query_lower.split() if word in searchable)
+                if overlap > 0:
+                    scored.append((overlap, name))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        matched_skills = [name for _, name in scored[:top_k]]
+
+        if not matched_skills:
+            return [], "No matching tools found. Try a different description."
+
+        tools = []
+        result_parts = []
+        for skill_name in matched_skills:
+            skill_tools = self._on_demand_tools.get(skill_name, [])
+            tools.extend(skill_tools)
+            skill = self._on_demand_skills[skill_name]
+            tool_names = [td["function"]["name"] for td in skill_tools]
+            result_parts.append(f"{skill_name}: {', '.join(tool_names)}")
+            if skill.workflow:
+                result_parts.append(f"  Workflow: {skill.workflow}")
+
+        result_text = f"Loaded {len(tools)} tools:\n" + "\n".join(result_parts)
+        return tools, result_text
+
+    def _get_embedding_model(self):
+        try:
+            from core.context import _get_embedding_model
+            return _get_embedding_model()
+        except Exception:
+            return None
+
+    # ── Execution ───────────────────────────────────────────────
+
+    def execute(self, tool_name: str, arguments: dict) -> str:
+        """Execute a tool call by routing to the appropriate skill."""
         skill = self._tool_map.get(tool_name)
         if not skill:
             logger.warning(f"No skill found for tool: {tool_name}")

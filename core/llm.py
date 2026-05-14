@@ -448,7 +448,13 @@ class LLMClient:
 
                     logger.info(f"Executing tool: {func_name}({args})")
                     tools_used.append(func_name)
-                    result = skill_registry.execute(func_name, args)
+
+                    if func_name == "search_tools" and hasattr(skill_registry, 'search_tools'):
+                        found_tools, result = skill_registry.search_tools(args.get("query", ""))
+                        if found_tools:
+                            tools.extend(found_tools)
+                    else:
+                        result = skill_registry.execute(func_name, args)
 
                     msgs.append({
                         "role": "tool",

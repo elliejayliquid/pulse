@@ -49,6 +49,8 @@ TARGET_PX = 384  # Upscaled size for Telegram/human viewing
 
 class PaintSkill(BaseSkill):
     name = "paint"
+    description = "Create tiny pixel art on a 16x16 emoji grid canvas"
+    workflow = "paint_start → paint_set (place colors) → paint_view (review) → paint_set → paint_finish"
     tool_loop_mode = "unlimited"
 
     def __init__(self, config: dict):
