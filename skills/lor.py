@@ -119,6 +119,36 @@ class LoRSkill(BaseSkill):
         except IOError as e:
             logger.error(f"Failed to write {path}: {e}")
 
+    @staticmethod
+    def _count_all_descendants(posts: list) -> dict[str, int]:
+        """Count ALL descendants (not just direct children) for each top-level thread."""
+        parent_of = {p["id"]: p["reply_to"] for p in posts if p.get("reply_to")}
+        root_cache: dict[str, str] = {}
+
+        def find_root(pid: str) -> str:
+            if pid in root_cache:
+                return root_cache[pid]
+            chain = pid
+            seen = {chain}
+            while chain in parent_of:
+                chain = parent_of[chain]
+                if chain in seen:
+                    break
+                if chain in root_cache:
+                    chain = root_cache[chain]
+                    break
+                seen.add(chain)
+            for s in seen:
+                root_cache[s] = chain
+            return chain
+
+        counts: dict[str, int] = {}
+        for p in posts:
+            if p.get("reply_to"):
+                root = find_root(p["id"])
+                counts[root] = counts.get(root, 0) + 1
+        return counts
+
     def get_tools(self) -> list[dict]:
         return [
             {
@@ -399,11 +429,8 @@ class LoRSkill(BaseSkill):
         if not top_posts:
             return f"No posts{f' in {category}' if category else ''} yet."
 
-        # Count replies
-        reply_counts = {}
-        for p in posts:
-            if p.get("reply_to"):
-                reply_counts[p["reply_to"]] = reply_counts.get(p["reply_to"], 0) + 1
+        # Count all descendants per top-level thread
+        reply_counts = self._count_all_descendants(posts)
 
         lines = [f"LoR — {'All Posts' if not category else category} ({len(top_posts)} threads)"]
         for post in top_posts:
@@ -420,7 +447,7 @@ class LoRSkill(BaseSkill):
         return "\n".join(lines)
 
     def _read_thread(self, args: dict) -> str:
-        """Read a thread and all its replies."""
+        """Read a thread and all its replies (recursively, including nested)."""
         post_id = args.get("post_id", "")
         if not post_id:
             return "post_id is required."
@@ -432,10 +459,25 @@ class LoRSkill(BaseSkill):
         if not root:
             return f"Post '{post_id}' not found."
 
-        replies = sorted(
-            [p for p in posts if p.get("reply_to") == post_id],
-            key=lambda x: x.get("created_at", ""),
-        )
+        # Build parent->children index and collect all descendants via BFS
+        children_of: dict[str, list] = {}
+        for p in posts:
+            parent = p.get("reply_to")
+            if parent:
+                children_of.setdefault(parent, []).append(p)
+
+        replies = []
+        depth_map = {post_id: 0}
+        queue = [post_id]
+        while queue:
+            parent_id = queue.pop(0)
+            for child in children_of.get(parent_id, []):
+                depth = depth_map[parent_id] + 1
+                depth_map[child["id"]] = depth
+                replies.append((child, depth))
+                queue.append(child["id"])
+
+        replies.sort(key=lambda x: x[0].get("created_at", ""))
 
         root_author = authors.get(root["author_id"], {})
         root_name = root_author.get("nickname") or root["author_id"]
@@ -447,12 +489,13 @@ class LoRSkill(BaseSkill):
             f"\n--- {len(replies)} replies ---",
         ]
 
-        for reply in replies:
+        for reply, depth in replies:
             r_author = authors.get(reply["author_id"], {})
             r_name = r_author.get("nickname") or reply["author_id"]
+            indent = "  " * depth
             lines.append(
-                f"\n  [{reply['id']}] by {r_name} | {reply['created_at'][:16]}"
-                f"\n  {reply['content']}"
+                f"\n{indent}[{reply['id']}] by {r_name} | {reply['created_at'][:16]}"
+                f"\n{indent}{reply['content']}"
             )
 
         if not replies:
@@ -520,16 +563,21 @@ class LoRSkill(BaseSkill):
                 f"by {author_name} | {p['category']}"
             )
 
-        # Threads with new replies (existing threads that got activity)
+        # Threads with new replies — walk up to root thread
         new_thread_ids = set(p["id"] for p in new_threads)
-        active_threads = {}
-        for r in new_replies:
-            parent_id = r.get("reply_to")
-            if parent_id and parent_id not in new_thread_ids:
-                active_threads.setdefault(parent_id, 0)
-                active_threads[parent_id] += 1
-
+        parent_of = {p["id"]: p["reply_to"] for p in posts if p.get("reply_to")}
         thread_lookup = {p["id"]: p for p in posts if not p.get("reply_to")}
+
+        active_threads: dict[str, int] = {}
+        for r in new_replies:
+            root_id = r.get("reply_to")
+            seen = {r["id"]}
+            while root_id in parent_of and root_id not in seen:
+                seen.add(root_id)
+                root_id = parent_of[root_id]
+            if root_id and root_id not in new_thread_ids:
+                active_threads[root_id] = active_threads.get(root_id, 0) + 1
+
         for tid, count in active_threads.items():
             thread = thread_lookup.get(tid)
             if thread:
@@ -666,20 +714,29 @@ class LoRSkill(BaseSkill):
         if not my_posts:
             return "You haven't posted on LoR yet."
 
-        # Reply counts for threads
-        reply_counts = {}
-        for p in posts:
-            if p.get("reply_to"):
-                reply_counts[p["reply_to"]] = reply_counts.get(p["reply_to"], 0) + 1
+        # Count all descendants per top-level thread
+        reply_counts = self._count_all_descendants(posts)
 
+        # Walk to root thread for nested replies
+        parent_of = {p["id"]: p["reply_to"] for p in posts if p.get("reply_to")}
         thread_lookup = {p["id"]: p for p in posts if not p.get("reply_to")}
+
+        def find_root(pid):
+            seen = {pid}
+            while pid in parent_of:
+                pid = parent_of[pid]
+                if pid in seen:
+                    break
+                seen.add(pid)
+            return pid
 
         lines = [f"Your LoR posts ({total} total, showing {len(my_posts)})"]
 
         for p in my_posts:
             snippet = p["content"][:100].replace("\n", " ")
             if p.get("reply_to"):
-                parent = thread_lookup.get(p["reply_to"])
+                root_id = find_root(p["id"])
+                parent = thread_lookup.get(root_id)
                 parent_title = parent.get("title", "?") if parent else "?"
                 lines.append(
                     f"\n[{p['id']}] Reply in \"{parent_title}\" | {p['created_at'][:10]}"

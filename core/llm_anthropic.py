@@ -417,10 +417,15 @@ class AnthropicClient:
                             anthropic_tools.extend(_openai_tools_to_anthropic(found_tools))
                     else:
                         result = skill_registry.execute(func_name, args)
+
+                    result_str = str(result)
+                    preview = result_str[:200] + "..." if len(result_str) > 200 else result_str
+                    logger.info(f"Tool result [{func_name}]: {preview}")
+
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": tu.id,
-                        "content": str(result),
+                        "content": result_str,
                     })
 
                     args_str = json.dumps(args)

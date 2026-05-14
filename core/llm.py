@@ -492,11 +492,15 @@ class LLMClient:
                     else:
                         result = skill_registry.execute(func_name, args)
 
+                    result_str = str(result)
+                    preview = result_str[:200] + "..." if len(result_str) > 200 else result_str
+                    logger.info(f"Tool result [{func_name}]: {preview}")
+
                     msgs.append({
                         "role": "tool",
                         "tool_call_id": tc.id,
                         "name": func_name,
-                        "content": str(result),
+                        "content": result_str,
                     })
 
                     args_str = tc.function.arguments
