@@ -19,6 +19,54 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
+WEEKDAYS = {
+    "sunday": 0,
+    "sun": 0,
+    "monday": 1,
+    "mon": 1,
+    "tuesday": 2,
+    "tue": 2,
+    "tues": 2,
+    "wednesday": 3,
+    "wed": 3,
+    "thursday": 4,
+    "thu": 4,
+    "thur": 4,
+    "thurs": 4,
+    "friday": 5,
+    "fri": 5,
+    "saturday": 6,
+    "sat": 6,
+}
+
+MONTHS = {
+    "january": 1,
+    "jan": 1,
+    "february": 2,
+    "feb": 2,
+    "march": 3,
+    "mar": 3,
+    "april": 4,
+    "apr": 4,
+    "may": 5,
+    "june": 6,
+    "jun": 6,
+    "july": 7,
+    "jul": 7,
+    "august": 8,
+    "aug": 8,
+    "september": 9,
+    "sep": 9,
+    "sept": 9,
+    "october": 10,
+    "oct": 10,
+    "november": 11,
+    "nov": 11,
+    "december": 12,
+    "dec": 12,
+}
+
+
 def _normalize_task(text: str) -> str:
     """Normalize task text for dedup comparison."""
     text = text.lower().strip()
@@ -112,6 +160,157 @@ def parse_simple_cron(cron: str, now: datetime) -> bool:
     )
 
 
+def _strip_ordinal_suffix(text: str) -> str:
+    """Normalize ordinal dates: 1st -> 1, 22nd -> 22."""
+    return re.sub(r"\b(\d{1,2})(st|nd|rd|th)\b", r"\1", text)
+
+
+def _parse_day_of_month(text: str) -> Optional[int]:
+    """Parse a day-of-month token."""
+    text = _strip_ordinal_suffix(text.strip().lower())
+    m = re.search(r"\b(\d{1,2})\b", text)
+    if not m:
+        return None
+    day = int(m.group(1))
+    if 1 <= day <= 31:
+        return day
+    return None
+
+
+def _find_time_of_day(text: str) -> Optional[tuple[int, int]]:
+    """Find a time-of-day anywhere in a larger phrase."""
+    patterns = [
+        r"\b\d{1,2}:\d{2}\s*(?:am|pm)?\b",
+        r"\b\d{1,2}\s*(?:am|pm)\b",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, text)
+        if m:
+            parsed = _parse_time_of_day(m.group(0))
+            if parsed:
+                return parsed
+    return None
+
+
+def parse_recurring_time(when: str) -> Optional[tuple[str, str]]:
+    """Parse human recurring reminders into a cron expression and label.
+
+    Supports examples like:
+        daily 8:00
+        weekly monday 9:00 / every monday at 9:00
+        monthly 15th 8:30pm
+        yearly jan 1 9:00 / annually 05-18 9:00
+    """
+    local_now = datetime.now().astimezone()
+    text = when.strip().lower()
+    text = _strip_ordinal_suffix(text)
+    normalized = re.sub(r"\bat\b", " ", text)
+    normalized = re.sub(r"\bon\b", " ", normalized)
+    normalized = re.sub(r"\bthe\b", " ", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+
+    parsed_time = _find_time_of_day(normalized)
+    if not parsed_time:
+        return None
+    hour, minute = parsed_time
+    without_time = re.sub(r"\b\d{1,2}:\d{2}\s*(?:am|pm)?\b", " ", normalized)
+    without_time = re.sub(r"\b\d{1,2}\s*(?:am|pm)\b", " ", without_time)
+    without_time = re.sub(r"\s+", " ", without_time).strip()
+
+    if re.search(r"\b(daily|every day|each day)\b", normalized):
+        return f"{minute} {hour} * * *", f"daily at {hour:02d}:{minute:02d}"
+
+    weekly = re.search(r"\b(weekly|every week|each week)\b", normalized)
+    weekday = None
+    for name, value in WEEKDAYS.items():
+        if re.search(rf"\b{name}s?\b", normalized):
+            weekday = value
+            break
+    if weekly or weekday is not None:
+        if weekday is None:
+            weekday = local_now.isoweekday() % 7
+        weekday_name = [
+            "Sunday", "Monday", "Tuesday", "Wednesday",
+            "Thursday", "Friday", "Saturday"
+        ][weekday]
+        return (
+            f"{minute} {hour} * * {weekday}",
+            f"weekly on {weekday_name} at {hour:02d}:{minute:02d}",
+        )
+
+    if re.search(r"\b(monthly|every month|each month)\b", normalized):
+        day = _parse_day_of_month(without_time)
+        if day is None:
+            day = local_now.day
+        return (
+            f"{minute} {hour} {day} * *",
+            f"monthly on day {day} at {hour:02d}:{minute:02d}",
+        )
+
+    if re.search(r"\b(yearly|annually|annual|every year|each year)\b", normalized):
+        month = None
+        day = None
+
+        md = re.search(r"\b(\d{1,2})[/-](\d{1,2})\b", without_time)
+        if md:
+            month = int(md.group(1))
+            day = int(md.group(2))
+        else:
+            for name, value in MONTHS.items():
+                if re.search(rf"\b{name}\b", without_time):
+                    month = value
+                    after_month = without_time.split(name, 1)[1]
+                    day = _parse_day_of_month(after_month)
+                    break
+
+        if month is None:
+            month = local_now.month
+        if day is None:
+            day = local_now.day
+        if not (1 <= month <= 12 and 1 <= day <= 31):
+            return None
+
+        return (
+            f"{minute} {hour} {day} {month} *",
+            f"yearly on {month:02d}-{day:02d} at {hour:02d}:{minute:02d}",
+        )
+
+    return None
+
+
+def describe_cron(cron: str) -> str:
+    """Return a human-readable description for the supported cron subset."""
+    parts = cron.strip().split()
+    if len(parts) != 5:
+        return cron
+
+    minute, hour, dom, month, dow = parts
+    try:
+        time_str = f"{int(hour):02d}:{int(minute):02d}"
+    except ValueError:
+        return cron
+
+    if dom == "*" and month == "*" and dow == "*":
+        return f"daily at {time_str}"
+    if dom == "*" and month == "*" and dow != "*":
+        try:
+            weekday_name = [
+                "Sunday", "Monday", "Tuesday", "Wednesday",
+                "Thursday", "Friday", "Saturday"
+            ][int(dow)]
+            return f"weekly on {weekday_name} at {time_str}"
+        except (ValueError, IndexError):
+            return cron
+    if dom != "*" and month == "*" and dow == "*":
+        return f"monthly on day {dom} at {time_str}"
+    if dom != "*" and month != "*" and dow == "*":
+        try:
+            return f"yearly on {int(month):02d}-{int(dom):02d} at {time_str}"
+        except ValueError:
+            return cron
+    return cron
+
+
 def parse_human_time(when: str, now: datetime = None) -> Optional[datetime]:
     """Parse human-friendly time expressions into datetime.
 
@@ -120,7 +319,6 @@ def parse_human_time(when: str, now: datetime = None) -> Optional[datetime]:
         "in 30 minutes"
         "tomorrow 9:00"
         "friday 3pm"
-        "daily 8:00" -> returns a cron string instead (special case)
         "2026-03-01 15:00" -> ISO format
     """
     if now is None:
@@ -287,16 +485,9 @@ class ScheduleManager:
 
         # Parse human time if provided
         if when and not cron and not run_at:
-            if "daily" in when.lower():
-                # Convert "daily 8:00" to cron
-                time_part = when.lower().replace("daily", "").strip()
-                try:
-                    parts = time_part.split(":")
-                    h = int(parts[0])
-                    m = int(parts[1]) if len(parts) > 1 else 0
-                    cron = f"{m} {h} * * *"
-                except (ValueError, IndexError):
-                    logger.warning(f"Could not parse daily time: {when}")
+            recurring = parse_recurring_time(when)
+            if recurring:
+                cron, _label = recurring
             else:
                 parsed = parse_human_time(when)
                 if parsed:
@@ -476,18 +667,14 @@ class ScheduleManager:
 
         if "when" in kwargs and kwargs["when"]:
             when = kwargs["when"].strip()
-            if "daily" in when.lower():
-                time_part = when.lower().replace("daily", "").strip()
-                try:
-                    parts = time_part.split(":")
-                    h = int(parts[0])
-                    m = int(parts[1]) if len(parts) > 1 else 0
-                    entry["schedule_type"] = "recurring"
-                    entry["cron"] = f"{m} {h} * * *"
-                    entry.pop("run_at", None)
-                    entry.pop("completed", None)
-                except (ValueError, IndexError):
-                    logger.warning(f"Could not parse daily time: {when}")
+            recurring = parse_recurring_time(when)
+            if recurring:
+                cron, _label = recurring
+                entry["schedule_type"] = "recurring"
+                entry["cron"] = cron
+                entry.pop("run_at", None)
+                entry.pop("run_at_local", None)
+                entry.pop("completed", None)
             else:
                 parsed = parse_human_time(when)
                 if parsed:

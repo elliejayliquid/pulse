@@ -7,6 +7,7 @@ self-schedule tasks via tool calling instead of relying on JSON actions.
 
 import logging
 from skills.base import BaseSkill
+from core.scheduler import describe_cron
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +37,8 @@ class ScheduleSkill(BaseSkill):
                         "or when you want to schedule a follow-up for yourself. "
                         "Supports one-time: 'in 2 hours', 'in 30 minutes', 'in 3 days', "
                         "ISO datetime like '2026-03-01T15:00:00' (interpreted as LOCAL time). "
-                        "Supports recurring: 'daily 8:00', 'daily 14:30'. "
+                        "Supports recurring: 'daily 8:00', 'weekly monday 9:00', "
+                        "'monthly 15th 14:30', 'yearly jan 1 10:00'. "
                         "IMPORTANT: Always report the exact time and type from the tool result — "
                         "do not guess or paraphrase the scheduled time."
                     ),
@@ -106,7 +108,7 @@ class ScheduleSkill(BaseSkill):
                             },
                             "when": {
                                 "type": "string",
-                                "description": "New time (e.g. 'in 2 hours', '2026-04-01T15:00:00', 'daily 9:00')",
+                                "description": "New time (e.g. 'in 2 hours', '2026-04-01T15:00:00', 'daily 9:00', 'weekly monday 9:00')",
                             },
                             "priority": {
                                 "type": "string",
@@ -186,7 +188,8 @@ class ScheduleSkill(BaseSkill):
             stype = e.get("schedule_type", "once")
 
             if stype == "recurring":
-                when = f"recurring — {e.get('cron', '?')}"
+                cron = e.get("cron", "?")
+                when = f"recurring - {describe_cron(cron)} ({cron})"
             else:
                 when = e.get("run_at_local", e.get("run_at", "?"))
                 if e.get("completed"):
@@ -222,7 +225,8 @@ class ScheduleSkill(BaseSkill):
                 logger.info(f"Reminder dedup hit via skill: {entry['id']} — '{task}' matched existing")
                 schedule_type = entry.get("schedule_type", "once")
                 if schedule_type == "recurring":
-                    when_str = f"{entry.get('cron', '?')} (daily recurring)"
+                    cron = entry.get("cron", "?")
+                    when_str = f"{describe_cron(cron)} ({cron})"
                 else:
                     when_str = entry.get("run_at_local", entry.get("run_at", "?"))
                 created_at = entry.get("created_at_local", entry.get("created_at", "earlier"))
@@ -248,14 +252,16 @@ class ScheduleSkill(BaseSkill):
 
             if schedule_type == "recurring":
                 cron = entry.get("cron", "")
+                schedule = describe_cron(cron)
                 return (
-                    f"RECURRING REMINDER CONFIRMED — report these details exactly to the user:\n"
+                    f"RECURRING REMINDER CONFIRMED - report these details exactly to the user:\n"
                     f"  Task: {task}\n"
-                    f"  Schedule: {cron} (daily recurring)\n"
+                    f"  Schedule: {schedule}\n"
+                    f"  Cron: {cron}\n"
                     f"  Priority: {priority}\n"
                     f"  Type: recurring\n"
                     f"  ID: {entry['id']}\n"
-                    f"Do NOT say a different schedule. This repeats every day."
+                    f"Do NOT say a different schedule or recurrence interval."
                 )
             else:
                 actual_time = entry.get("run_at", when)
@@ -310,10 +316,12 @@ class ScheduleSkill(BaseSkill):
             schedule_type = entry.get("schedule_type", "once")
             if schedule_type == "recurring":
                 cron = entry.get("cron", "")
+                schedule = describe_cron(cron)
                 return (
-                    f"REMINDER UPDATED — report these details exactly to the user:\n"
+                    f"REMINDER UPDATED - report these details exactly to the user:\n"
                     f"  Task: {entry.get('task', '')}\n"
-                    f"  Schedule: {cron} (daily recurring)\n"
+                    f"  Schedule: {schedule}\n"
+                    f"  Cron: {cron}\n"
                     f"  Priority: {entry.get('priority', 'routine')}\n"
                     f"  Type: recurring\n"
                     f"  ID: {entry['id']}\n"
