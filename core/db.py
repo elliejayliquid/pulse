@@ -690,6 +690,30 @@ class PulseDatabase:
         ).fetchall()
         return [r["pattern"] for r in rows if r["pattern"]]
 
+    # LoR read state
+
+    def get_lor_read_state(self, scope: str = "inbox") -> Optional[dict]:
+        """Return LoR read cursor state for this persona."""
+        row = self.conn.execute(
+            "SELECT * FROM lor_read_state WHERE scope = ?", (scope,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def save_lor_read_state(self, scope: str = "inbox",
+                            last_seen_at: Optional[str] = None) -> None:
+        """Persist LoR read cursor state for this persona."""
+        self.conn.execute(
+            """
+            INSERT INTO lor_read_state (scope, last_seen_at, updated_at)
+            VALUES (?, ?, datetime('now'))
+            ON CONFLICT(scope) DO UPDATE SET
+                last_seen_at = excluded.last_seen_at,
+                updated_at = excluded.updated_at
+            """,
+            (scope, last_seen_at),
+        )
+        self.conn.commit()
+
     # ── Utility ──────────────────────────────────────────────
 
     def row_count(self, table: str) -> int:
@@ -698,7 +722,7 @@ class PulseDatabase:
         valid = {
             "messages", "sessions", "memories", "schedules", "tasks",
             "dev_journal", "action_log", "usage", "journal_entries", "identity",
-            "garden_plants", "timeouts"
+            "garden_plants", "timeouts", "lor_read_state"
         }
         if table not in valid:
             raise ValueError(f"Unknown table: {table}")
@@ -864,4 +888,11 @@ CREATE TABLE IF NOT EXISTS timeouts (
 );
 CREATE INDEX IF NOT EXISTS idx_timeouts_active
     ON timeouts(lifted_at, expires_at);
+
+-- Per-persona LoR inbox/read cursor state
+CREATE TABLE IF NOT EXISTS lor_read_state (
+    scope        TEXT PRIMARY KEY,
+    last_seen_at TEXT,
+    updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """

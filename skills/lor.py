@@ -29,6 +29,7 @@ class LoRSkill(BaseSkill):
 
     def __init__(self, config: dict):
         super().__init__(config)
+        self._db = config.get("_db")
         lor_data = config.get("paths", {}).get("lor_data", "")
         self.data_dir = Path(lor_data) if lor_data else None
         lor_config = config.get("channels", {}).get("lor", {})
@@ -43,6 +44,53 @@ class LoRSkill(BaseSkill):
             logger.warning("LoR data directory not configured (paths.lor_data)")
         else:
             logger.warning(f"LoR data directory not found: {self.data_dir}")
+
+    def get_context(self) -> str:
+        """Inject a compact unread LoR inbox without marking anything seen."""
+        if not self.author_id or not self._db:
+            return ""
+
+        try:
+            posts = self._load_json("posts.json")
+            authors = self._load_json("authors.json")
+            last_seen = self._get_inbox_last_seen(posts)
+            unread = self._find_unread_inbox_posts(posts, last_seen)
+        except Exception as e:
+            logger.warning(f"LoR context injection failed: {e}")
+            return ""
+
+        if not unread:
+            return ""
+
+        lines = [
+            f"[LoR Inbox] {len(unread)} new item{'s' if len(unread) != 1 else ''} "
+            "since your last marked-seen point. These have NOT been marked seen.",
+        ]
+
+        for post, root in unread[:5]:
+            author_name = authors.get(post.get("author_id", ""), {}).get("nickname") or post.get("author_id", "unknown")
+            snippet = post.get("content", "").replace("\n", " ")[:120]
+            if post.get("reply_to"):
+                title = root.get("title") or "(no title)" if root else "(unknown thread)"
+                lines.append(
+                    f"- Reply [{post['id']}] by {author_name} in \"{title}\": "
+                    f"{snippet}{'...' if len(post.get('content', '')) > 120 else ''}"
+                )
+            else:
+                title = post.get("title") or "(no title)"
+                lines.append(
+                    f"- New thread [{post['id']}] by {author_name}: \"{title}\" - "
+                    f"{snippet}{'...' if len(post.get('content', '')) > 120 else ''}"
+                )
+
+        if len(unread) > 5:
+            lines.append(f"- Plus {len(unread) - 5} more new LoR item(s).")
+
+        lines.append(
+            "Use read_lor_thread(post_id=...) for full context. "
+            "Use lor_mark_seen when you want to advance your LoR inbox cursor."
+        )
+        return "\n".join(lines)
 
     def _init_author(self):
         """Load or create persistent author identity for LoR.
@@ -148,6 +196,81 @@ class LoRSkill(BaseSkill):
                 root = find_root(p["id"])
                 counts[root] = counts.get(root, 0) + 1
         return counts
+
+    def _parse_dt(self, value: str) -> datetime | None:
+        try:
+            dt = datetime.fromisoformat(value)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+        except (TypeError, ValueError):
+            return None
+
+    def _get_inbox_last_seen(self, posts: list) -> datetime:
+        state = self._db.get_lor_read_state("inbox") if self._db else None
+        if state and state.get("last_seen_at"):
+            dt = self._parse_dt(state["last_seen_at"])
+            if dt:
+                return dt
+
+        # First run: surface only recent activity, not the whole history.
+        hours = self.config.get("channels", {}).get("lor", {}).get(
+            "context_initial_lookback_hours", 72
+        )
+        return datetime.now(timezone.utc) - timedelta(hours=hours)
+
+    def _root_for_post(self, post_id: str, posts_by_id: dict) -> dict | None:
+        seen = {post_id}
+        current = posts_by_id.get(post_id)
+        while current and current.get("reply_to"):
+            parent_id = current.get("reply_to")
+            if parent_id in seen:
+                break
+            seen.add(parent_id)
+            current = posts_by_id.get(parent_id)
+        return current
+
+    def _find_unread_inbox_posts(self, posts: list,
+                                 last_seen: datetime) -> list[tuple[dict, dict | None]]:
+        posts_by_id = {p.get("id"): p for p in posts if p.get("id")}
+        participated_roots = set()
+
+        for post in posts:
+            if post.get("author_id") != self.author_id:
+                continue
+            root = self._root_for_post(post["id"], posts_by_id)
+            if root and root.get("id"):
+                participated_roots.add(root["id"])
+
+        direct_or_participated = []
+        new_threads = []
+
+        for post in posts:
+            if post.get("author_id") == self.author_id:
+                continue
+            post_time = self._parse_dt(post.get("created_at", ""))
+            if not post_time or post_time <= last_seen:
+                continue
+
+            root = self._root_for_post(post["id"], posts_by_id)
+            root_id = root.get("id") if root else None
+
+            if post.get("reply_to") and root_id in participated_roots:
+                direct_or_participated.append((post, root))
+            elif not post.get("reply_to"):
+                new_threads.append((post, root))
+
+        direct_or_participated.sort(key=lambda item: item[0].get("created_at", ""), reverse=True)
+        new_threads.sort(key=lambda item: item[0].get("created_at", ""), reverse=True)
+        return direct_or_participated[:5] + new_threads[:2]
+
+    def _latest_post_time(self, posts: list) -> str:
+        latest = ""
+        for post in posts:
+            created_at = post.get("created_at", "")
+            if created_at > latest:
+                latest = created_at
+        return latest or datetime.now(timezone.utc).isoformat()
 
     def get_tools(self) -> list[dict]:
         return [
@@ -327,6 +450,21 @@ class LoRSkill(BaseSkill):
                     },
                 },
             },
+            {
+                "type": "function",
+                "function": {
+                    "name": "lor_mark_seen",
+                    "description": (
+                        "Mark the current LoR inbox/catch-up point as seen. "
+                        "Use this after you've reviewed the injected LoR inbox or catch-up results."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                        "required": [],
+                    },
+                },
+            },
         ]
 
     def execute(self, tool_name: str, arguments: dict) -> str:
@@ -344,6 +482,8 @@ class LoRSkill(BaseSkill):
             return self._react(arguments)
         elif tool_name == "my_lor_posts":
             return self._my_posts(arguments)
+        elif tool_name == "lor_mark_seen":
+            return self._mark_seen()
         return f"Unknown LoR tool: {tool_name}"
 
     def _post(self, args: dict) -> str:
@@ -587,6 +727,22 @@ class LoRSkill(BaseSkill):
                 )
 
         return "\n".join(lines)
+
+    def _mark_seen(self) -> str:
+        """Advance this persona's LoR inbox cursor."""
+        if not self.author_id:
+            return "LoR not initialized."
+        if not self._db:
+            return "Persona database not available; cannot save LoR read state."
+
+        posts = self._load_json("posts.json")
+        last_seen_at = self._latest_post_time(posts)
+        self._db.save_lor_read_state("inbox", last_seen_at)
+        return (
+            "LoR inbox marked seen.\n"
+            f"  Last seen at: {last_seen_at}\n"
+            "Future LoR context injection will only show newer items."
+        )
 
     def _search(self, args: dict) -> str:
         """Semantic search across LoR posts."""
