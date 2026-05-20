@@ -158,6 +158,8 @@ def resolve_persona(config: dict, persona_name: str | None, pulse_root: Path) ->
         "usage": str(persona_data / "usage.json"),
         "paintings": str(persona_data / "paintings"),
         "garden": str(persona_data / "garden"),
+        "status": str(persona_data / "status.json"),
+        "shutdown_requested": str(persona_data / "shutdown_requested"),
     }
     config.setdefault("paths", {})
     for key, default in default_paths.items():
@@ -209,6 +211,12 @@ async def main(config_path: str, persona_name: str | None = None):
     # Resolve persona overlay (merges persona config over base)
     config = resolve_persona(config, persona_name, pulse_root)
 
+    from core.runtime_status import RuntimeStatus
+    runtime_status = RuntimeStatus(config)
+    runtime_status.clear_shutdown_request()
+    runtime_status.write("starting", True)
+    config["_runtime_status"] = runtime_status
+
     # Switch to per-persona log file now that we know who we are
     active_persona = config.get("_persona_name")
     if active_persona:
@@ -253,8 +261,10 @@ async def main(config_path: str, persona_name: str | None = None):
     if provider_type == "local":
         # Local llama.cpp — start and manage the server process
         server = LlamaServer(config)
+        runtime_status.write("starting_llm_server", True)
         if not await server.start():
             logger.error("Failed to start llama-server. Exiting.")
+            runtime_status.write_stopped(last_error="Failed to start llama-server")
             sys.exit(1)
         endpoint = server.endpoint
     else:
@@ -266,6 +276,7 @@ async def main(config_path: str, persona_name: str | None = None):
                 f"Provider '{provider_type}' requires an API key. "
                 f"Set {api_key_env or 'provider.api_key_env'} in .env"
             )
+            runtime_status.write_stopped(last_error=f"Missing API key: {api_key_env or 'provider.api_key_env'}")
             sys.exit(1)
 
         # Default base URLs per provider (override with provider.base_url)
@@ -283,6 +294,7 @@ async def main(config_path: str, persona_name: str | None = None):
                 f"No base_url for provider '{provider_type}'. "
                 "Set provider.base_url in config.yaml"
             )
+            runtime_status.write_stopped(last_error=f"No base_url for provider '{provider_type}'")
             sys.exit(1)
 
         model_name = provider_config.get("model", "")
@@ -362,6 +374,7 @@ async def main(config_path: str, persona_name: str | None = None):
     except KeyboardInterrupt:
         logger.info("Interrupted by user.")
     finally:
+        runtime_status.write("stopping", True)
         # Shutdown channels first
         for name, channel in channels.items():
             await channel.shutdown()
@@ -382,6 +395,8 @@ async def main(config_path: str, persona_name: str | None = None):
             shared_db.close()
         if db:
             db.close()
+        runtime_status.shutdown_requested(consume=True)
+        runtime_status.write_stopped()
         logger.info("Pulse stopped. Companion is sleeping.")
 
 

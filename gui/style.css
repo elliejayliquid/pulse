@@ -112,6 +112,21 @@ button {
   68%, 100% { stroke-dashoffset: 0; opacity: 0.45; }
 }
 
+.brand-pulse.flatline .brand-dot {
+  background: var(--text-tertiary);
+  box-shadow: none;
+  animation: none;
+  opacity: 0.4;
+}
+
+.brand-pulse.flatline path {
+  stroke: var(--text-tertiary);
+  stroke-dasharray: none;
+  stroke-dashoffset: 0;
+  animation: none;
+  opacity: 0.25;
+}
+
 .chrome-dots {
   display: flex;
   gap: 8px;
@@ -344,6 +359,48 @@ h1 {
 .hero-actions {
   display: flex;
   gap: 8px;
+  align-items: center;
+}
+
+.hero-start-btn, .hero-stop-btn {
+  padding: 8px 16px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 140ms ease;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+.hero-start-btn {
+  background: linear-gradient(135deg, var(--accent), #ea580c);
+  color: white;
+  box-shadow: 0 4px 14px rgba(249, 115, 22, 0.22);
+}
+
+.hero-start-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 20px rgba(249, 115, 22, 0.34);
+}
+
+.hero-stop-btn {
+  background: var(--surface);
+  color: var(--text-secondary);
+  border-color: var(--border);
+}
+
+.hero-stop-btn:hover:not(:disabled) {
+  color: var(--danger);
+  border-color: var(--danger);
+  background: rgba(239, 68, 68, 0.08);
+}
+
+.hero-start-btn:disabled, .hero-stop-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
 }
 
 .icon-btn {
@@ -483,6 +540,25 @@ textarea {
   border-color: var(--border);
   background: var(--surface);
   color: var(--text-tertiary);
+}
+
+.chip-add {
+  padding: 5px 10px;
+  background: transparent;
+  border: 1px dashed var(--border);
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  text-transform: none;
+  letter-spacing: 0;
+  transition: all 140ms ease;
+}
+
+.chip-add:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-dim);
 }
 
 .chip:hover, .channel:hover {
@@ -651,13 +727,6 @@ textarea {
   text-align: right;
 }
 
-.action-row {
-  display: flex;
-  gap: 8px;
-  justify-content: flex-end;
-  margin-top: 14px;
-}
-
 .skills-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -773,6 +842,91 @@ textarea {
   white-space: nowrap;
   color: var(--text-tertiary);
   font: 11px var(--mono);
+}
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.65);
+  backdrop-filter: blur(4px);
+}
+
+.modal-card {
+  width: min(420px, calc(100vw - 48px));
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 28px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.6);
+}
+
+.modal-title {
+  font-size: 16px;
+  font-weight: 700;
+  margin-bottom: 10px;
+}
+
+.modal-body {
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+  margin-bottom: 22px;
+}
+
+.modal-body strong {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.modal-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.modal-btn {
+  flex: 1;
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  transition: all 140ms ease;
+}
+
+.modal-btn.danger {
+  background: rgba(239, 68, 68, 0.1);
+  color: var(--danger);
+  border-color: rgba(239, 68, 68, 0.3);
+}
+
+.modal-btn.danger:hover {
+  background: rgba(239, 68, 68, 0.2);
+  border-color: var(--danger);
+}
+
+.modal-btn.secondary {
+  background: var(--surface-raised);
+  color: var(--text-primary);
+}
+
+.modal-btn.secondary:hover {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+}
+
+.modal-btn.ghost {
+  background: transparent;
+  color: var(--text-tertiary);
+}
+
+.modal-btn.ghost:hover {
+  color: var(--text-primary);
+  background: var(--surface-raised);
 }
 
 @media (max-width: 760px) {

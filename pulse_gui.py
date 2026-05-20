@@ -47,7 +47,19 @@ def main() -> int:
         height=860,
         min_size=(760, 620),
     )
-    webview.start(debug=False)
+    api._window = window
+
+    def on_closing():
+        if api._force_close:
+            return True
+        running = api.get_running_personas()
+        if running:
+            api._close_requested = running
+            return False
+        return True
+
+    window.events.closing += on_closing
+    webview.start(debug=False, private_mode=True)
     return 0 if window else 1
 
 

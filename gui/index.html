@@ -5,6 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Pulse Engine</title>
   <link rel="stylesheet" href="style.css">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
 </head>
 <body>
   <div class="app-shell">
@@ -46,8 +49,8 @@
           <p id="personaMeta" class="mono-line">Loading configuration...</p>
         </div>
         <div class="hero-actions">
-          <button id="refreshBtn" class="icon-btn" type="button" title="Refresh">R</button>
-          <button id="openFolderBtn" class="icon-btn" type="button" title="Open folder" disabled>F</button>
+          <button id="pulseToggle" class="hero-start-btn" type="button">▶ Start</button>
+          <button id="openFolderBtn" class="icon-btn" type="button" title="Open persona folder">📂</button>
         </div>
       </section>
 
@@ -111,10 +114,6 @@
         </button>
         <div class="section-body">
           <div id="runtimeGrid" class="runtime-grid"></div>
-          <div class="action-row">
-            <button id="startBtn" class="primary-btn" type="button" disabled>Start Pulse</button>
-            <button id="stopBtn" class="secondary-btn" type="button" disabled>Stop</button>
-          </div>
         </div>
       </section>
 
@@ -166,6 +165,20 @@
         <button id="reloadBtn" class="primary-btn" type="button">Refresh</button>
       </div>
     </footer>
+  </div>
+
+  <div id="closeDialog" class="modal-overlay hidden">
+    <div class="modal-card">
+      <h2 class="modal-title">Pulse is still running</h2>
+      <p id="closeDialogPersonas" class="modal-body"></p>
+      <div class="modal-actions">
+        <button id="closeStopBtn" class="modal-btn danger" type="button"
+          title="Stops all running personas before closing">Stop &amp; Close</button>
+        <button id="closeKeepBtn" class="modal-btn secondary" type="button"
+          title="Personas will keep running in the background. Reopen the GUI to manage them.">Close</button>
+        <button id="closeCancelBtn" class="modal-btn ghost" type="button">Cancel</button>
+      </div>
+    </div>
   </div>
 
   <script src="app.js"></script>

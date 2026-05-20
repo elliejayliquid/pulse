@@ -44,6 +44,7 @@ class PulseEngine:
         self.skill_registry = skill_registry
         self.db = config.get("_db")
         self.shared_db = config.get("_shared_db")
+        self.runtime_status = config.get("_runtime_status")
 
         # Initialize core components
         model_config = config.get("model", {})
@@ -241,12 +242,31 @@ class PulseEngine:
         except IOError as e:
             logger.warning(f"Failed to write action log: {e}")
 
+    async def _warmup_tts(self, tts_skill):
+        try:
+            await tts_skill.warmup()
+        except Exception:
+            pass
+        self._tts_ready = True
+        if self.runtime_status:
+            self.runtime_status.write("running", True, tts_ready=True)
+
     async def _interruptible_sleep(self, seconds: int):
         """Sleep that can be interrupted instantly by stop()."""
-        try:
-            await asyncio.wait_for(self._stop_event.wait(), timeout=seconds)
-        except asyncio.TimeoutError:
-            pass  # Normal — timeout means we slept the full duration
+        deadline = time.time() + seconds
+        while self._running and time.time() < deadline:
+            if self.runtime_status and self.runtime_status.shutdown_requested(consume=True):
+                logger.info("Shutdown requested by GUI sentinel.")
+                self.stop()
+                return
+            timeout = min(1.0, max(0.0, deadline - time.time()))
+            if timeout <= 0:
+                return
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=timeout)
+                return
+            except asyncio.TimeoutError:
+                pass
 
     def _in_quiet_hours(self) -> bool:
         """Check if we're in quiet hours (clock-based or manual /quiet toggle)."""
@@ -1080,25 +1100,37 @@ class PulseEngine:
         self._running = True
         self._stop_event.clear()
         logger.info("Pulse engine starting...")
+        if self.runtime_status:
+            self.runtime_status.write("starting", True)
         if self._heartbeat_randomize:
             logger.info(f"Heartbeat interval: {self._heartbeat_min // 60}-{self._heartbeat_max // 60} minutes (randomized)")
         else:
             logger.info(f"Heartbeat interval: {self.interval // 60} minutes")
         logger.info(f"Quiet hours: {self.quiet_start}:00 - {self.quiet_end}:00")
 
+        # Determine TTS warmup state before the first "running" status write
+        self._tts_ready = True
+        tts_skill = None
+        if self.skill_registry:
+            tts_skill = self.skill_registry.get_skill("tts")
+            if tts_skill and hasattr(tts_skill, "warmup"):
+                self._tts_ready = False
+
         # Check LLM server availability
         if self.llm.is_available():
             logger.info("LLM server is reachable!")
+            if self.runtime_status:
+                self.runtime_status.write("running", True, llm_available=True, tts_ready=self._tts_ready)
         else:
             logger.warning("LLM server is not available — will retry on each tick.")
+            if self.runtime_status:
+                self.runtime_status.write("running", True, llm_available=False, tts_ready=self._tts_ready)
 
         # Warm up the TTS model in the background so the first voice generation
         # (companion's speak tool OR Telegram 🔊 button) doesn't pay the cold
         # start tax. Fire-and-forget — failures fall back to lazy loading.
-        if self.skill_registry:
-            tts_skill = self.skill_registry.get_skill("tts")
-            if tts_skill and hasattr(tts_skill, "warmup"):
-                asyncio.create_task(tts_skill.warmup())
+        if tts_skill:
+            asyncio.create_task(self._warmup_tts(tts_skill))
 
         # Start the silence clock — heartbeat fires after interval_minutes of no activity
         self._last_activity = time.time()
@@ -1128,6 +1160,24 @@ class PulseEngine:
 
             if not self._running:
                 break
+
+            if self.runtime_status and self.runtime_status.shutdown_requested(consume=True):
+                logger.info("Shutdown requested by GUI sentinel.")
+                self.stop()
+                break
+
+            if self.runtime_status:
+                self.runtime_status.write(
+                    "running",
+                    True,
+                    llm_available=getattr(self.llm, "_available", None),
+                    tts_ready=self._tts_ready,
+                    channels=list(self.channels.keys()),
+                    last_heartbeat=(
+                        datetime.fromtimestamp(self._last_activity, timezone.utc).isoformat()
+                        if self._last_activity else None
+                    ),
+                )
 
             if dev_ticks:
                 ticks_since_dev += 1

@@ -10,12 +10,17 @@ from __future__ import annotations
 import base64
 import json
 import os
+import subprocess
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+
+STATUS_STALE_AFTER_SECONDS = 120
 
 
 SKILL_ICONS = {
@@ -89,6 +94,9 @@ class PulseAPI:
         self.personas_dir = self.root / "personas"
         self.prefs_path = self.root / "data" / "gui_prefs.json"
         self.processes: dict[str, ProcessInfo] = {}
+        self._window = None
+        self._close_requested: list[str] | None = None
+        self._force_close = False
 
     # Persona management
 
@@ -175,16 +183,21 @@ class PulseAPI:
         }
 
     def get_status(self, persona: str | None = None) -> dict:
+        self._cleanup_processes()
         if persona is None:
             return {name: self.get_status(name) for name in self._persona_names()}
 
         status = self._read_status_file(persona)
         proc = self.processes.get(persona)
         if proc:
+            file_phase = status.get("phase", "")
+            engine_alive = file_phase in ("starting", "running")
             status.update({
                 "running": True,
+                "stale": False,
                 "persona": persona,
                 "pid": proc.pid,
+                "phase": file_phase if engine_alive else "starting",
                 "started_at": proc.started_at,
                 "source": "gui-process-registry",
             })
@@ -205,16 +218,114 @@ class PulseAPI:
         return "\n".join(data[-max(1, min(lines, 500)):])
 
     def stop_pulse(self, persona: str) -> dict:
-        return {
-            "ok": False,
-            "error": "Graceful stop sentinel support is planned for the process-management phase.",
-        }
+        if not persona or persona == "__base__":
+            return {"ok": False, "error": "Choose a persona before stopping Pulse."}
+        if not (self.personas_dir / persona).is_dir():
+            return {"ok": False, "error": f"Persona not found: {persona}"}
+
+        data_dir = self._persona_data_dir(persona)
+        data_dir.mkdir(parents=True, exist_ok=True)
+        sentinel = data_dir / "shutdown_requested"
+        sentinel.write_text(datetime.now(timezone.utc).isoformat(), encoding="utf-8")
+
+        status = self.get_status(persona)
+        status["phase"] = "stopping"
+        return {"ok": True, "status": status}
 
     def start_pulse(self, persona: str) -> dict:
-        return {
-            "ok": False,
-            "error": "Starting Pulse from the GUI is planned for the process-management phase.",
-        }
+        if not persona or persona == "__base__":
+            return {"ok": False, "error": "Choose a persona before starting Pulse."}
+        if not (self.personas_dir / persona).is_dir():
+            return {"ok": False, "error": f"Persona not found: {persona}"}
+
+        self._cleanup_processes()
+        running = [
+            name for name, info in self.processes.items()
+            if info.process is not None and info.process.poll() is None
+        ]
+        if running:
+            return {
+                "ok": False,
+                "error": f"Pulse is already running for {running[0]}. Stop it before starting another persona.",
+            }
+
+        status = self.get_status(persona)
+        if status.get("running") and not status.get("stale"):
+            return {
+                "ok": False,
+                "error": f"Pulse appears to already be running for {persona}. Refresh status or stop it first.",
+            }
+
+        data_dir = self._persona_data_dir(persona)
+        data_dir.mkdir(parents=True, exist_ok=True)
+        sentinel = data_dir / "shutdown_requested"
+        if sentinel.exists():
+            sentinel.unlink()
+
+        creationflags = 0
+        if os.name == "nt":
+            creationflags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            creationflags |= getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+
+        process = subprocess.Popen(
+            [sys.executable, "pulse.py", "--persona", persona],
+            cwd=str(self.root),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=creationflags,
+        )
+        self.processes[persona] = ProcessInfo(
+            persona=persona,
+            pid=process.pid,
+            started_at=datetime.now(timezone.utc).isoformat(),
+            process=process,
+        )
+        return {"ok": True, "status": self.get_status(persona)}
+
+    # Shell helpers
+
+    def check_close_request(self) -> list[str] | None:
+        req = self._close_requested
+        self._close_requested = None
+        return req
+
+    def get_running_personas(self) -> list[str]:
+        self._cleanup_processes()
+        running = set(
+            name for name, info in self.processes.items()
+            if info.process is not None and info.process.poll() is None
+        )
+        for name in self._persona_names():
+            status = self._read_status_file(name)
+            if status.get("running") and not status.get("stale"):
+                running.add(name)
+        return sorted(running)
+
+    def stop_all_and_close(self) -> dict:
+        for persona in list(self.processes.keys()):
+            self.stop_pulse(persona)
+        self._force_close = True
+        if self._window:
+            self._window.destroy()
+        return {"ok": True}
+
+    def close_keep_running(self) -> dict:
+        self._force_close = True
+        if self._window:
+            self._window.destroy()
+        return {"ok": True}
+
+    def open_folder(self, persona: str) -> dict:
+        persona_dir = self.root if persona == "__base__" else self.personas_dir / persona
+        if not persona_dir.is_dir():
+            return {"ok": False, "error": f"Folder not found: {persona}"}
+        if os.name == "nt":
+            os.startfile(str(persona_dir))
+        else:
+            import subprocess as _sp
+            _sp.Popen(["xdg-open", str(persona_dir)])
+        return {"ok": True}
 
     # Preferences
 
@@ -240,6 +351,17 @@ class PulseAPI:
             p.name for p in sorted(self.personas_dir.iterdir())
             if p.is_dir() and not p.name.startswith(".") and p.name != "_template"
         ]
+
+    def _cleanup_processes(self) -> None:
+        finished = [
+            name for name, info in self.processes.items()
+            if info.process is not None and info.process.poll() is not None
+        ]
+        for name in finished:
+            self.processes.pop(name, None)
+
+    def _persona_data_dir(self, persona: str) -> Path:
+        return self.personas_dir / persona / "data"
 
     def _base_persona_summary(self) -> dict:
         config = _load_yaml(self.base_config_path)
@@ -368,7 +490,9 @@ class PulseAPI:
                 dt = datetime.fromisoformat(updated)
                 if dt.tzinfo is None:
                     dt = dt.replace(tzinfo=timezone.utc)
-                status["stale"] = (datetime.now(timezone.utc) - dt).total_seconds() > 30
+                status["stale"] = (
+                    datetime.now(timezone.utc) - dt
+                ).total_seconds() > STATUS_STALE_AFTER_SECONDS
             except ValueError:
                 status["stale"] = True
         return status

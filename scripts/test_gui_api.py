@@ -1,6 +1,7 @@
 import os
 import sys
 import tempfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.append(os.getcwd())
@@ -76,6 +77,25 @@ voice_notes: Warm.
         save_result = api.save_persona("demo", {}, {})
         assert save_result["ok"] is False
         assert "read-only" in save_result["error"]
+
+        stop_result = api.stop_pulse("demo")
+        assert stop_result["ok"] is True
+        assert (root / "personas" / "demo" / "data" / "shutdown_requested").exists()
+
+        missing_stop = api.stop_pulse("missing")
+        assert missing_stop["ok"] is False
+
+        status_path = root / "personas" / "demo" / "data" / "status.json"
+        status_path.write_text(
+            """{
+  "persona": "demo",
+  "phase": "running",
+  "running": true,
+  "updated_at": "%s"
+}""" % (datetime.now(timezone.utc) - timedelta(seconds=130)).isoformat(),
+            encoding="utf-8",
+        )
+        assert api.get_status("demo")["stale"] is True
 
 
 if __name__ == "__main__":

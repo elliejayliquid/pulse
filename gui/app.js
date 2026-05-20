@@ -2,6 +2,7 @@ const state = {
   personas: [],
   current: null,
   prefs: {},
+  pendingTransition: null,
 };
 
 const fallbackApi = {
@@ -51,6 +52,12 @@ const fallbackApi = {
   async get_prefs() { return {}; },
   async save_prefs() { return { ok: true }; },
   async get_log_tail() { return "Run through pywebview to read logs."; },
+  async start_pulse() { return { ok: false, error: "Run through pywebview to start Pulse." }; },
+  async stop_pulse() { return { ok: false, error: "Run through pywebview to stop Pulse." }; },
+  async open_folder() { return { ok: false, error: "Run through pywebview to open folders." }; },
+  async stop_all_and_close() { return { ok: false, error: "Run through pywebview." }; },
+  async close_keep_running() { return { ok: false, error: "Run through pywebview." }; },
+  async check_close_request() { return null; },
 };
 
 function api() {
@@ -150,13 +157,34 @@ function renderTuning(summary) {
 function renderStatus(status) {
   const pill = el("statusPill");
   const label = pill.querySelector("span");
+  const pulse = document.querySelector(".brand-pulse");
   pill.classList.remove("running", "warning", "stopped");
   if (status?.running) {
     pill.classList.add(status.stale ? "warning" : "running");
     label.textContent = status.stale ? "Unresponsive" : "Running";
+    pulse?.classList.remove("flatline");
   } else {
     pill.classList.add("stopped");
     label.textContent = text(status?.phase, "Stopped");
+    pulse?.classList.add("flatline");
+  }
+}
+
+function renderProcessButton(data) {
+  const btn = el("pulseToggle");
+  const isBase = data?.name === "__base__";
+  const status = data?.status || {};
+  const active = Boolean(status.running) && !status.stale;
+  const stopping = status.phase === "stopping";
+
+  btn.disabled = isBase || stopping;
+
+  if (active || stopping) {
+    btn.textContent = stopping ? "Stopping..." : "■ Stop";
+    btn.className = "hero-stop-btn";
+  } else {
+    btn.textContent = "▶ Start";
+    btn.className = "hero-start-btn";
   }
 }
 
@@ -231,9 +259,10 @@ function renderIdentity(data) {
   el("systemPrompt").value = text(identity.system_prompt);
   el("voiceNotes").value = text(identity.voice_notes || identity.relationship_context);
   const traits = Array.isArray(identity.traits) ? identity.traits : [];
-  el("traits").innerHTML = traits.length
+  el("traits").innerHTML = (traits.length
     ? traits.map((trait) => `<span class="chip">${escapeHtml(trait)}</span>`).join("")
-    : `<span class="chip">No traits listed</span>`;
+    : `<span class="chip">No traits listed</span>`)
+    + `<span class="chip-add">+ add</span>`;
 }
 
 function renderHero(data) {
@@ -281,6 +310,7 @@ async function loadPersona(name) {
   renderRuntime(data.status || {}, data.summary || {});
   renderSkills(data.skills || []);
   renderChannels(data.channels || []);
+  renderProcessButton(data);
   el("filePath").textContent = data.paths?.config ? `Read-only: ${data.paths.config}` : "Read-only Phase 1";
   state.prefs.last_persona = name;
   await api().save_prefs(state.prefs);
@@ -305,6 +335,38 @@ async function refreshAll() {
   await loadPersona(exists ? preferred : "__base__");
 }
 
+async function refreshCurrentStatus() {
+  const closeReq = await api().check_close_request();
+  if (closeReq && closeReq.length) {
+    showCloseDialog(closeReq);
+  }
+  if (!state.current) return;
+  const status = await api().get_status(state.current.name);
+  const prev = state.current.status || {};
+  state.current.status = status;
+  renderStatus(status);
+  renderRuntime(status, state.current.summary || {});
+  renderProcessButton(state.current);
+  await loadLogs();
+
+  if (state.pendingTransition === "starting") {
+    if (status.phase === "running" && status.tts_ready !== false) {
+      state.pendingTransition = null;
+      setNotice("");
+    } else if (status.running) {
+      const details = [];
+      if (status.phase !== "running") details.push(status.phase);
+      if (status.tts_ready === false) details.push("loading TTS voice");
+      setNotice(`Starting Pulse...${details.length ? " " + details.join(", ") : ""}`);
+    }
+  } else if (state.pendingTransition === "stopping") {
+    if (!status.running) {
+      state.pendingTransition = null;
+      setNotice("");
+    }
+  }
+}
+
 function escapeHtml(value) {
   return text(value).replace(/[&<>"']/g, (ch) => ({
     "&": "&amp;",
@@ -327,14 +389,46 @@ function wireEvents() {
       el("personaPicker").classList.remove("open");
     }
   });
-  el("refreshBtn").addEventListener("click", refreshAll);
   el("reloadBtn").addEventListener("click", refreshAll);
+  el("openFolderBtn").addEventListener("click", async () => {
+    if (!state.current) return;
+    const result = await api().open_folder(state.current.name);
+    if (!result.ok) setNotice(result.error || "Could not open folder.", "warning");
+  });
   document.querySelectorAll(".section-header").forEach((header) => {
     header.addEventListener("click", () => header.parentElement.classList.toggle("open"));
   });
   el("saveBtn").addEventListener("click", () => setNotice("Saving is intentionally disabled in Phase 1."));
-  el("startBtn").addEventListener("click", () => setNotice("Starting Pulse is planned for the process-management phase."));
-  el("stopBtn").addEventListener("click", () => setNotice("Stopping Pulse is planned for the process-management phase."));
+  el("pulseToggle").addEventListener("click", async () => {
+    if (!state.current || state.current.name === "__base__") return;
+    const status = state.current.status || {};
+    const active = Boolean(status.running) && !status.stale;
+
+    if (active) {
+      setNotice("Requesting graceful shutdown...");
+      state.pendingTransition = "stopping";
+      const result = await api().stop_pulse(state.current.name);
+      if (!result.ok) {
+        state.pendingTransition = null;
+        setNotice(result.error || "Failed to stop Pulse.", "warning");
+        return;
+      }
+      state.current.status = result.status || {};
+    } else {
+      setNotice("Starting Pulse...");
+      state.pendingTransition = "starting";
+      const result = await api().start_pulse(state.current.name);
+      if (!result.ok) {
+        state.pendingTransition = null;
+        setNotice(result.error || "Failed to start Pulse.", "warning");
+        return;
+      }
+      state.current.status = result.status || {};
+    }
+    renderStatus(state.current.status);
+    renderRuntime(state.current.status, state.current.summary || {});
+    renderProcessButton(state.current);
+  });
 }
 
 function wireSliders() {
@@ -394,9 +488,34 @@ function wireSliders() {
   document.addEventListener("touchend", () => { active = null; });
 }
 
+function showCloseDialog(personas) {
+  const names = personas.map((n) => `<strong>${escapeHtml(n)}</strong>`).join(", ");
+  el("closeDialogPersonas").innerHTML = `Pulse is still running for: ${names}`;
+  el("closeDialog").classList.remove("hidden");
+}
+
+function hideCloseDialog() {
+  el("closeDialog").classList.add("hidden");
+}
+
+function wireCloseDialog() {
+  el("closeCancelBtn").addEventListener("click", hideCloseDialog);
+  el("closeKeepBtn").addEventListener("click", async () => {
+    hideCloseDialog();
+    await api().close_keep_running();
+  });
+  el("closeStopBtn").addEventListener("click", async () => {
+    hideCloseDialog();
+    setNotice("Stopping all personas...");
+    await api().stop_all_and_close();
+  });
+}
+
 window.addEventListener("pywebviewready", refreshAll);
 window.addEventListener("DOMContentLoaded", () => {
   wireEvents();
   wireSliders();
+  wireCloseDialog();
   if (!window.pywebview) refreshAll();
+  setInterval(refreshCurrentStatus, 2000);
 });
