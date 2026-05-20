@@ -10,7 +10,12 @@
   <div class="app-shell">
     <header class="titlebar">
       <div class="brand">
-        <span class="brand-dot"></span>
+        <span class="brand-pulse" aria-hidden="true">
+          <span class="brand-dot"></span>
+          <svg viewBox="0 0 72 18" role="img" aria-label="Pulse heartbeat">
+            <path d="M2 9 H17 L22 3 L29 15 L36 6 L42 9 H70"></path>
+          </svg>
+        </span>
         <span>Pulse Engine</span>
       </div>
       <div class="chrome-dots" aria-hidden="true">
@@ -25,7 +30,7 @@
             <b>Persona</b>
             <strong id="selectedPersonaName">Loading...</strong>
           </span>
-          <span class="chevron">v</span>
+          <span id="personaChevron" class="chevron" aria-hidden="true"></span>
         </button>
         <div id="personaMenu" class="persona-menu hidden"></div>
         <button id="newPersonaBtn" class="ghost-btn" type="button" disabled>+ New</button>
@@ -51,7 +56,7 @@
       <section class="section open">
         <button class="section-header" type="button">
           <span><em>01</em> Identity</span>
-          <b>v</b>
+          <b class="section-chevron" aria-hidden="true"></b>
         </button>
         <div class="section-body">
           <div class="field-grid three">
@@ -68,7 +73,7 @@
       <section class="section open">
         <button class="section-header" type="button">
           <span><em>02</em> Provider</span>
-          <b>v</b>
+          <b class="section-chevron" aria-hidden="true"></b>
         </button>
         <div class="section-body">
           <div class="field-grid three">
@@ -91,8 +96,18 @@
 
       <section class="section">
         <button class="section-header" type="button">
-          <span><em>03</em> Runtime</span>
-          <b>v</b>
+          <span><em>03</em> Model Tuning</span>
+          <b class="section-chevron" aria-hidden="true"></b>
+        </button>
+        <div class="section-body">
+          <div id="tuningGrid" class="tuning-grid"></div>
+        </div>
+      </section>
+
+      <section class="section">
+        <button class="section-header" type="button">
+          <span><em>04</em> Runtime</span>
+          <b class="section-chevron" aria-hidden="true"></b>
         </button>
         <div class="section-body">
           <div id="runtimeGrid" class="runtime-grid"></div>
@@ -105,8 +120,8 @@
 
       <section class="section open">
         <button class="section-header" type="button">
-          <span><em>04</em> Skills</span>
-          <b>v</b>
+          <span><em>05</em> Skills</span>
+          <b class="section-chevron" aria-hidden="true"></b>
         </button>
         <div class="section-body">
           <div id="skillsGrid" class="skills-grid"></div>
@@ -115,19 +130,28 @@
 
       <section class="section">
         <button class="section-header" type="button">
-          <span><em>05</em> Channels & Voice</span>
-          <b>v</b>
+          <span><em>06</em> Channels</span>
+          <b class="section-chevron" aria-hidden="true"></b>
         </button>
         <div class="section-body">
           <div id="channels" class="channels"></div>
+        </div>
+      </section>
+
+      <section class="section">
+        <button class="section-header" type="button">
+          <span><em>07</em> TTS Voice</span>
+          <b class="section-chevron" aria-hidden="true"></b>
+        </button>
+        <div class="section-body">
           <label class="block-field">TTS Voice Description<textarea id="ttsVoice" readonly></textarea></label>
         </div>
       </section>
 
       <section class="section">
         <button class="section-header" type="button">
-          <span><em>06</em> Logs</span>
-          <b>v</b>
+          <span><em>08</em> Logs</span>
+          <b class="section-chevron" aria-hidden="true"></b>
         </button>
         <div class="section-body">
           <pre id="logTail" class="log-tail">No logs loaded yet.</pre>

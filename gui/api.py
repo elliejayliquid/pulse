@@ -19,18 +19,18 @@ import yaml
 
 
 SKILL_ICONS = {
-    "dev": "</>",
-    "garden": "Gr",
-    "journal": "Jr",
-    "lantern": "Ln",
-    "lor": "Lo",
-    "memory": "Mm",
-    "paint": "Pt",
-    "schedule": "Sc",
-    "sticker": "St",
-    "tasks": "Tk",
-    "tts": "Vo",
-    "web_search": "Ws",
+    "dev": "{}",
+    "garden": "🌱",
+    "journal": "📖",
+    "lantern": "🕯",
+    "lor": "🌐",
+    "memory": "🧠",
+    "paint": "🎨",
+    "schedule": "⏰",
+    "sticker": "★",
+    "tasks": "✓",
+    "tts": "🔊",
+    "web_search": "🔍",
 }
 
 
@@ -310,8 +310,12 @@ class PulseAPI:
             "max_context": max_context,
             "max_response_tokens": model_cfg.get("max_response_tokens", ""),
             "temperature": model_cfg.get("temperature", config.get("model", {}).get("temperature", 0.7)),
+            "frequency_penalty": model_cfg.get("frequency_penalty", ""),
+            "presence_penalty": model_cfg.get("presence_penalty", ""),
+            "top_p": model_cfg.get("top_p", ""),
             "reasoning": model_cfg.get("reasoning", False),
             "reasoning_effort": model_cfg.get("reasoning_effort", ""),
+            "show_reasoning": model_cfg.get("show_reasoning", False),
             "max_tool_rounds": model_cfg.get("max_tool_rounds", ""),
             "heartbeat": config.get("heartbeat", {}),
             "tts": config.get("tts", {}),
