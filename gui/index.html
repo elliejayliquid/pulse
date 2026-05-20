@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Pulse Engine</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="titlebar">
+      <div class="brand">
+        <span class="brand-dot"></span>
+        <span>Pulse Engine</span>
+      </div>
+      <div class="chrome-dots" aria-hidden="true">
+        <span></span><span></span><span></span>
+      </div>
+    </header>
+
+    <main class="content">
+      <section class="selector-row">
+        <button id="personaPicker" class="selector" type="button">
+          <span>
+            <b>Persona</b>
+            <strong id="selectedPersonaName">Loading...</strong>
+          </span>
+          <span class="chevron">v</span>
+        </button>
+        <div id="personaMenu" class="persona-menu hidden"></div>
+        <button id="newPersonaBtn" class="ghost-btn" type="button" disabled>+ New</button>
+      </section>
+
+      <section class="persona-hero">
+        <div id="avatar" class="avatar">P</div>
+        <div class="hero-copy">
+          <div class="hero-title-row">
+            <h1 id="displayName">Pulse</h1>
+            <span id="statusPill" class="status-pill stopped"><i></i><span>Stopped</span></span>
+          </div>
+          <p id="personaMeta" class="mono-line">Loading configuration...</p>
+        </div>
+        <div class="hero-actions">
+          <button id="refreshBtn" class="icon-btn" type="button" title="Refresh">R</button>
+          <button id="openFolderBtn" class="icon-btn" type="button" title="Open folder" disabled>F</button>
+        </div>
+      </section>
+
+      <div id="notice" class="notice hidden"></div>
+
+      <section class="section open">
+        <button class="section-header" type="button">
+          <span><em>01</em> Identity</span>
+          <b>v</b>
+        </button>
+        <div class="section-body">
+          <div class="field-grid three">
+            <label>Name<input id="identityName" type="text" readonly></label>
+            <label>User<input id="identityUser" type="text" readonly></label>
+            <label>Display Model Name<input id="identityModel" type="text" readonly></label>
+          </div>
+          <label class="block-field">System Prompt<textarea id="systemPrompt" readonly></textarea></label>
+          <label class="block-field">Traits<div id="traits" class="chips"></div></label>
+          <label class="block-field">Voice Notes<textarea id="voiceNotes" readonly></textarea></label>
+        </div>
+      </section>
+
+      <section class="section open">
+        <button class="section-header" type="button">
+          <span><em>02</em> Provider</span>
+          <b>v</b>
+        </button>
+        <div class="section-body">
+          <div class="field-grid three">
+            <label>Type<input id="providerType" type="text" readonly></label>
+            <label>Provider Model<input id="providerModel" type="text" readonly></label>
+            <label>Max Context<input id="maxContext" type="text" readonly></label>
+          </div>
+          <div class="secret-list">
+            <div class="secret-row">
+              <span id="apiKeyName">API key</span>
+              <strong id="apiKeyStatus">Unknown</strong>
+            </div>
+            <div class="secret-row">
+              <span>TELEGRAM_BOT_TOKEN</span>
+              <strong id="telegramStatus">Unknown</strong>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section">
+        <button class="section-header" type="button">
+          <span><em>03</em> Runtime</span>
+          <b>v</b>
+        </button>
+        <div class="section-body">
+          <div id="runtimeGrid" class="runtime-grid"></div>
+          <div class="action-row">
+            <button id="startBtn" class="primary-btn" type="button" disabled>Start Pulse</button>
+            <button id="stopBtn" class="secondary-btn" type="button" disabled>Stop</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="section open">
+        <button class="section-header" type="button">
+          <span><em>04</em> Skills</span>
+          <b>v</b>
+        </button>
+        <div class="section-body">
+          <div id="skillsGrid" class="skills-grid"></div>
+        </div>
+      </section>
+
+      <section class="section">
+        <button class="section-header" type="button">
+          <span><em>05</em> Channels & Voice</span>
+          <b>v</b>
+        </button>
+        <div class="section-body">
+          <div id="channels" class="channels"></div>
+          <label class="block-field">TTS Voice Description<textarea id="ttsVoice" readonly></textarea></label>
+        </div>
+      </section>
+
+      <section class="section">
+        <button class="section-header" type="button">
+          <span><em>06</em> Logs</span>
+          <b>v</b>
+        </button>
+        <div class="section-body">
+          <pre id="logTail" class="log-tail">No logs loaded yet.</pre>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <span id="filePath" class="file-path">Read-only Phase 1</span>
+      <div>
+        <button id="saveBtn" class="secondary-btn" type="button" disabled>Save</button>
+        <button id="reloadBtn" class="primary-btn" type="button">Refresh</button>
+      </div>
+    </footer>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

@@ -3,6 +3,7 @@ openai>=1.0.0                   # llama-server API client (OpenAI-compatible)
 anthropic>=0.40                 # Native Anthropic API client (optional, for provider: anthropic)
 httpx>=0.27                     # Health checks for llama-server
 pyyaml>=6.0                     # Config file parsing
+pywebview>=5.0                  # Desktop GUI shell for Pulse Engine
 python-dotenv>=1.0              # Load .env secrets
 win11toast>=0.34                # Windows desktop notifications (optional, Windows only)
 python-telegram-bot>=21.0       # Telegram bot (Phase 2)
