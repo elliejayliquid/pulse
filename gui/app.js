@@ -65,6 +65,7 @@ const fallbackApi = {
   async save_prefs() { return { ok: true }; },
   async preview_persona_save() { return { ok: false, error: "Run through pywebview to save." }; },
   async save_persona() { return { ok: false, error: "Run through pywebview to save." }; },
+  async pick_voice_sample() { return { ok: false, error: "Run through pywebview to pick files." }; },
   async get_log_tail() { return "Run through pywebview to read logs."; },
   async start_pulse() { return { ok: false, error: "Run through pywebview to start Pulse." }; },
   async stop_pulse() { return { ok: false, error: "Run through pywebview to stop Pulse." }; },
@@ -382,6 +383,19 @@ function renderProvider(data) {
   el("ttsVoice").value = text(tts.voice_description);
   el("ttsSample").value = text(tts.voice_sample);
   el("ttsSampleText").value = text(tts.voice_sample_text);
+  syncTtsMode();
+}
+
+function syncTtsMode() {
+  const hasSample = Boolean(el("ttsSample").value);
+  const badge = el("ttsModeBadge");
+  badge.textContent = hasSample ? "Clone mode" : "Design mode";
+  badge.className = "tts-badge " + (hasSample ? "clone" : "design");
+  el("ttsVoiceHint").textContent = hasSample
+    ? "Used in design mode only."
+    : "Describe the voice — pitch, tone, warmth, accent. Each generation sounds slightly different.";
+  el("ttsSampleTextGroup").classList.toggle("hidden", !hasSample);
+  el("ttsSampleClear").classList.toggle("hidden", !hasSample);
 }
 
 function editableSnapshot() {
@@ -400,9 +414,12 @@ function editableSnapshot() {
 
 function setEditableState(data) {
   const editable = data?.name && data.name !== "__base__";
-  ["identityModel", "voiceNotes", "ttsVoice", "ttsSample", "ttsSampleText"].forEach((id) => {
+  ["identityModel", "voiceNotes", "ttsVoice", "ttsSampleText"].forEach((id) => {
     el(id).readOnly = !editable;
   });
+  el("ttsSample").readOnly = true;
+  el("ttsSamplePicker").disabled = !editable;
+  el("ttsSampleClear").disabled = !editable;
   state.originalEditable = editableSnapshot();
   setDirty(false);
 }
@@ -411,13 +428,19 @@ function collectEditableChanges() {
   const current = editableSnapshot();
   const original = state.originalEditable || { identity: {}, tts: {} };
   const changes = { identity: {}, tts: {} };
-  for (const group of ["identity", "tts"]) {
-    for (const [key, value] of Object.entries(current[group])) {
-      if (value !== original[group]?.[key]) {
-        changes[group][key] = value;
-      }
+
+  for (const [key, value] of Object.entries(current.identity)) {
+    if (value !== original.identity?.[key]) {
+      changes.identity[key] = value;
     }
   }
+
+  for (const [key, value] of Object.entries(current.tts)) {
+    if (value !== original.tts?.[key]) {
+      changes.tts[key] = value;
+    }
+  }
+
   return changes;
 }
 
@@ -530,11 +553,39 @@ function wireEvents() {
   document.querySelectorAll(".section-header").forEach((header) => {
     header.addEventListener("click", () => header.parentElement.classList.toggle("open"));
   });
-  ["identityModel", "voiceNotes", "ttsVoice", "ttsSample", "ttsSampleText"].forEach((id) => {
+  ["identityModel", "voiceNotes", "ttsVoice", "ttsSampleText"].forEach((id) => {
     el(id).addEventListener("input", () => setDirty(hasEditableChanges()));
+  });
+  el("ttsSamplePicker").addEventListener("click", async () => {
+    if (!state.current || state.current.name === "__base__") return;
+    const result = await api().pick_voice_sample(state.current.name, el("ttsSample").value || "");
+    if (result?.ok && result.path) {
+      el("ttsSample").value = result.path;
+      syncTtsMode();
+      setDirty(hasEditableChanges());
+    } else if (result && !result.ok && result.error) {
+      setNotice(result.error, "warning");
+    }
+  });
+  el("ttsSampleClear").addEventListener("click", async () => {
+    if (!el("ttsSample").value) return;
+    const ok = await showConfirm(
+      "Switch to design mode?",
+      "This will remove the voice sample and transcript. The voice will be generated from the description instead.",
+      "Remove sample"
+    );
+    if (!ok) return;
+    el("ttsSample").value = "";
+    el("ttsSampleText").value = "";
+    syncTtsMode();
+    setDirty(hasEditableChanges());
   });
   el("saveBtn").addEventListener("click", async () => {
     if (!state.current || state.current.name === "__base__") return;
+    if (el("ttsSample").value && !el("ttsSampleText").value) {
+      setNotice("Voice sample is set but transcript is empty — clone mode needs both.", "warning");
+      return;
+    }
     const changes = collectEditableChanges();
     const preview = await api().preview_persona_save(state.current.name, changes);
     if (!preview.ok) {
@@ -548,10 +599,10 @@ function wireEvents() {
     }
     const changed = preview.preview.changes.map((item) => item.file).join(", ");
     const diff = preview.preview.diff || "";
-    const shownDiff = diff.length > 1800 ? `${diff.slice(0, 1800)}\n...diff truncated...` : diff;
-    const ok = window.confirm(
-      `Save changes to ${changed}?\n\nA backup will be created first.\n\n${shownDiff}`
-    );
+    const shownDiff = diff.length > 1200 ? diff.slice(0, 1200) + "\n..." : diff;
+    const body = `Saving to <strong>${escapeHtml(changed)}</strong>. A backup will be created first.`
+      + (shownDiff ? `<pre style="margin-top:10px;font-size:11px;max-height:200px;overflow:auto;white-space:pre-wrap;color:var(--text-secondary)">${escapeHtml(shownDiff)}</pre>` : "");
+    const ok = await showConfirm("Save changes?", body, "Save", "secondary");
     if (!ok) return;
     const result = await api().save_persona(state.current.name, changes);
     if (!result.ok) {
@@ -649,6 +700,25 @@ function wireSliders() {
   }, { passive: true });
 
   document.addEventListener("touchend", () => { active = null; });
+}
+
+function showConfirm(title, body, okLabel = "Confirm", okStyle = "danger") {
+  return new Promise((resolve) => {
+    el("confirmTitle").textContent = title;
+    el("confirmBody").innerHTML = body;
+    const okBtn = el("confirmOk");
+    okBtn.textContent = okLabel;
+    okBtn.className = "modal-btn " + okStyle;
+    el("confirmDialog").classList.remove("hidden");
+    function cleanup(result) {
+      el("confirmDialog").classList.add("hidden");
+      okBtn.replaceWith(okBtn.cloneNode(true));
+      el("confirmCancel").replaceWith(el("confirmCancel").cloneNode(true));
+      resolve(result);
+    }
+    el("confirmOk").addEventListener("click", () => cleanup(true), { once: true });
+    el("confirmCancel").addEventListener("click", () => cleanup(false), { once: true });
+  });
 }
 
 function showCloseDialog(personas) {

@@ -143,11 +143,26 @@
           <b class="section-chevron" aria-hidden="true"></b>
         </button>
         <div class="section-body">
+          <span id="ttsModeBadge" class="tts-badge">Design mode</span>
+
           <label class="block-field">Voice Description<textarea id="ttsVoice"></textarea></label>
-          <div class="field-grid">
-            <label>Voice Sample Path<input id="ttsSample" type="text"></label>
+          <p id="ttsVoiceHint" class="field-hint">Describe the voice — pitch, tone, warmth, accent. Each generation sounds slightly different.</p>
+
+          <div class="sample-row">
+            <label class="sample-path-label">Voice Sample
+              <div class="sample-input-row">
+                <input id="ttsSample" type="text" readonly placeholder="No audio file — design mode active">
+                <button id="ttsSamplePicker" class="icon-btn sample-picker-btn" type="button" title="Choose audio file">📂</button>
+                <button id="ttsSampleClear" class="icon-btn sample-clear-btn hidden" type="button" title="Remove sample (switch to design mode)">✕</button>
+              </div>
+            </label>
           </div>
-          <label class="block-field">Voice Sample Text<textarea id="ttsSampleText"></textarea></label>
+          <p class="field-hint">Set a reference audio clip (5–15s) to enable clone mode.</p>
+
+          <div id="ttsSampleTextGroup" class="hidden">
+            <label class="block-field">Voice Sample Text<textarea id="ttsSampleText"></textarea></label>
+            <p class="field-hint">Exact transcript of the audio clip. Required for clone mode.</p>
+          </div>
         </div>
       </section>
 
@@ -169,6 +184,17 @@
         <button id="reloadBtn" class="primary-btn" type="button">Refresh</button>
       </div>
     </footer>
+  </div>
+
+  <div id="confirmDialog" class="modal-overlay hidden">
+    <div class="modal-card">
+      <h2 id="confirmTitle" class="modal-title"></h2>
+      <p id="confirmBody" class="modal-body"></p>
+      <div class="modal-actions">
+        <button id="confirmOk" class="modal-btn danger" type="button">Confirm</button>
+        <button id="confirmCancel" class="modal-btn ghost" type="button">Cancel</button>
+      </div>
+    </div>
   </div>
 
   <div id="closeDialog" class="modal-overlay hidden">

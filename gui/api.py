@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -189,6 +190,44 @@ class PulseAPI:
             return {"ok": True, "backups": backups}
         except (FileNotFoundError, ValueError, OSError) as e:
             return {"ok": False, "error": str(e)}
+
+    # File pickers
+
+    def pick_voice_sample(self, persona: str, current_path: str = "") -> dict:
+        if not persona or persona == "__base__":
+            return {"ok": False, "error": "Choose a persona first."}
+        if not self._window:
+            return {"ok": False, "error": "File dialog requires pywebview."}
+        start_dir = ""
+        if current_path:
+            candidate = (self.root / current_path).resolve()
+            if candidate.parent.is_dir():
+                start_dir = str(candidate.parent)
+        try:
+            import webview
+            result = self._window.create_file_dialog(
+                webview.OPEN_DIALOG,
+                directory=start_dir,
+                allow_multiple=False,
+                file_types=(
+                    "Audio Files (*.ogg;*.wav;*.mp3;*.flac;*.opus)",
+                    "All Files (*.*)",
+                ),
+            )
+        except Exception as e:
+            return {"ok": False, "error": f"File dialog failed: {e}"}
+        if not result:
+            return {"ok": False}
+        chosen = Path(result[0])
+        if not chosen.is_file():
+            return {"ok": False, "error": "Selected file does not exist."}
+        dest_dir = self.personas_dir / persona / "data" / "tts" / "voice_ref"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / chosen.name
+        if chosen.resolve() != dest.resolve():
+            shutil.copy2(chosen, dest)
+        rel_path = dest.relative_to(self.root).as_posix()
+        return {"ok": True, "path": rel_path}
 
     # Secrets/status/logs
 
