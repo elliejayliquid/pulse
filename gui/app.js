@@ -3,6 +3,8 @@ const state = {
   current: null,
   prefs: {},
   pendingTransition: null,
+  dirty: false,
+  originalEditable: null,
 };
 
 const fallbackApi = {
@@ -61,6 +63,8 @@ const fallbackApi = {
   },
   async get_prefs() { return {}; },
   async save_prefs() { return { ok: true }; },
+  async preview_persona_save() { return { ok: false, error: "Run through pywebview to save." }; },
+  async save_persona() { return { ok: false, error: "Run through pywebview to save." }; },
   async get_log_tail() { return "Run through pywebview to read logs."; },
   async start_pulse() { return { ok: false, error: "Run through pywebview to start Pulse." }; },
   async stop_pulse() { return { ok: false, error: "Run through pywebview to stop Pulse." }; },
@@ -87,6 +91,12 @@ function setNotice(message, kind = "info") {
   box.textContent = message;
   box.dataset.kind = kind;
   box.classList.remove("hidden");
+}
+
+function setDirty(value) {
+  state.dirty = Boolean(value);
+  const isBase = state.current?.name === "__base__";
+  el("saveBtn").disabled = isBase || !state.dirty;
 }
 
 function text(value, fallback = "") {
@@ -365,10 +375,55 @@ function renderHero(data) {
 
 function renderProvider(data) {
   const summary = data.summary || {};
+  const tts = summary.tts || {};
   el("providerType").value = text(summary.provider_type);
   el("providerModel").value = text(summary.provider_model);
   el("maxContext").value = text(summary.max_context);
-  el("ttsVoice").value = text(summary.tts?.voice_description);
+  el("ttsVoice").value = text(tts.voice_description);
+  el("ttsSample").value = text(tts.voice_sample);
+  el("ttsSampleText").value = text(tts.voice_sample_text);
+}
+
+function editableSnapshot() {
+  return {
+    identity: {
+      model: el("identityModel").value,
+      voice_notes: el("voiceNotes").value,
+    },
+    tts: {
+      voice_description: el("ttsVoice").value,
+      voice_sample: el("ttsSample").value,
+      voice_sample_text: el("ttsSampleText").value,
+    },
+  };
+}
+
+function setEditableState(data) {
+  const editable = data?.name && data.name !== "__base__";
+  ["identityModel", "voiceNotes", "ttsVoice", "ttsSample", "ttsSampleText"].forEach((id) => {
+    el(id).readOnly = !editable;
+  });
+  state.originalEditable = editableSnapshot();
+  setDirty(false);
+}
+
+function collectEditableChanges() {
+  const current = editableSnapshot();
+  const original = state.originalEditable || { identity: {}, tts: {} };
+  const changes = { identity: {}, tts: {} };
+  for (const group of ["identity", "tts"]) {
+    for (const [key, value] of Object.entries(current[group])) {
+      if (value !== original[group]?.[key]) {
+        changes[group][key] = value;
+      }
+    }
+  }
+  return changes;
+}
+
+function hasEditableChanges() {
+  const changes = collectEditableChanges();
+  return Object.keys(changes.identity).length > 0 || Object.keys(changes.tts).length > 0;
 }
 
 async function loadPersona(name) {
@@ -385,7 +440,10 @@ async function loadPersona(name) {
   renderSkills(data.skills || []);
   renderChannels(data.channels || []);
   renderProcessButton(data);
-  el("filePath").textContent = data.paths?.config ? `Read-only: ${data.paths.config}` : "Read-only Phase 1";
+  setEditableState(data);
+  el("filePath").textContent = data.paths?.config
+    ? `Editable safe fields: ${data.paths.config}`
+    : "Safe edit mode";
   state.prefs.last_persona = name;
   await api().save_prefs(state.prefs);
   await loadLogs();
@@ -472,7 +530,38 @@ function wireEvents() {
   document.querySelectorAll(".section-header").forEach((header) => {
     header.addEventListener("click", () => header.parentElement.classList.toggle("open"));
   });
-  el("saveBtn").addEventListener("click", () => setNotice("Saving is intentionally disabled in Phase 1."));
+  ["identityModel", "voiceNotes", "ttsVoice", "ttsSample", "ttsSampleText"].forEach((id) => {
+    el(id).addEventListener("input", () => setDirty(hasEditableChanges()));
+  });
+  el("saveBtn").addEventListener("click", async () => {
+    if (!state.current || state.current.name === "__base__") return;
+    const changes = collectEditableChanges();
+    const preview = await api().preview_persona_save(state.current.name, changes);
+    if (!preview.ok) {
+      setNotice(preview.error || "Could not preview changes.", "warning");
+      return;
+    }
+    if (!preview.preview.has_changes) {
+      setDirty(false);
+      setNotice("No changes to save.");
+      return;
+    }
+    const changed = preview.preview.changes.map((item) => item.file).join(", ");
+    const diff = preview.preview.diff || "";
+    const shownDiff = diff.length > 1800 ? `${diff.slice(0, 1800)}\n...diff truncated...` : diff;
+    const ok = window.confirm(
+      `Save changes to ${changed}?\n\nA backup will be created first.\n\n${shownDiff}`
+    );
+    if (!ok) return;
+    const result = await api().save_persona(state.current.name, changes);
+    if (!result.ok) {
+      setNotice(result.error || "Save failed.", "warning");
+      return;
+    }
+    await loadPersona(state.current.name);
+    setDirty(false);
+    setNotice(result.changed ? "Saved with backup." : "No changes to save.");
+  });
   el("pulseToggle").addEventListener("click", async () => {
     if (!state.current || state.current.name === "__base__") return;
     const status = state.current.status || {};

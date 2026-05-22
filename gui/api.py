@@ -20,6 +20,7 @@ from typing import Any
 import yaml
 
 from gui.backup import BackupManager
+from gui.config_editor import ConfigEditor
 
 
 STATUS_STALE_AFTER_SECONDS = 120
@@ -96,6 +97,7 @@ class PulseAPI:
         self.personas_dir = self.root / "personas"
         self.prefs_path = self.root / "data" / "gui_prefs.json"
         self.backups = BackupManager(self.root)
+        self.config_editor = ConfigEditor(self.root, self.backups)
         self.processes: dict[str, ProcessInfo] = {}
         self._window = None
         self._close_requested: list[str] | None = None
@@ -147,11 +149,18 @@ class PulseAPI:
             },
         }
 
-    def save_persona(self, name: str, config: dict, identity: dict) -> dict:
-        return {
-            "ok": False,
-            "error": "Config saving is not implemented in Phase 1. This GUI is read-only for persona files.",
-        }
+    def preview_persona_save(self, name: str, changes: dict) -> dict:
+        try:
+            preview = self.config_editor.preview(name, changes)
+            return {"ok": True, "preview": preview}
+        except (FileNotFoundError, ValueError, OSError) as e:
+            return {"ok": False, "error": str(e)}
+
+    def save_persona(self, name: str, changes: dict, identity: dict | None = None) -> dict:
+        try:
+            return self.config_editor.save(name, changes)
+        except (FileNotFoundError, ValueError, OSError) as e:
+            return {"ok": False, "error": str(e)}
 
     def create_persona(self, name: str) -> dict:
         return {

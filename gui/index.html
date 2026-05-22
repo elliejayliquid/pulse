@@ -65,11 +65,11 @@
           <div class="field-grid three">
             <label>Name<input id="identityName" type="text" readonly></label>
             <label>User<input id="identityUser" type="text" readonly></label>
-            <label>Display Model Name<input id="identityModel" type="text" readonly></label>
+            <label>Display Model Name<input id="identityModel" type="text"></label>
           </div>
           <label class="block-field">System Prompt<textarea id="systemPrompt" readonly></textarea></label>
           <label class="block-field">Traits<div id="traits" class="chips"></div></label>
-          <label class="block-field">Voice Notes<textarea id="voiceNotes" readonly></textarea></label>
+          <label class="block-field">Voice Notes<textarea id="voiceNotes"></textarea></label>
         </div>
       </section>
 
@@ -143,7 +143,11 @@
           <b class="section-chevron" aria-hidden="true"></b>
         </button>
         <div class="section-body">
-          <label class="block-field">TTS Voice Description<textarea id="ttsVoice" readonly></textarea></label>
+          <label class="block-field">Voice Description<textarea id="ttsVoice"></textarea></label>
+          <div class="field-grid">
+            <label>Voice Sample Path<input id="ttsSample" type="text"></label>
+          </div>
+          <label class="block-field">Voice Sample Text<textarea id="ttsSampleText"></textarea></label>
         </div>
       </section>
 

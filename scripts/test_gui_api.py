@@ -74,9 +74,12 @@ voice_notes: Warm.
         assert demo["key_status"]["api_key_set"] is True
         assert demo["key_status"]["telegram_set"] is False
 
-        save_result = api.save_persona("demo", {}, {})
-        assert save_result["ok"] is False
-        assert "read-only" in save_result["error"]
+        preview_result = api.preview_persona_save("demo", {
+            "identity": {"model": "Demo Model 2"},
+            "tts": {"voice_description": "Warm demo voice."},
+        })
+        assert preview_result["ok"] is True
+        assert preview_result["preview"]["has_changes"] is True
 
         stop_result = api.stop_pulse("demo")
         assert stop_result["ok"] is True
