@@ -100,6 +100,11 @@ class TelegramChannel(Channel):
         """Connect the engine so incoming messages can trigger responses."""
         self._engine = engine
 
+    @property
+    def is_connected(self) -> bool:
+        """True when Telegram polling is active."""
+        return bool(self.app and self.app.updater and self.app.updater.running)
+
     async def initialize(self):
         """Build and start the Telegram bot."""
         if not self.bot_token:

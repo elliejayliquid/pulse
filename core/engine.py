@@ -154,6 +154,13 @@ class PulseEngine:
 
         # Activity tracking — heartbeat only fires after silence
         self._last_activity = 0.0   # timestamp of last message exchange
+        self._started_at = 0.0
+        self._next_heartbeat_target = None
+        self._last_tick_at = None
+        self._last_tick_action = None
+        self._last_tick_summary = None
+        self._last_error = None
+        self._tts_ready = True
         self._manual_quiet = False  # /quiet toggle — cleared on next user message
 
 
@@ -205,6 +212,55 @@ class PulseEngine:
             return interval
         return fixed or self.interval
 
+    def _mark_activity(self) -> None:
+        """Reset the silence clock and next heartbeat target."""
+        self._last_activity = time.time()
+        self._next_heartbeat_target = self._last_activity + self.interval
+
+    def _iso_from_timestamp(self, timestamp: float | None) -> str | None:
+        if not timestamp:
+            return None
+        return datetime.fromtimestamp(timestamp, timezone.utc).isoformat()
+
+    def _runtime_status_payload(self) -> dict:
+        telegram_ch = self.channels.get("telegram")
+        scheduled_tasks = 0
+        if self.scheduler:
+            try:
+                scheduled_tasks = self.scheduler.count_active()
+            except Exception as e:
+                logger.debug(f"Failed to count active schedules for status: {e}")
+        return {
+            "llm_available": getattr(self.llm, "_available", None),
+            "tts_ready": self._tts_ready,
+            "channels": list(self.channels.keys()),
+            "uptime_seconds": (
+                int(time.time() - self._started_at) if self._started_at else None
+            ),
+            "last_activity_at": self._iso_from_timestamp(self._last_activity),
+            "last_tick_at": self._last_tick_at,
+            "last_tick_action": self._last_tick_action,
+            "last_tick_summary": self._last_tick_summary,
+            "last_error": self._last_error,
+            "next_heartbeat_in": (
+                max(0, int(self._next_heartbeat_target - time.time()))
+                if self._next_heartbeat_target else None
+            ),
+            "telegram_connected": (
+                telegram_ch.is_connected
+                if telegram_ch and hasattr(telegram_ch, "is_connected")
+                else None
+            ),
+            "scheduled_tasks": scheduled_tasks,
+        }
+
+    def _write_runtime_status(self, phase: str = "running", running: bool = True, **extra):
+        if not self.runtime_status:
+            return
+        payload = self._runtime_status_payload()
+        payload.update(extra)
+        self.runtime_status.write(phase, running, **payload)
+
     def _log_action(self, action: str, tools_used: list[str] = None, summary: str = ""):
         """Append an entry to the heartbeat action log (ring buffer)."""
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -248,8 +304,7 @@ class PulseEngine:
         except Exception:
             pass
         self._tts_ready = True
-        if self.runtime_status:
-            self.runtime_status.write("running", True, tts_ready=True)
+        self._write_runtime_status(tts_ready=True)
 
     async def _interruptible_sleep(self, seconds: int):
         """Sleep that can be interrupted instantly by stop()."""
@@ -576,8 +631,8 @@ class PulseEngine:
             Text is None if LLM unavailable.
         """
         # Reset heartbeat timer — conversation is active, re-roll interval
-        self._last_activity = time.time()
         self.interval = self._roll_heartbeat_interval()
+        self._mark_activity()
         # Clear manual quiet mode — user is talking, companion wakes up
         if self._manual_quiet:
             self._manual_quiet = False
@@ -872,15 +927,16 @@ class PulseEngine:
         is still parsed as JSON (PulseResponse) for dispatch.
         """
         logger.info("--- Heartbeat tick ---")
+        response = None
 
         if self._in_quiet_hours():
             logger.info("Quiet hours — skipping heartbeat.")
-            return
+            return None
 
         available = await asyncio.to_thread(self.llm.is_available)
         if not available:
             logger.warning("LLM server is not available — skipping tick.")
-            return
+            return None
 
         # Free-think tick — companion decides what to do
         tools = self.skill_registry.get_always_tools() if self.skill_registry else []
@@ -894,7 +950,6 @@ class PulseEngine:
         )
 
         t0 = time.time()
-        response = None
         tools_used = []
         tg_msg_id = None
 
@@ -957,6 +1012,8 @@ class PulseEngine:
                 await self._send_heartbeat_debug(
                     None, tools_used, int(elapsed)
                 )
+
+        return response
 
     async def _do_dev_tick(self):
         """Execute a dev tick — autonomous self-improvement session.
@@ -1109,9 +1166,15 @@ class PulseEngine:
         """
         self._running = True
         self._stop_event.clear()
+        self._started_at = time.time()
+        self._last_tick_at = None
+        self._last_tick_action = None
+        self._last_tick_summary = None
+        self._last_error = None
+        self._next_heartbeat_target = None
+        self._tts_ready = True
         logger.info("Pulse engine starting...")
-        if self.runtime_status:
-            self.runtime_status.write("starting", True)
+        self._write_runtime_status("starting", True)
         if self._heartbeat_randomize:
             logger.info(f"Heartbeat interval: {self._heartbeat_min // 60}-{self._heartbeat_max // 60} minutes (randomized)")
         else:
@@ -1119,7 +1182,6 @@ class PulseEngine:
         logger.info(f"Quiet hours: {self.quiet_start}:00 - {self.quiet_end}:00")
 
         # Determine TTS warmup state before the first "running" status write
-        self._tts_ready = True
         tts_skill = None
         if self.skill_registry:
             tts_skill = self.skill_registry.get_skill("tts")
@@ -1129,12 +1191,10 @@ class PulseEngine:
         # Check LLM server availability
         if self.llm.is_available():
             logger.info("LLM server is reachable!")
-            if self.runtime_status:
-                self.runtime_status.write("running", True, llm_available=True, tts_ready=self._tts_ready)
+            self._write_runtime_status("running", True, llm_available=True)
         else:
             logger.warning("LLM server is not available — will retry on each tick.")
-            if self.runtime_status:
-                self.runtime_status.write("running", True, llm_available=False, tts_ready=self._tts_ready)
+            self._write_runtime_status("running", True, llm_available=False)
 
         # Warm up the TTS model in the background so the first voice generation
         # (companion's speak tool OR Telegram 🔊 button) doesn't pay the cold
@@ -1143,13 +1203,17 @@ class PulseEngine:
             asyncio.create_task(self._warmup_tts(tts_skill))
 
         # Start the silence clock — heartbeat fires after interval_minutes of no activity
-        self._last_activity = time.time()
+        self._mark_activity()
 
         # Optional startup check-in
         if self.startup_checkin:
             logger.info("Running startup check-in...")
             await self._check_due_tasks()
-            await self._do_heartbeat()
+            response = await self._do_heartbeat()
+            self._last_tick_at = datetime.now(timezone.utc).isoformat()
+            self._last_tick_action = response.action if response else "skipped"
+            self._last_tick_summary = (response.message or "")[:120] if response else None
+        self._write_runtime_status()
 
         # Main loop — wake up every 60s to check schedules,
         # heartbeat fires only after enough silence (no messages exchanged)
@@ -1176,32 +1240,26 @@ class PulseEngine:
                 self.stop()
                 break
 
-            if self.runtime_status:
-                self.runtime_status.write(
-                    "running",
-                    True,
-                    llm_available=getattr(self.llm, "_available", None),
-                    tts_ready=self._tts_ready,
-                    channels=list(self.channels.keys()),
-                    last_heartbeat=(
-                        datetime.fromtimestamp(self._last_activity, timezone.utc).isoformat()
-                        if self._last_activity else None
-                    ),
-                )
+            self._write_runtime_status()
 
             if dev_ticks:
                 ticks_since_dev += 1
 
             try:
+                self._last_error = None
                 # Always check for due tasks (fast — just reads a file)
                 await self._check_due_tasks()
 
                 # Heartbeat fires only after enough silence since last activity
                 silence = time.time() - self._last_activity
                 if silence >= self.interval:
-                    self._last_activity = time.time()  # reset so we don't fire every 60s
-                    await self._do_heartbeat()
+                    self._mark_activity()  # reset so we don't fire every 60s
+                    response = await self._do_heartbeat()
+                    self._last_tick_at = datetime.now(timezone.utc).isoformat()
+                    self._last_tick_action = response.action if response else "skipped"
+                    self._last_tick_summary = (response.message or "")[:120] if response else None
                     self.interval = self._roll_heartbeat_interval()
+                    self._next_heartbeat_target = self._last_activity + self.interval
 
                 # Dev tick — scheduled time or interval
                 if self.dev_tick_enabled:
@@ -1225,6 +1283,7 @@ class PulseEngine:
                         ticks_since_dev = 0
                         await self._do_dev_tick()
             except Exception as e:
+                self._last_error = str(e)[:200]
                 logger.error(f"Tick failed: {e}", exc_info=True)
 
     def stop(self):

@@ -587,6 +587,19 @@ class ScheduleManager:
 
         return due
 
+    def count_active(self) -> int:
+        """Count active schedules without running due-task checks."""
+        db = self._shared_db or self._db
+        if db:
+            return len([
+                s for s in db.get_schedules(enabled_only=True)
+                if not s.get("completed", False)
+            ])
+        return len([
+            s for s in self._load_json()
+            if s.get("enabled", True) and not s.get("completed", False)
+        ])
+
     def mark_completed(self, schedule_id: str):
         """Mark a one-time task as completed, or update last_run for recurring.
 

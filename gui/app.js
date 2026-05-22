@@ -45,7 +45,17 @@ const fallbackApi = {
       skills: [],
       channels: [],
       key_status: { api_key_env: "API_KEY", api_key_set: false, telegram_set: false },
-      status: { running: false, phase: "browser fallback" },
+      status: {
+        running: false,
+        phase: "browser fallback",
+        uptime_seconds: 3723,
+        telegram_connected: null,
+        tts_ready: true,
+        llm_available: true,
+        next_heartbeat_in: 1234,
+        scheduled_tasks: 2,
+        last_tick_action: "silent",
+      },
       paths: { config: "", persona_dir: "", avatar: "" },
     };
   },
@@ -159,9 +169,15 @@ function renderStatus(status) {
   const label = pill.querySelector("span");
   const pulse = document.querySelector(".brand-pulse");
   pill.classList.remove("running", "warning", "stopped");
-  if (status?.running) {
+  if (status?.phase === "stopping") {
+    pill.classList.add("warning");
+    label.textContent = "Stopping...";
+    pulse?.classList.remove("flatline");
+  } else if (status?.running) {
     pill.classList.add(status.stale ? "warning" : "running");
-    label.textContent = status.stale ? "Unresponsive" : "Running";
+    label.textContent = status.stale
+      ? "Unresponsive"
+      : status.source === "status-file" ? "Running (external)" : "Running";
     pulse?.classList.remove("flatline");
   } else {
     pill.classList.add("stopped");
@@ -188,13 +204,71 @@ function renderProcessButton(data) {
   }
 }
 
+function formatDuration(value) {
+  const seconds = Math.max(0, Number(value) || 0);
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  return `${hours}h ${minutes}m`;
+}
+
+function formatCountdown(value) {
+  const seconds = Math.max(0, Number(value) || 0);
+  if (seconds <= 0) return "now";
+  if (seconds < 60) return "<1m";
+  if (seconds < 3600) return `${Math.ceil(seconds / 60)}m`;
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.ceil((seconds % 3600) / 60);
+  return minutes >= 60 ? `${hours + 1}h` : `${hours}h ${minutes}m`;
+}
+
+function formatTimeAgo(iso) {
+  if (!iso) return "never";
+  const when = new Date(iso).getTime();
+  if (Number.isNaN(when)) return "unknown";
+  const diff = Math.max(0, Math.floor((Date.now() - when) / 1000));
+  if (diff < 60) return "just now";
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  return `${Math.floor(diff / 3600)}h ${Math.floor((diff % 3600) / 60)}m ago`;
+}
+
+function runtimeState(value, labels) {
+  if (value === true) return labels.true;
+  if (value === false) return labels.false;
+  return labels.nullish;
+}
+
 function runtimeRows(status, summary) {
+  const telegram = runtimeState(status?.telegram_connected, {
+    true: "Connected",
+    false: "Disconnected",
+    nullish: "Not configured",
+  });
+  const tts = runtimeState(status?.tts_ready, {
+    true: "Ready",
+    false: "Warming up",
+    nullish: "Not configured",
+  });
+  const llm = runtimeState(status?.llm_available, {
+    true: "Available",
+    false: "Unavailable",
+    nullish: "Unknown",
+  });
   return [
     ["Phase", text(status?.phase, status?.running ? "running" : "stopped")],
     ["PID", text(status?.pid, "none")],
+    ["Uptime", status?.uptime_seconds != null ? formatDuration(status.uptime_seconds) : "-"],
     ["Provider", text(summary.provider_type, "unknown")],
-    ["Provider model", text(summary.provider_model, "not set")],
-    ["Last heartbeat", text(status?.last_heartbeat, "unknown")],
+    ["Model", text(summary.provider_model || summary.model_display, "not set")],
+    ["Telegram", telegram],
+    ["TTS", tts],
+    ["LLM", llm],
+    ["Next heartbeat", status?.next_heartbeat_in != null ? formatCountdown(status.next_heartbeat_in) : "-"],
+    ["Tasks scheduled", text(status?.scheduled_tasks, "0")],
+    ["Last activity", formatTimeAgo(status?.last_activity_at || status?.last_heartbeat)],
+    ["Last tick", formatTimeAgo(status?.last_tick_at)],
+    ["Last action", text(status?.last_tick_action, "none")],
     ["Last error", text(status?.last_error, "none")],
   ];
 }

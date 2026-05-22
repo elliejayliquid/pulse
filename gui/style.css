@@ -725,6 +725,8 @@ textarea {
 
 .runtime-item strong {
   text-align: right;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .skills-grid {
