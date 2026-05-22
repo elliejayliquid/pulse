@@ -19,6 +19,8 @@ from typing import Any
 
 import yaml
 
+from gui.backup import BackupManager
+
 
 STATUS_STALE_AFTER_SECONDS = 120
 
@@ -93,6 +95,7 @@ class PulseAPI:
         self.base_config_path = self.root / "config.yaml"
         self.personas_dir = self.root / "personas"
         self.prefs_path = self.root / "data" / "gui_prefs.json"
+        self.backups = BackupManager(self.root)
         self.processes: dict[str, ProcessInfo] = {}
         self._window = None
         self._close_requested: list[str] | None = None
@@ -161,6 +164,22 @@ class PulseAPI:
             "ok": False,
             "error": "Persona deletion/archive is planned for a later safe-write phase.",
         }
+
+    # Backups
+
+    def create_backup(self, persona: str, reason: str = "manual") -> dict:
+        try:
+            backup = self.backups.create_backup(persona, reason=reason)
+            return {"ok": True, "backup": backup}
+        except (FileNotFoundError, ValueError, OSError) as e:
+            return {"ok": False, "error": str(e)}
+
+    def list_backups(self, persona: str) -> dict:
+        try:
+            backups = self.backups.list_backups(persona)
+            return {"ok": True, "backups": backups}
+        except (FileNotFoundError, ValueError, OSError) as e:
+            return {"ok": False, "error": str(e)}
 
     # Secrets/status/logs
 
