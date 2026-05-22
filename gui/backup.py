@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -77,6 +78,56 @@ class BackupManager:
             backups.append(metadata)
         return backups
 
+    def restore(self, persona: str, backup_path: str) -> dict[str, Any]:
+        """Restore a backup, creating a pre-restore backup first."""
+        persona_dir = self._persona_dir(persona)
+        backup_dir = self._backup_dir(persona, backup_path)
+        metadata = self._read_metadata(backup_dir)
+        files = [
+            name for name in metadata.get("files", [])
+            if isinstance(name, str) and name != "metadata.json"
+        ]
+        if not files:
+            return {
+                "ok": True,
+                "changed": False,
+                "restored_from": self._rel(backup_dir),
+                "safety_backup": None,
+                "files": [],
+            }
+
+        payloads = []
+        source_paths = metadata.get("source_paths", {}) or {}
+        for filename in files:
+            source = backup_dir / filename
+            if not source.is_file():
+                continue
+            dest = self._restore_destination(persona_dir, filename, source_paths.get(filename))
+            payloads.append((filename, dest, source.read_bytes()))
+
+        if not payloads:
+            return {
+                "ok": True,
+                "changed": False,
+                "restored_from": self._rel(backup_dir),
+                "safety_backup": None,
+                "files": [],
+            }
+
+        safety_backup = self.create_backup(persona, reason="pre-restore")
+        restored = []
+        for filename, dest, data in payloads:
+            self._atomic_write_bytes(dest, data)
+            restored.append(filename)
+
+        return {
+            "ok": True,
+            "changed": True,
+            "restored_from": self._rel(backup_dir),
+            "safety_backup": safety_backup,
+            "files": restored,
+        }
+
     def prune(self, persona: str) -> None:
         """Keep recent backups and remove expired backups for one persona."""
         persona_root = self.backup_root / persona
@@ -105,6 +156,47 @@ class BackupManager:
         if not persona_dir.is_dir():
             raise FileNotFoundError(f"Persona not found: {persona}")
         return persona_dir
+
+    def _backup_dir(self, persona: str, backup_path: str) -> Path:
+        if not backup_path:
+            raise FileNotFoundError("Backup path is required.")
+        raw = Path(backup_path)
+        candidate = raw if raw.is_absolute() else self.root / raw
+        backup_dir = candidate.resolve()
+        persona_root = (self.backup_root / persona).resolve()
+        try:
+            backup_dir.relative_to(persona_root)
+        except ValueError as exc:
+            raise ValueError("Backup path is outside this persona's backup folder.") from exc
+        if not backup_dir.is_dir():
+            raise FileNotFoundError(f"Backup not found: {backup_path}")
+        return backup_dir
+
+    def _restore_destination(self, persona_dir: Path, filename: str, source_path: str | None) -> Path:
+        if source_path:
+            dest = (self.root / source_path).resolve()
+        elif filename == "config.yaml":
+            dest = persona_dir / "config.yaml"
+        elif filename in IDENTITY_FILES:
+            dest = persona_dir / filename
+        else:
+            raise ValueError(f"Cannot restore unknown backup file: {filename}")
+
+        try:
+            dest.relative_to(persona_dir.resolve())
+        except ValueError as exc:
+            raise ValueError(f"Restore destination is outside persona folder: {filename}") from exc
+        if dest.parent.resolve() != persona_dir.resolve():
+            raise ValueError(f"Restore destination must be a top-level persona file: {filename}")
+        if dest.name != filename or dest.name not in ("config.yaml", *IDENTITY_FILES):
+            raise ValueError(f"Cannot restore unsupported file: {filename}")
+        return dest
+
+    def _atomic_write_bytes(self, path: Path, data: bytes) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f"{path.name}.tmp")
+        tmp.write_bytes(data)
+        os.replace(tmp, path)
 
     def _source_files(self, persona_dir: Path) -> list[Path]:
         files = []

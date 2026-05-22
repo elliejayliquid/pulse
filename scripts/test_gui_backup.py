@@ -65,7 +65,65 @@ def test_gui_backup_prunes_per_persona():
         assert [b["reason"] for b in backups] == ["three", "two"]
 
 
+def test_gui_backup_restore_creates_safety_backup_and_restores_files():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        persona_dir = root / "personas" / "demo"
+        persona_dir.mkdir(parents=True)
+        config = persona_dir / "config.yaml"
+        identity = persona_dir / "persona.yaml"
+        config.write_text("tts:\n  voice_description: old\n", encoding="utf-8")
+        identity.write_text("name: Demo\nmodel: Old\n", encoding="utf-8")
+
+        api = PulseAPI(root)
+        backup = api.create_backup("demo", reason="manual")["backup"]
+        config.write_text("tts:\n  voice_description: new\n", encoding="utf-8")
+        identity.write_text("name: Demo\nmodel: New\n", encoding="utf-8")
+
+        restored = api.restore_backup("demo", backup["path"])
+        assert restored["ok"] is True
+        assert restored["changed"] is True
+        assert restored["safety_backup"]["reason"] == "pre-restore"
+        assert config.read_text(encoding="utf-8") == "tts:\n  voice_description: old\n"
+        assert identity.read_text(encoding="utf-8") == "name: Demo\nmodel: Old\n"
+        assert len(api.list_backups("demo")["backups"]) == 2
+
+
+def test_gui_backup_restore_rejects_path_traversal():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        persona_dir = root / "personas" / "demo"
+        persona_dir.mkdir(parents=True)
+        (persona_dir / "config.yaml").write_text("tts: {}\n", encoding="utf-8")
+
+        api = PulseAPI(root)
+        result = api.restore_backup("demo", "../other/20260522_120000")
+        assert result["ok"] is False
+
+
+def test_gui_backup_restore_rejects_nested_destination_metadata():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        persona_dir = root / "personas" / "demo"
+        persona_dir.mkdir(parents=True)
+        (persona_dir / "config.yaml").write_text("tts: {}\n", encoding="utf-8")
+
+        api = PulseAPI(root)
+        backup = api.create_backup("demo", reason="manual")["backup"]
+        metadata_path = root / backup["path"] / "metadata.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["source_paths"]["config.yaml"] = "personas/demo/data/config.yaml"
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+        result = api.restore_backup("demo", backup["path"])
+        assert result["ok"] is False
+        assert "top-level persona file" in result["error"]
+
+
 if __name__ == "__main__":
     test_gui_backup_creates_config_only_backup()
     test_gui_backup_prunes_per_persona()
+    test_gui_backup_restore_creates_safety_backup_and_restores_files()
+    test_gui_backup_restore_rejects_path_traversal()
+    test_gui_backup_restore_rejects_nested_destination_metadata()
     print("[OK] GUI backup")

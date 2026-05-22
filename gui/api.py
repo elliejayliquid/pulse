@@ -191,6 +191,21 @@ class PulseAPI:
         except (FileNotFoundError, ValueError, OSError) as e:
             return {"ok": False, "error": str(e)}
 
+    def restore_backup(self, persona: str, backup_path: str) -> dict:
+        try:
+            return self.backups.restore(persona, backup_path)
+        except (FileNotFoundError, ValueError, OSError) as e:
+            return {"ok": False, "error": str(e)}
+
+    def restore_last_backup(self, persona: str) -> dict:
+        try:
+            backups = self.backups.list_backups(persona)
+            if not backups:
+                return {"ok": False, "error": "No backups available."}
+            return self.backups.restore(persona, backups[0]["path"])
+        except (FileNotFoundError, ValueError, OSError) as e:
+            return {"ok": False, "error": str(e)}
+
     # File pickers
 
     def pick_voice_sample(self, persona: str, current_path: str = "") -> dict:

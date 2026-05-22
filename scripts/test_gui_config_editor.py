@@ -7,6 +7,12 @@ from pathlib import Path
 sys.path.append(os.getcwd())
 
 from gui.api import PulseAPI
+from gui.config_editor import (
+    _assert_no_duplicate_keys,
+    _format_field,
+    _set_nested_field,
+    _set_top_level_field,
+)
 
 
 def test_config_editor_preview_and_save():
@@ -103,7 +109,105 @@ def test_config_editor_rejects_unknown_fields():
         assert "Unsupported field" in result["error"]
 
 
+def test_writer_sets_new_top_level_field():
+    assert _set_top_level_field("", "model", "Grok") == 'model: "Grok"\n'
+
+
+def test_writer_updates_existing_top_level_field():
+    text = 'name: Demo\nmodel: "Old"\nuser_name: Lena\n'
+    updated = _set_top_level_field(text, "model", "New")
+    assert updated == 'name: Demo\nmodel: "New"\nuser_name: Lena\n'
+
+
+def test_writer_sets_nested_field_parent_exists():
+    text = 'tts:\n  voice_description: "Old"\nmodel:\n  reasoning: true\n'
+    updated = _set_nested_field(text, "tts", "voice_description", "New")
+    assert 'tts:\n  voice_description: "New"\nmodel:' in updated
+
+
+def test_writer_sets_nested_field_parent_missing():
+    updated = _set_nested_field('provider:\n  type: "openrouter"\n', "tts", "voice_description", "Warm")
+    assert updated.endswith('\ntts:\n  voice_description: "Warm"\n')
+
+
+def test_writer_multiline_value():
+    updated = _set_top_level_field("name: Demo\n", "voice_notes", "Line one.\nLine two.")
+    assert "voice_notes: |\n  Line one.\n  Line two.\n" in updated
+
+
+def test_writer_preserves_folded_block_style():
+    text = "voice_notes: >\n  Old line.\nname: Demo\n"
+    updated = _set_top_level_field(text, "voice_notes", "New line.\nStill folded.")
+    assert updated.startswith("voice_notes: >\n  New line.\n  Still folded.\n")
+
+
+def test_writer_ignores_commented_out_keys():
+    text = 'provider:\n  #model: "old/commented"\n  model: "real"\n'
+    updated = _set_nested_field(text, "provider", "model", "new")
+    assert '  #model: "old/commented"' in updated
+    assert '  model: "new"' in updated
+    assert updated.count("model:") == 2
+
+
+def test_writer_preserves_four_space_indent():
+    text = 'tts:\n    voice_description: "Old"\n    voice_sample: ""\n'
+    updated = _set_nested_field(text, "tts", "voice_description", "New")
+    assert '    voice_description: "New"' in updated
+    assert '\n  voice_description' not in updated
+
+
+def test_writer_handles_comments_with_different_indent():
+    text = 'tts:\n    # design voice\n    voice_description: "Old"\n  # odd comment\nmodel:\n  reasoning: true\n'
+    updated = _set_nested_field(text, "tts", "voice_sample", "ref.ogg")
+    assert '    voice_sample: "ref.ogg"' in updated
+    assert "model:\n  reasoning: true" in updated
+
+
+def test_writer_rejects_duplicate_keys():
+    try:
+        _assert_no_duplicate_keys('tts:\n  voice_description: "a"\n  voice_description: "b"\n')
+    except ValueError as e:
+        assert "Duplicate key 'voice_description'" in str(e)
+    else:
+        raise AssertionError("Expected duplicate key rejection")
+
+
+def test_writer_empty_string_value():
+    assert _format_field("voice_sample", "", 2) == '  voice_sample: ""'
+
+
+def test_writer_special_chars_json_encoded():
+    updated = _set_top_level_field("", "model", 'A "quoted": value # not comment')
+    assert updated == 'model: "A \\"quoted\\": value # not comment"\n'
+
+
+def test_writer_trailing_newline_stable():
+    once = _set_top_level_field('model: "A"\n', "model", "B")
+    twice = _set_top_level_field(once, "model", "B")
+    assert once == twice
+
+
+def test_writer_same_value_round_trip_no_diff():
+    text = 'model: "Grok"\nvoice_notes: |\n  Hi\n'
+    updated = _set_top_level_field(text, "model", "Grok")
+    assert updated == text
+
+
 if __name__ == "__main__":
     test_config_editor_preview_and_save()
     test_config_editor_rejects_unknown_fields()
+    test_writer_sets_new_top_level_field()
+    test_writer_updates_existing_top_level_field()
+    test_writer_sets_nested_field_parent_exists()
+    test_writer_sets_nested_field_parent_missing()
+    test_writer_multiline_value()
+    test_writer_preserves_folded_block_style()
+    test_writer_ignores_commented_out_keys()
+    test_writer_preserves_four_space_indent()
+    test_writer_handles_comments_with_different_indent()
+    test_writer_rejects_duplicate_keys()
+    test_writer_empty_string_value()
+    test_writer_special_chars_json_encoded()
+    test_writer_trailing_newline_stable()
+    test_writer_same_value_round_trip_no_diff()
     print("[OK] GUI config editor")

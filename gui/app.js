@@ -4,6 +4,7 @@ const state = {
   prefs: {},
   pendingTransition: null,
   dirty: false,
+  canUndo: false,
   originalEditable: null,
 };
 
@@ -65,6 +66,7 @@ const fallbackApi = {
   async save_prefs() { return { ok: true }; },
   async preview_persona_save() { return { ok: false, error: "Run through pywebview to save." }; },
   async save_persona() { return { ok: false, error: "Run through pywebview to save." }; },
+  async restore_last_backup() { return { ok: false, error: "Run through pywebview to undo." }; },
   async pick_voice_sample() { return { ok: false, error: "Run through pywebview to pick files." }; },
   async get_log_tail() { return "Run through pywebview to read logs."; },
   async start_pulse() { return { ok: false, error: "Run through pywebview to start Pulse." }; },
@@ -98,6 +100,12 @@ function setDirty(value) {
   state.dirty = Boolean(value);
   const isBase = state.current?.name === "__base__";
   el("saveBtn").disabled = isBase || !state.dirty;
+}
+
+function setCanUndo(value) {
+  state.canUndo = Boolean(value);
+  const isBase = state.current?.name === "__base__";
+  el("undoBtn").disabled = isBase || !state.canUndo;
 }
 
 function text(value, fallback = "") {
@@ -422,6 +430,7 @@ function setEditableState(data) {
   el("ttsSampleClear").disabled = !editable;
   state.originalEditable = editableSnapshot();
   setDirty(false);
+  setCanUndo(false);
 }
 
 function collectEditableChanges() {
@@ -626,7 +635,26 @@ function wireEvents() {
     }
     await loadPersona(state.current.name);
     setDirty(false);
+    setCanUndo(Boolean(result.changed));
     setNotice(result.changed ? "Saved with backup." : "No changes to save.");
+  });
+  el("undoBtn").addEventListener("click", async () => {
+    if (!state.current || state.current.name === "__base__") return;
+    const ok = await showConfirm(
+      "Undo last save?",
+      "This will restore the newest backup for this persona. A safety backup will be created first.",
+      "Undo",
+      "secondary"
+    );
+    if (!ok) return;
+    const result = await api().restore_last_backup(state.current.name);
+    if (!result.ok) {
+      setNotice(result.error || "Undo failed.", "warning");
+      return;
+    }
+    await loadPersona(state.current.name);
+    setCanUndo(false);
+    setNotice(result.changed ? "Restored latest backup." : "Nothing to restore.");
   });
   el("pulseToggle").addEventListener("click", async () => {
     if (!state.current || state.current.name === "__base__") return;

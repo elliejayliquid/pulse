@@ -182,13 +182,18 @@ class ConfigEditor:
 def _set_top_level_field(text: str, key: str, value: str) -> str:
     lines = text.splitlines()
     start, end = _top_level_range(lines, key)
-    replacement = _format_field(key, value, 0)
+    block_indicator = _block_indicator(lines[start]) if start is not None else None
+    replacement = _format_field(key, value, 0, block_indicator=block_indicator)
     if start is None:
         prefix = text.rstrip("\n")
         sep = "\n" if prefix else ""
-        return f"{prefix}{sep}{replacement}\n"
+        updated = f"{prefix}{sep}{replacement}\n"
+        _assert_no_duplicate_keys(updated)
+        return updated
     new_lines = lines[:start] + replacement.splitlines() + lines[end:]
-    return "\n".join(new_lines) + "\n"
+    updated = "\n".join(new_lines) + "\n"
+    _assert_no_duplicate_keys(updated)
+    return updated
 
 
 def _set_nested_field(text: str, parent: str, key: str, value: str) -> str:
@@ -197,16 +202,22 @@ def _set_nested_field(text: str, parent: str, key: str, value: str) -> str:
     if parent_start is None:
         prefix = text.rstrip("\n")
         sep = "\n\n" if prefix else ""
-        return f"{prefix}{sep}{parent}:\n{_format_field(key, value, 2)}\n"
+        updated = f"{prefix}{sep}{parent}:\n{_format_field(key, value, 2)}\n"
+        _assert_no_duplicate_keys(updated)
+        return updated
 
-    field_start, field_end = _nested_range(lines, parent_start + 1, parent_end, key)
-    replacement = _format_field(key, value, 2)
+    indent = _child_indent(lines, parent_start + 1, parent_end)
+    field_start, field_end = _nested_range(lines, parent_start + 1, parent_end, key, indent)
+    block_indicator = _block_indicator(lines[field_start]) if field_start is not None else None
+    replacement = _format_field(key, value, indent, block_indicator=block_indicator)
     if field_start is None:
         insert_at = parent_end
         new_lines = lines[:insert_at] + replacement.splitlines() + lines[insert_at:]
     else:
         new_lines = lines[:field_start] + replacement.splitlines() + lines[field_end:]
-    return "\n".join(new_lines) + "\n"
+    updated = "\n".join(new_lines) + "\n"
+    _assert_no_duplicate_keys(updated)
+    return updated
 
 
 def _top_level_range(lines: list[str], key: str) -> tuple[int | None, int | None]:
@@ -221,9 +232,10 @@ def _top_level_range(lines: list[str], key: str) -> tuple[int | None, int | None
     return None, None
 
 
-def _nested_range(lines: list[str], start: int, end: int, key: str) -> tuple[int | None, int | None]:
-    pattern = re.compile(rf"^  {re.escape(key)}\s*:")
-    nested = re.compile(r"^  [A-Za-z_][\w-]*\s*:")
+def _nested_range(lines: list[str], start: int, end: int, key: str, indent: int) -> tuple[int | None, int | None]:
+    prefix = " " * indent
+    pattern = re.compile(rf"^{re.escape(prefix)}{re.escape(key)}\s*:")
+    nested = re.compile(rf"^{re.escape(prefix)}[A-Za-z_][\w-]*\s*:")
     for i in range(start, end):
         if pattern.match(lines[i]):
             field_end = i + 1
@@ -233,10 +245,65 @@ def _nested_range(lines: list[str], start: int, end: int, key: str) -> tuple[int
     return None, None
 
 
-def _format_field(key: str, value: str, indent: int) -> str:
+def _child_indent(lines: list[str], start: int, end: int) -> int:
+    for i in range(start, end):
+        line = lines[i]
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if line[:1].isspace():
+            return len(line) - len(line.lstrip(" "))
+    return 2
+
+
+def _block_indicator(line: str) -> str | None:
+    match = re.match(r"^\s*[A-Za-z_][\w-]*\s*:\s*([|>][+-]?)\s*(?:#.*)?$", line)
+    return match.group(1) if match else None
+
+
+def _assert_no_duplicate_keys(text: str) -> None:
+    seen: dict[tuple[str, ...], set[str]] = {}
+    stack: list[tuple[int, str]] = []
+    block_indent: int | None = None
+
+    for line in text.splitlines():
+        if block_indent is not None:
+            if not line.strip() or (line[:1].isspace() and _indent_of(line) > block_indent):
+                continue
+            block_indent = None
+
+        if line.lstrip().startswith("#"):
+            continue
+        match = re.match(r"^(\s*)([A-Za-z_][\w-]*)\s*:\s*(.*)$", line)
+        if not match:
+            continue
+
+        indent = len(match.group(1))
+        key = match.group(2)
+        rest = match.group(3).strip()
+        while stack and stack[-1][0] >= indent:
+            stack.pop()
+        parent_path = tuple(item[1] for item in stack)
+        bucket = seen.setdefault(parent_path, set())
+        if key in bucket:
+            raise ValueError(f"Duplicate key '{key}' detected - manual edit needed.")
+        bucket.add(key)
+        stack.append((indent, key))
+        if re.match(r"^[|>][+-]?(?:\s+#.*)?$", rest):
+            block_indent = indent
+
+
+def _indent_of(line: str) -> int:
+    return len(line) - len(line.lstrip(" "))
+
+
+def _format_field(key: str, value: str, indent: int, block_indicator: str | None = None) -> str:
     prefix = " " * indent
     if "\n" in value:
         lines = value.split("\n")
         body = "\n".join(f"{prefix}  {line}" if line else f"{prefix}" for line in lines)
-        return f"{prefix}{key}: |\n{body}"
+        return f"{prefix}{key}: {block_indicator or '|'}\n{body}"
+    # Known limitation: replacing an inline scalar also replaces any trailing
+    # inline comment on that same line. We avoid broad YAML round-trips so
+    # surrounding comments and formatting survive.
     return f"{prefix}{key}: {json.dumps(value, ensure_ascii=False)}"
