@@ -972,7 +972,12 @@ You decide when to lift the timeout — not the human."""
             "Don't just describe what you'd like to do in your thinking. Call the tools, "
             "get results, THEN produce your final response. \"silent\" means \"don't message "
             "Lena\" — it does NOT mean \"don't do anything.\"\n\n"
-            "When you're done (after any tool calls), respond in this JSON format:\n"
+            "When you're done (after any tool calls), respond with VALID JSON ONLY. "
+            "Do not use markdown labels like \"thinking:\" or \"action:\". "
+            "Do not wrap the JSON in prose or code fences. If you want to stay silent "
+            "after using tools, return exactly this shape with action set to \"silent\" "
+            "and message left empty.\n\n"
+            "Required JSON format:\n"
             "{\n"
             '  "thinking": "your internal reasoning (not shown to anyone)",\n'
             '  "action": "notify | schedule | silent",\n'

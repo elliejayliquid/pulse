@@ -127,6 +127,48 @@ class PulseResponse:
     schedule_when: str = ""
     raw: str = ""
 
+    @staticmethod
+    def _parse_labeled_response(text: str) -> Optional[dict]:
+        """Parse loose label-style heartbeat replies.
+
+        Some models occasionally answer with markdown-ish labels instead of the
+        required JSON, e.g.:
+
+            **thinking:** ...
+            **action:** silent
+
+        Treat that as structured output rather than leaking it as a notification.
+        """
+        if not text:
+            return None
+
+        label_re = re.compile(
+            r'(?im)^\s*(?:\*\*)?\s*(thinking|action|message|schedule)\s*:\s*(?:\*\*)?\s*'
+        )
+        matches = list(label_re.finditer(text))
+        if not matches:
+            return None
+
+        fields: dict[str, str] = {}
+        for i, match in enumerate(matches):
+            key = match.group(1).lower()
+            value_start = match.end()
+            value_end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+            value = text[value_start:value_end].strip()
+            if value:
+                fields[key] = value
+
+        action = fields.get("action", "").strip().lower()
+        action = re.split(r'\s+', action, maxsplit=1)[0].strip('.,')
+        if action not in ("notify", "schedule", "silent"):
+            return None
+
+        return {
+            "thinking": fields.get("thinking", ""),
+            "action": action,
+            "message": fields.get("message", ""),
+        }
+
     @classmethod
     def from_llm_output(cls, text: str) -> "PulseResponse":
         """Parse structured JSON response from the LLM."""
@@ -172,6 +214,9 @@ class PulseResponse:
                         data = json.loads(cleaned[json_start:json_end])
 
             if data is None:
+                data = cls._parse_labeled_response(cleaned)
+
+            if data is None:
                 # No JSON found — treat entire response as a message
                 logger.warning("No JSON found in response, treating as notification")
                 resp.action = "notify"
@@ -189,9 +234,15 @@ class PulseResponse:
 
         except json.JSONDecodeError as e:
             logger.warning(f"Failed to parse JSON response: {e}")
-            # If JSON fails, treat it as a notification with the raw text
-            resp.action = "notify"
-            resp.message = cleaned.strip()
+            data = cls._parse_labeled_response(cleaned)
+            if data:
+                resp.thinking = data.get("thinking", "")
+                resp.action = data.get("action", "silent")
+                resp.message = data.get("message", "")
+            else:
+                # If JSON fails, treat it as a notification with the raw text
+                resp.action = "notify"
+                resp.message = cleaned.strip()
 
         return resp
 

@@ -916,9 +916,17 @@ class PulseEngine:
 
             if text:
                 response = PulseResponse.from_llm_output(text)
+                if self._heartbeat_debug:
+                    await self._send_heartbeat_debug(
+                        response, tools_used, int(elapsed)
+                    )
                 tg_msg_id = await self._dispatch(response)
                 self._log_action(response.action, tools_used, response.message)
             else:
+                if self._heartbeat_debug:
+                    await self._send_heartbeat_debug(
+                        None, tools_used, int(elapsed)
+                    )
                 self._log_action("silent", tools_used)
 
             # Flush pending skill output — send voices, clear web search leftovers
@@ -936,17 +944,19 @@ class PulseEngine:
             logger.info(f"Heartbeat tick completed in {elapsed:.1f}s")
             if result:
                 response = result
+                if self._heartbeat_debug:
+                    await self._send_heartbeat_debug(
+                        response, tools_used, int(elapsed)
+                    )
                 tg_msg_id = await self._dispatch(response)
                 self._log_action(response.action, summary=response.message)
                 db_ids = self._save_heartbeat_to_history(None, response)
                 if tg_msg_id and db_ids:
                     self.db.update_message_channel_id(db_ids[-1], tg_msg_id)
-
-        # Debug: send heartbeat inner monologue to Telegram
-        if self._heartbeat_debug:
-            await self._send_heartbeat_debug(
-                response, tools_used, int(elapsed)
-            )
+            elif self._heartbeat_debug:
+                await self._send_heartbeat_debug(
+                    None, tools_used, int(elapsed)
+                )
 
     async def _do_dev_tick(self):
         """Execute a dev tick — autonomous self-improvement session.
