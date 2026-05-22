@@ -884,6 +884,25 @@ textarea {
   font-weight: 600;
 }
 
+.diff-block {
+  margin-top: 10px;
+  font-size: 11px;
+  line-height: 1.45;
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+  color: var(--text-secondary);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+
+.diff-file { color: var(--text-tertiary); font-weight: 600; }
+.diff-hunk { color: var(--accent); opacity: 0.7; }
+.diff-add  { color: #22c55e; background: rgba(34, 197, 94, 0.08); display: inline-block; width: 100%; }
+.diff-del  { color: #ef4444; background: rgba(239, 68, 68, 0.08); display: inline-block; width: 100%; }
+
 .modal-actions {
   display: flex;
   gap: 8px;

@@ -532,6 +532,21 @@ function escapeHtml(value) {
   }[ch]));
 }
 
+function formatDiff(raw) {
+  return raw.split("\n").map((line) => {
+    const esc = escapeHtml(line);
+    if (line.startsWith("+++") || line.startsWith("---"))
+      return `<span class="diff-file">${esc}</span>`;
+    if (line.startsWith("@@"))
+      return `<span class="diff-hunk">${esc}</span>`;
+    if (line.startsWith("+"))
+      return `<span class="diff-add">${esc}</span>`;
+    if (line.startsWith("-"))
+      return `<span class="diff-del">${esc}</span>`;
+    return esc;
+  }).join("\n");
+}
+
 function wireEvents() {
   el("personaPicker").addEventListener("click", () => {
     const menu = el("personaMenu");
@@ -601,7 +616,7 @@ function wireEvents() {
     const diff = preview.preview.diff || "";
     const shownDiff = diff.length > 1200 ? diff.slice(0, 1200) + "\n..." : diff;
     const body = `Saving to <strong>${escapeHtml(changed)}</strong>. A backup will be created first.`
-      + (shownDiff ? `<pre style="margin-top:10px;font-size:11px;max-height:200px;overflow:auto;white-space:pre-wrap;color:var(--text-secondary)">${escapeHtml(shownDiff)}</pre>` : "");
+      + (shownDiff ? `<pre class="diff-block">${formatDiff(shownDiff)}</pre>` : "");
     const ok = await showConfirm("Save changes?", body, "Save", "secondary");
     if (!ok) return;
     const result = await api().save_persona(state.current.name, changes);
