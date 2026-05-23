@@ -109,37 +109,29 @@
 
       <section class="section">
         <button class="section-header" type="button">
-          <span><em>04</em> Runtime</span>
+          <span><em>04</em> Heartbeat</span>
           <b class="section-chevron" aria-hidden="true"></b>
         </button>
         <div class="section-body">
-          <div id="runtimeGrid" class="runtime-grid"></div>
-        </div>
-      </section>
-
-      <section class="section open">
-        <button class="section-header" type="button">
-          <span><em>05</em> Skills</span>
-          <b class="section-chevron" aria-hidden="true"></b>
-        </button>
-        <div class="section-body">
-          <div id="skillsGrid" class="skills-grid"></div>
-        </div>
-      </section>
-
-      <section class="section">
-        <button class="section-header" type="button">
-          <span><em>06</em> Channels</span>
-          <b class="section-chevron" aria-hidden="true"></b>
-        </button>
-        <div class="section-body">
-          <div id="channels" class="channels"></div>
+          <div class="field-grid three">
+            <label title="Base interval between heartbeats in minutes">Interval (min)<input id="hbInterval" type="number" min="1" max="1440"></label>
+            <label title="Shortest possible heartbeat interval when randomized">Min (min)<input id="hbMin" type="number" min="1" max="1440"></label>
+            <label title="Longest possible heartbeat interval when randomized">Max (min)<input id="hbMax" type="number" min="1" max="1440"></label>
+          </div>
+          <div class="field-grid three">
+            <label title="Hour (0–23) when the persona stops sending notifications">Quiet Start (hour)<input id="hbQuietStart" type="number" min="0" max="23"></label>
+            <label title="Hour (0–23) when the persona resumes notifications">Quiet End (hour)<input id="hbQuietEnd" type="number" min="0" max="23"></label>
+            <label class="check-label-inline" title="Vary the interval between min and max instead of using a fixed interval">
+              <input id="hbRandomize" type="checkbox">
+              Randomize interval
+            </label>
+          </div>
         </div>
       </section>
 
       <section class="section">
         <button class="section-header" type="button">
-          <span><em>07</em> TTS Voice</span>
+          <span><em>05</em> TTS Voice</span>
           <b class="section-chevron" aria-hidden="true"></b>
         </button>
         <div class="section-body">
@@ -166,9 +158,39 @@
         </div>
       </section>
 
+      <section class="section open">
+        <button class="section-header" type="button">
+          <span><em>06</em> Skills</span>
+          <b class="section-chevron" aria-hidden="true"></b>
+        </button>
+        <div class="section-body">
+          <div id="skillsGrid" class="skills-grid"></div>
+        </div>
+      </section>
+
       <section class="section">
         <button class="section-header" type="button">
-          <span><em>08</em> Logs</span>
+          <span><em>07</em> Channels</span>
+          <b class="section-chevron" aria-hidden="true"></b>
+        </button>
+        <div class="section-body">
+          <div id="channels" class="channels"></div>
+        </div>
+      </section>
+
+      <section class="section">
+        <button class="section-header" type="button">
+          <span><em>08</em> Runtime</span>
+          <b class="section-chevron" aria-hidden="true"></b>
+        </button>
+        <div class="section-body">
+          <div id="runtimeGrid" class="runtime-grid"></div>
+        </div>
+      </section>
+
+      <section class="section">
+        <button class="section-header" type="button">
+          <span><em>09</em> Logs</span>
           <b class="section-chevron" aria-hidden="true"></b>
         </button>
         <div class="section-body">

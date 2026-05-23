@@ -504,6 +504,36 @@ input:hover, textarea:hover {
   border-color: rgba(249, 115, 22, 0.32);
 }
 
+input[type="number"] {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.check-label-inline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 100%;
+  cursor: pointer;
+  color: var(--text-secondary);
+  font: 12px/1 var(--body);
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.check-label-inline input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
 textarea {
   min-height: 78px;
   font: 12px/1.55 var(--mono);

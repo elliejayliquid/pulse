@@ -23,6 +23,23 @@ TTS_FIELDS = {
     "voice_sample_text": "TTS Voice Sample Text",
 }
 
+HEARTBEAT_FIELDS = {
+    "interval_minutes": "Heartbeat Interval",
+    "randomize": "Randomize Heartbeat",
+    "interval_min_minutes": "Heartbeat Min Interval",
+    "interval_max_minutes": "Heartbeat Max Interval",
+    "quiet_hours_start": "Quiet Hours Start",
+    "quiet_hours_end": "Quiet Hours End",
+}
+
+HEARTBEAT_LIMITS = {
+    "interval_minutes": (1, 1440),
+    "interval_min_minutes": (1, 1440),
+    "interval_max_minutes": (1, 1440),
+    "quiet_hours_start": (0, 23),
+    "quiet_hours_end": (0, 23),
+}
+
 
 class ConfigEditor:
     """Preview and apply allowlisted persona edits."""
@@ -94,16 +111,22 @@ class ConfigEditor:
             raise FileNotFoundError(f"Persona not found: {persona}")
         return persona_dir
 
-    def _normalize_changes(self, changes: dict[str, Any]) -> dict[str, dict[str, str]]:
+    def _normalize_changes(self, changes: dict[str, Any]) -> dict[str, dict[str, Any]]:
         if not isinstance(changes, dict):
             raise ValueError("Changes must be an object.")
 
         identity = changes.get("identity", {}) or {}
         tts = changes.get("tts", {}) or {}
+        heartbeat = changes.get("heartbeat", {}) or {}
         unknown_identity = sorted(set(identity) - set(IDENTITY_FIELDS))
         unknown_tts = sorted(set(tts) - set(TTS_FIELDS))
-        if unknown_identity or unknown_tts:
-            unknown = unknown_identity + [f"tts.{name}" for name in unknown_tts]
+        unknown_heartbeat = sorted(set(heartbeat) - set(HEARTBEAT_FIELDS))
+        if unknown_identity or unknown_tts or unknown_heartbeat:
+            unknown = (
+                unknown_identity
+                + [f"tts.{name}" for name in unknown_tts]
+                + [f"heartbeat.{name}" for name in unknown_heartbeat]
+            )
             raise ValueError(f"Unsupported field(s): {', '.join(unknown)}")
 
         return {
@@ -114,6 +137,10 @@ class ConfigEditor:
             "tts": {
                 key: self._clean_text(value, TTS_FIELDS[key])
                 for key, value in tts.items()
+            },
+            "heartbeat": {
+                key: self._clean_heartbeat_value(key, value)
+                for key, value in heartbeat.items()
             },
         }
 
@@ -128,7 +155,20 @@ class ConfigEditor:
             raise ValueError(f"{label} is too long.")
         return value.replace("\r\n", "\n").replace("\r", "\n")
 
-    def _render_files(self, persona_dir: Path, changes: dict[str, dict[str, str]]) -> list[dict]:
+    def _clean_heartbeat_value(self, key: str, value: Any) -> int | bool:
+        label = HEARTBEAT_FIELDS[key]
+        if key == "randomize":
+            if type(value) is not bool:
+                raise ValueError(f"{label} must be true or false.")
+            return value
+        if type(value) is not int:
+            raise ValueError(f"{label} must be a whole number.")
+        low, high = HEARTBEAT_LIMITS[key]
+        if not low <= value <= high:
+            raise ValueError(f"{label} must be between {low} and {high}.")
+        return value
+
+    def _render_files(self, persona_dir: Path, changes: dict[str, dict[str, Any]]) -> list[dict]:
         rendered = []
         if changes["identity"]:
             identity_path = self._identity_path(persona_dir)
@@ -138,12 +178,14 @@ class ConfigEditor:
                 updated = _set_top_level_field(updated, key, value)
             rendered.append({"path": identity_path, "original": original, "updated": updated})
 
-        if changes["tts"]:
+        if changes["tts"] or changes["heartbeat"]:
             config_path = persona_dir / "config.yaml"
             original = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
             updated = original
             for key, value in changes["tts"].items():
                 updated = _set_nested_field(updated, "tts", key, value)
+            for key, value in changes["heartbeat"].items():
+                updated = _set_nested_field(updated, "heartbeat", key, value)
             rendered.append({"path": config_path, "original": original, "updated": updated})
         return rendered
 
@@ -179,7 +221,7 @@ class ConfigEditor:
         os.replace(tmp, path)
 
 
-def _set_top_level_field(text: str, key: str, value: str) -> str:
+def _set_top_level_field(text: str, key: str, value: Any) -> str:
     lines = text.splitlines()
     start, end = _top_level_range(lines, key)
     block_indicator = _block_indicator(lines[start]) if start is not None else None
@@ -196,7 +238,7 @@ def _set_top_level_field(text: str, key: str, value: str) -> str:
     return updated
 
 
-def _set_nested_field(text: str, parent: str, key: str, value: str) -> str:
+def _set_nested_field(text: str, parent: str, key: str, value: Any) -> str:
     lines = text.splitlines()
     parent_start, parent_end = _top_level_range(lines, parent)
     if parent_start is None:
@@ -297,8 +339,12 @@ def _indent_of(line: str) -> int:
     return len(line) - len(line.lstrip(" "))
 
 
-def _format_field(key: str, value: str, indent: int, block_indicator: str | None = None) -> str:
+def _format_field(key: str, value: Any, indent: int, block_indicator: str | None = None) -> str:
     prefix = " " * indent
+    if type(value) is bool:
+        return f"{prefix}{key}: {'true' if value else 'false'}"
+    if type(value) is int:
+        return f"{prefix}{key}: {value}"
     if "\n" in value:
         lines = value.split("\n")
         body = "\n".join(f"{prefix}  {line}" if line else f"{prefix}" for line in lines)

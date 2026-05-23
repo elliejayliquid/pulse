@@ -43,6 +43,14 @@ const fallbackApi = {
         reasoning_effort: "high",
         show_reasoning: false,
         max_tool_rounds: 8,
+        heartbeat: {
+          interval_minutes: 30,
+          randomize: true,
+          interval_min_minutes: 30,
+          interval_max_minutes: 60,
+          quiet_hours_start: 23,
+          quiet_hours_end: 8,
+        },
         tts: {},
       },
       skills: [],
@@ -394,6 +402,16 @@ function renderProvider(data) {
   syncTtsMode();
 }
 
+function renderHeartbeat(summary) {
+  const hb = summary?.heartbeat || {};
+  el("hbInterval").value = text(hb.interval_minutes);
+  el("hbMin").value = text(hb.interval_min_minutes);
+  el("hbMax").value = text(hb.interval_max_minutes);
+  el("hbQuietStart").value = text(hb.quiet_hours_start);
+  el("hbQuietEnd").value = text(hb.quiet_hours_end);
+  el("hbRandomize").checked = Boolean(hb.randomize);
+}
+
 function syncTtsMode() {
   const hasSample = Boolean(el("ttsSample").value);
   const badge = el("ttsModeBadge");
@@ -417,15 +435,34 @@ function editableSnapshot() {
       voice_sample: el("ttsSample").value,
       voice_sample_text: el("ttsSampleText").value,
     },
+    heartbeat: {
+      interval_minutes: el("hbInterval").value,
+      interval_min_minutes: el("hbMin").value,
+      interval_max_minutes: el("hbMax").value,
+      quiet_hours_start: el("hbQuietStart").value,
+      quiet_hours_end: el("hbQuietEnd").value,
+      randomize: el("hbRandomize").checked,
+    },
   };
 }
 
 function setEditableState(data) {
   const editable = data?.name && data.name !== "__base__";
-  ["identityModel", "voiceNotes", "ttsVoice", "ttsSampleText"].forEach((id) => {
+  [
+    "identityModel",
+    "voiceNotes",
+    "ttsVoice",
+    "ttsSampleText",
+    "hbInterval",
+    "hbMin",
+    "hbMax",
+    "hbQuietStart",
+    "hbQuietEnd",
+  ].forEach((id) => {
     el(id).readOnly = !editable;
   });
   el("ttsSample").readOnly = true;
+  el("hbRandomize").disabled = !editable;
   el("ttsSamplePicker").disabled = !editable;
   el("ttsSampleClear").disabled = !editable;
   state.originalEditable = editableSnapshot();
@@ -433,10 +470,14 @@ function setEditableState(data) {
   setCanUndo(false);
 }
 
+function parseHeartbeatNumber(value) {
+  return value === "" ? "" : Number(value);
+}
+
 function collectEditableChanges() {
   const current = editableSnapshot();
-  const original = state.originalEditable || { identity: {}, tts: {} };
-  const changes = { identity: {}, tts: {} };
+  const original = state.originalEditable || { identity: {}, tts: {}, heartbeat: {} };
+  const changes = { identity: {}, tts: {}, heartbeat: {} };
 
   for (const [key, value] of Object.entries(current.identity)) {
     if (value !== original.identity?.[key]) {
@@ -450,12 +491,50 @@ function collectEditableChanges() {
     }
   }
 
+  for (const [key, value] of Object.entries(current.heartbeat)) {
+    if (value !== original.heartbeat?.[key]) {
+      changes.heartbeat[key] = key === "randomize" ? value : parseHeartbeatNumber(value);
+    }
+  }
+
   return changes;
 }
 
 function hasEditableChanges() {
   const changes = collectEditableChanges();
-  return Object.keys(changes.identity).length > 0 || Object.keys(changes.tts).length > 0;
+  return Object.keys(changes.identity).length > 0
+    || Object.keys(changes.tts).length > 0
+    || Object.keys(changes.heartbeat).length > 0;
+}
+
+function validateHeartbeatFields() {
+  const numeric = [
+    ["hbInterval", "Heartbeat interval", 1, 1440],
+    ["hbMin", "Heartbeat min interval", 1, 1440],
+    ["hbMax", "Heartbeat max interval", 1, 1440],
+    ["hbQuietStart", "Quiet start", 0, 23],
+    ["hbQuietEnd", "Quiet end", 0, 23],
+  ];
+  for (const [id, label, min, max] of numeric) {
+    const raw = el(id).value;
+    if (raw === "") {
+      return `${label} must be set.`;
+    }
+    const value = Number(raw);
+    if (!Number.isInteger(value) || value < min || value > max) {
+      return `${label} must be a whole number between ${min} and ${max}.`;
+    }
+  }
+  const hbMin = el("hbMin").value === "" ? null : Number(el("hbMin").value);
+  const hbMax = el("hbMax").value === "" ? null : Number(el("hbMax").value);
+  if (hbMin !== null && hbMax !== null && hbMin > hbMax) {
+    return "Heartbeat min interval cannot be greater than max interval.";
+  }
+  return "";
+}
+
+function currentPersonaIsRunning() {
+  return Boolean(state.current?.status?.running) && !state.current?.status?.stale;
 }
 
 async function loadPersona(name) {
@@ -466,6 +545,7 @@ async function loadPersona(name) {
   renderStatus(data.status || {});
   renderIdentity(data);
   renderProvider(data);
+  renderHeartbeat(data.summary || {});
   renderSecrets(data.key_status || {});
   renderTuning(data.summary || {});
   renderRuntime(data.status || {}, data.summary || {});
@@ -577,9 +657,20 @@ function wireEvents() {
   document.querySelectorAll(".section-header").forEach((header) => {
     header.addEventListener("click", () => header.parentElement.classList.toggle("open"));
   });
-  ["identityModel", "voiceNotes", "ttsVoice", "ttsSampleText"].forEach((id) => {
+  [
+    "identityModel",
+    "voiceNotes",
+    "ttsVoice",
+    "ttsSampleText",
+    "hbInterval",
+    "hbMin",
+    "hbMax",
+    "hbQuietStart",
+    "hbQuietEnd",
+  ].forEach((id) => {
     el(id).addEventListener("input", () => setDirty(hasEditableChanges()));
   });
+  el("hbRandomize").addEventListener("change", () => setDirty(hasEditableChanges()));
   el("ttsSamplePicker").addEventListener("click", async () => {
     if (!state.current || state.current.name === "__base__") return;
     const result = await api().pick_voice_sample(state.current.name, el("ttsSample").value || "");
@@ -610,6 +701,11 @@ function wireEvents() {
       setNotice("Voice sample is set but transcript is empty — clone mode needs both.", "warning");
       return;
     }
+    const heartbeatError = validateHeartbeatFields();
+    if (heartbeatError) {
+      setNotice(heartbeatError, "warning");
+      return;
+    }
     const changes = collectEditableChanges();
     const preview = await api().preview_persona_save(state.current.name, changes);
     if (!preview.ok) {
@@ -628,6 +724,7 @@ function wireEvents() {
       + (shownDiff ? `<pre class="diff-block">${formatDiff(shownDiff)}</pre>` : "");
     const ok = await showConfirm("Save changes?", body, "Save", "secondary");
     if (!ok) return;
+    const wasRunning = currentPersonaIsRunning();
     const result = await api().save_persona(state.current.name, changes);
     if (!result.ok) {
       setNotice(result.error || "Save failed.", "warning");
@@ -636,7 +733,11 @@ function wireEvents() {
     await loadPersona(state.current.name);
     setDirty(false);
     setCanUndo(Boolean(result.changed));
-    setNotice(result.changed ? "Saved with backup." : "No changes to save.");
+    if (result.changed && wasRunning) {
+      setNotice("Saved. Restart the persona for changes to take effect.", "warning");
+    } else {
+      setNotice(result.changed ? "Saved with backup." : "No changes to save.");
+    }
   });
   el("undoBtn").addEventListener("click", async () => {
     if (!state.current || state.current.name === "__base__") return;
@@ -647,6 +748,7 @@ function wireEvents() {
       "secondary"
     );
     if (!ok) return;
+    const wasRunning = currentPersonaIsRunning();
     const result = await api().restore_last_backup(state.current.name);
     if (!result.ok) {
       setNotice(result.error || "Undo failed.", "warning");
@@ -654,7 +756,11 @@ function wireEvents() {
     }
     await loadPersona(state.current.name);
     setCanUndo(false);
-    setNotice(result.changed ? "Restored latest backup." : "Nothing to restore.");
+    if (result.changed && wasRunning) {
+      setNotice("Restored. Restart the persona for changes to take effect.", "warning");
+    } else {
+      setNotice(result.changed ? "Restored latest backup." : "Nothing to restore.");
+    }
   });
   el("pulseToggle").addEventListener("click", async () => {
     if (!state.current || state.current.name === "__base__") return;

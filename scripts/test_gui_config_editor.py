@@ -43,6 +43,14 @@ tts:
   voice_description: "Old voice"
   voice_sample: ""
   voice_sample_text: ""
+
+heartbeat:
+  interval_minutes: 30
+  randomize: true
+  interval_min_minutes: 30
+  interval_max_minutes: 60
+  quiet_hours_start: 23
+  quiet_hours_end: 8
 """,
             encoding="utf-8",
         )
@@ -59,6 +67,14 @@ tts:
                 "voice_description": "New voice",
                 "voice_sample": "personas/demo/data/tts/ref.ogg",
                 "voice_sample_text": "Reference text",
+            },
+            "heartbeat": {
+                "interval_minutes": 45,
+                "randomize": False,
+                "interval_min_minutes": 20,
+                "interval_max_minutes": 50,
+                "quiet_hours_start": 22,
+                "quiet_hours_end": 7,
             },
         }
         preview = api.preview_persona_save("demo", changes)
@@ -84,6 +100,13 @@ tts:
         assert 'voice_description: "New voice"' in config_text
         assert 'voice_sample: "personas/demo/data/tts/ref.ogg"' in config_text
         assert 'voice_sample_text: "Reference text"' in config_text
+        assert "interval_minutes: 45" in config_text
+        assert "randomize: false" in config_text
+        assert "interval_min_minutes: 20" in config_text
+        assert "interval_max_minutes: 50" in config_text
+        assert "quiet_hours_start: 22" in config_text
+        assert "quiet_hours_end: 7" in config_text
+        assert 'interval_minutes: "45"' not in config_text
 
         backup_path = root / result["backup"]["path"]
         assert (backup_path / "config.yaml").exists()
@@ -107,6 +130,18 @@ def test_config_editor_rejects_unknown_fields():
         })
         assert result["ok"] is False
         assert "Unsupported field" in result["error"]
+
+        result = api.preview_persona_save("demo", {
+            "heartbeat": {"quiet_hours_start": 24},
+        })
+        assert result["ok"] is False
+        assert "between 0 and 23" in result["error"]
+
+        result = api.preview_persona_save("demo", {
+            "heartbeat": {"randomize": "true"},
+        })
+        assert result["ok"] is False
+        assert "true or false" in result["error"]
 
 
 def test_writer_sets_new_top_level_field():
@@ -176,6 +211,12 @@ def test_writer_empty_string_value():
     assert _format_field("voice_sample", "", 2) == '  voice_sample: ""'
 
 
+def test_writer_formats_numbers_and_booleans():
+    assert _format_field("interval_minutes", 30, 2) == "  interval_minutes: 30"
+    assert _format_field("randomize", True, 2) == "  randomize: true"
+    assert _format_field("randomize", False, 2) == "  randomize: false"
+
+
 def test_writer_special_chars_json_encoded():
     updated = _set_top_level_field("", "model", 'A "quoted": value # not comment')
     assert updated == 'model: "A \\"quoted\\": value # not comment"\n'
@@ -207,6 +248,7 @@ if __name__ == "__main__":
     test_writer_handles_comments_with_different_indent()
     test_writer_rejects_duplicate_keys()
     test_writer_empty_string_value()
+    test_writer_formats_numbers_and_booleans()
     test_writer_special_chars_json_encoded()
     test_writer_trailing_newline_stable()
     test_writer_same_value_round_trip_no_diff()
