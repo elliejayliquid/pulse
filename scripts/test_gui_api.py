@@ -27,6 +27,8 @@ skills:
 channels:
   telegram:
     enabled: false
+  toast:
+    app_name: Demo
 """,
             encoding="utf-8",
         )
@@ -73,6 +75,9 @@ voice_notes: Warm.
         assert demo["summary"]["provider_model"] == "demo/model"
         assert demo["key_status"]["api_key_set"] is True
         assert demo["key_status"]["telegram_set"] is False
+        channels = {channel["name"]: channel["enabled"] for channel in demo["channels"]}
+        assert channels["telegram"] is False
+        assert channels["toast"] is True
 
         preview_result = api.preview_persona_save("demo", {
             "identity": {"model": "Demo Model 2"},

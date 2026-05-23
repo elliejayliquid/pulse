@@ -10,6 +10,7 @@ from gui.api import PulseAPI
 from gui.config_editor import (
     _assert_no_duplicate_keys,
     _format_field,
+    _set_deep_nested_field,
     _set_nested_field,
     _set_top_level_field,
 )
@@ -51,6 +52,15 @@ heartbeat:
   interval_max_minutes: 60
   quiet_hours_start: 23
   quiet_hours_end: 8
+
+channels:
+  lor:
+    enabled: true
+    author_name: "Demo"
+  toast:
+    app_name: "Demo"
+  telegram:
+    enabled: true
 """,
             encoding="utf-8",
         )
@@ -75,6 +85,10 @@ heartbeat:
                 "interval_max_minutes": 50,
                 "quiet_hours_start": 22,
                 "quiet_hours_end": 7,
+            },
+            "channels": {
+                "telegram": False,
+                "toast": False,
             },
         }
         preview = api.preview_persona_save("demo", changes)
@@ -107,6 +121,9 @@ heartbeat:
         assert "quiet_hours_start: 22" in config_text
         assert "quiet_hours_end: 7" in config_text
         assert 'interval_minutes: "45"' not in config_text
+        assert "telegram:\n    enabled: false" in config_text
+        assert "toast:\n    app_name: \"Demo\"\n    enabled: false" in config_text
+        assert 'enabled: "false"' not in config_text
 
         backup_path = root / result["backup"]["path"]
         assert (backup_path / "config.yaml").exists()
@@ -143,6 +160,18 @@ def test_config_editor_rejects_unknown_fields():
         assert result["ok"] is False
         assert "true or false" in result["error"]
 
+        result = api.preview_persona_save("demo", {
+            "channels": {"email": True},
+        })
+        assert result["ok"] is False
+        assert "Unsupported field" in result["error"]
+
+        result = api.preview_persona_save("demo", {
+            "channels": {"telegram": "false"},
+        })
+        assert result["ok"] is False
+        assert "true or false" in result["error"]
+
 
 def test_writer_sets_new_top_level_field():
     assert _set_top_level_field("", "model", "Grok") == 'model: "Grok"\n'
@@ -163,6 +192,32 @@ def test_writer_sets_nested_field_parent_exists():
 def test_writer_sets_nested_field_parent_missing():
     updated = _set_nested_field('provider:\n  type: "openrouter"\n', "tts", "voice_description", "Warm")
     assert updated.endswith('\ntts:\n  voice_description: "Warm"\n')
+
+
+def test_writer_sets_deep_nested_field_parent_exists():
+    text = 'channels:\n  telegram:\n    enabled: true\n  lor:\n    enabled: true\n'
+    updated = _set_deep_nested_field(text, ["channels", "telegram", "enabled"], False)
+    assert "telegram:\n    enabled: false" in updated
+    assert "lor:\n    enabled: true" in updated
+
+
+def test_writer_sets_deep_nested_field_subblock_missing():
+    text = 'channels:\n  toast:\n    app_name: "Demo"\n'
+    updated = _set_deep_nested_field(text, ["channels", "toast", "enabled"], False)
+    assert 'toast:\n    app_name: "Demo"\n    enabled: false' in updated
+
+
+def test_writer_sets_deep_nested_field_all_blocks_missing():
+    updated = _set_deep_nested_field('provider:\n  type: "openrouter"\n', ["channels", "telegram", "enabled"], True)
+    assert updated.endswith('\nchannels:\n  telegram:\n    enabled: true\n')
+
+
+def test_writer_deep_nested_field_preserves_siblings():
+    text = 'channels:\n  lor:\n    author_name: "Nova"\n    model_name: "sonnet"\n'
+    updated = _set_deep_nested_field(text, ["channels", "lor", "enabled"], True)
+    assert 'author_name: "Nova"' in updated
+    assert 'model_name: "sonnet"' in updated
+    assert "enabled: true" in updated
 
 
 def test_writer_multiline_value():
@@ -241,6 +296,10 @@ if __name__ == "__main__":
     test_writer_updates_existing_top_level_field()
     test_writer_sets_nested_field_parent_exists()
     test_writer_sets_nested_field_parent_missing()
+    test_writer_sets_deep_nested_field_parent_exists()
+    test_writer_sets_deep_nested_field_subblock_missing()
+    test_writer_sets_deep_nested_field_all_blocks_missing()
+    test_writer_deep_nested_field_preserves_siblings()
     test_writer_multiline_value()
     test_writer_preserves_folded_block_style()
     test_writer_ignores_commented_out_keys()

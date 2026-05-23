@@ -551,7 +551,7 @@ class PulseAPI:
             {
                 "name": name,
                 "label": name.replace("_", " ").title(),
-                "enabled": bool(value.get("enabled", False)) if isinstance(value, dict) else bool(value),
+                "enabled": bool(value.get("enabled", True)) if isinstance(value, dict) else bool(value),
             }
             for name, value in sorted(channels.items())
         ]

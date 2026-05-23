@@ -40,6 +40,8 @@ HEARTBEAT_LIMITS = {
     "quiet_hours_end": (0, 23),
 }
 
+CHANNEL_NAMES = {"telegram", "toast", "lor"}
+
 
 class ConfigEditor:
     """Preview and apply allowlisted persona edits."""
@@ -118,14 +120,19 @@ class ConfigEditor:
         identity = changes.get("identity", {}) or {}
         tts = changes.get("tts", {}) or {}
         heartbeat = changes.get("heartbeat", {}) or {}
+        channels = changes.get("channels", {}) or {}
+        if not isinstance(channels, dict):
+            raise ValueError("Channels changes must be an object.")
         unknown_identity = sorted(set(identity) - set(IDENTITY_FIELDS))
         unknown_tts = sorted(set(tts) - set(TTS_FIELDS))
         unknown_heartbeat = sorted(set(heartbeat) - set(HEARTBEAT_FIELDS))
-        if unknown_identity or unknown_tts or unknown_heartbeat:
+        unknown_channels = sorted(set(channels) - CHANNEL_NAMES)
+        if unknown_identity or unknown_tts or unknown_heartbeat or unknown_channels:
             unknown = (
                 unknown_identity
                 + [f"tts.{name}" for name in unknown_tts]
                 + [f"heartbeat.{name}" for name in unknown_heartbeat]
+                + [f"channels.{name}" for name in unknown_channels]
             )
             raise ValueError(f"Unsupported field(s): {', '.join(unknown)}")
 
@@ -141,6 +148,10 @@ class ConfigEditor:
             "heartbeat": {
                 key: self._clean_heartbeat_value(key, value)
                 for key, value in heartbeat.items()
+            },
+            "channels": {
+                key: self._clean_channel_value(key, value)
+                for key, value in channels.items()
             },
         }
 
@@ -168,6 +179,11 @@ class ConfigEditor:
             raise ValueError(f"{label} must be between {low} and {high}.")
         return value
 
+    def _clean_channel_value(self, key: str, value: Any) -> bool:
+        if type(value) is not bool:
+            raise ValueError(f"{key.title()} channel must be true or false.")
+        return value
+
     def _render_files(self, persona_dir: Path, changes: dict[str, dict[str, Any]]) -> list[dict]:
         rendered = []
         if changes["identity"]:
@@ -178,7 +194,7 @@ class ConfigEditor:
                 updated = _set_top_level_field(updated, key, value)
             rendered.append({"path": identity_path, "original": original, "updated": updated})
 
-        if changes["tts"] or changes["heartbeat"]:
+        if changes["tts"] or changes["heartbeat"] or changes["channels"]:
             config_path = persona_dir / "config.yaml"
             original = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
             updated = original
@@ -186,6 +202,8 @@ class ConfigEditor:
                 updated = _set_nested_field(updated, "tts", key, value)
             for key, value in changes["heartbeat"].items():
                 updated = _set_nested_field(updated, "heartbeat", key, value)
+            for key, value in changes["channels"].items():
+                updated = _set_deep_nested_field(updated, ["channels", key, "enabled"], value)
             rendered.append({"path": config_path, "original": original, "updated": updated})
         return rendered
 
@@ -262,6 +280,55 @@ def _set_nested_field(text: str, parent: str, key: str, value: Any) -> str:
     return updated
 
 
+def _set_deep_nested_field(text: str, path: list[str], value: Any) -> str:
+    if len(path) < 2:
+        raise ValueError("Nested path must contain at least two keys.")
+    if len(path) == 2:
+        return _set_nested_field(text, path[0], path[1], value)
+
+    lines = text.splitlines()
+    top_start, top_end = _top_level_range(lines, path[0])
+    if top_start is None:
+        prefix = text.rstrip("\n")
+        sep = "\n\n" if prefix else ""
+        updated = f"{prefix}{sep}{_format_deep_block(path, value, 0)}\n"
+        _assert_no_duplicate_keys(updated)
+        return updated
+
+    block_start, block_end = top_start, top_end
+    parent_indent = 0
+    for depth, key in enumerate(path[1:-1], start=1):
+        child_indent = _child_indent_or(lines, block_start + 1, block_end, parent_indent + 2)
+        child_start, child_end = _nested_range(lines, block_start + 1, block_end, key, child_indent)
+        if child_start is None:
+            replacement = _format_deep_block(path[depth:], value, child_indent)
+            new_lines = lines[:block_end] + replacement.splitlines() + lines[block_end:]
+            updated = "\n".join(new_lines) + "\n"
+            _assert_no_duplicate_keys(updated)
+            return updated
+        block_start, block_end = child_start, child_end
+        parent_indent = child_indent
+
+    leaf = path[-1]
+    leaf_indent = _child_indent_or(lines, block_start + 1, block_end, parent_indent + 2)
+    leaf_start, leaf_end = _nested_range(lines, block_start + 1, block_end, leaf, leaf_indent)
+    replacement = _format_field(leaf, value, leaf_indent)
+    if leaf_start is None:
+        new_lines = lines[:block_end] + replacement.splitlines() + lines[block_end:]
+    else:
+        new_lines = lines[:leaf_start] + replacement.splitlines() + lines[leaf_end:]
+    updated = "\n".join(new_lines) + "\n"
+    _assert_no_duplicate_keys(updated)
+    return updated
+
+
+def _format_deep_block(path: list[str], value: Any, indent: int) -> str:
+    if len(path) == 1:
+        return _format_field(path[0], value, indent)
+    prefix = " " * indent
+    return f"{prefix}{path[0]}:\n{_format_deep_block(path[1:], value, indent + 2)}"
+
+
 def _top_level_range(lines: list[str], key: str) -> tuple[int | None, int | None]:
     pattern = re.compile(rf"^{re.escape(key)}\s*:")
     top_level = re.compile(r"^[A-Za-z_][\w-]*\s*:")
@@ -288,6 +355,10 @@ def _nested_range(lines: list[str], start: int, end: int, key: str, indent: int)
 
 
 def _child_indent(lines: list[str], start: int, end: int) -> int:
+    return _child_indent_or(lines, start, end, 2)
+
+
+def _child_indent_or(lines: list[str], start: int, end: int, fallback: int) -> int:
     for i in range(start, end):
         line = lines[i]
         stripped = line.strip()
@@ -295,7 +366,7 @@ def _child_indent(lines: list[str], start: int, end: int) -> int:
             continue
         if line[:1].isspace():
             return len(line) - len(line.lstrip(" "))
-    return 2
+    return fallback
 
 
 def _block_indicator(line: str) -> str | None:

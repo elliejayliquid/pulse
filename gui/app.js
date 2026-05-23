@@ -54,7 +54,11 @@ const fallbackApi = {
         tts: {},
       },
       skills: [],
-      channels: [],
+      channels: [
+        { name: "lor", label: "Lor", enabled: true },
+        { name: "telegram", label: "Telegram", enabled: true },
+        { name: "toast", label: "Toast", enabled: true },
+      ],
       key_status: { api_key_env: "API_KEY", api_key_set: false, telegram_set: false },
       status: {
         running: false,
@@ -332,7 +336,7 @@ function renderSkills(skills) {
   });
 }
 
-function renderChannels(channels) {
+function renderChannelsLegacy(channels) {
   const node = el("channels");
   if (!channels?.length) {
     node.innerHTML = `<span class="channel off">No channels configured</span>`;
@@ -341,6 +345,38 @@ function renderChannels(channels) {
   node.innerHTML = channels.map((channel) => (
     `<span class="channel ${channel.enabled ? "" : "off"}">${channel.enabled ? "on" : "off"} · ${escapeHtml(channel.label)}</span>`
   )).join("");
+}
+
+function renderChannels(channels) {
+  const node = el("channels");
+  if (!channels?.length) {
+    node.innerHTML = `<span class="channel off">No channels configured</span>`;
+    return;
+  }
+  const editable = state.current?.name && state.current.name !== "__base__";
+  const tooltips = {
+    telegram: "Bidirectional chat - receives messages and sends notifications via Telegram bot",
+    toast: "Windows desktop notifications when the persona has something to say",
+    lor: "Posts to the Local Reddit forum. Also requires the LoR skill to be enabled",
+  };
+  node.innerHTML = channels.map((channel) => (
+    `<button class="channel channel-toggle ${channel.enabled ? "on" : ""}" type="button"
+      data-channel="${escapeHtml(channel.name)}" title="${escapeHtml(tooltips[channel.name] || "Toggle channel")}"
+      ${editable ? "" : "disabled"}>
+      <span class="channel-dot" aria-hidden="true"></span>
+      <span>${escapeHtml(channel.label)}</span>
+    </button>`
+  )).join("");
+  node.querySelectorAll(".channel-toggle").forEach((button) => {
+    button.addEventListener("click", () => {
+      if (!editable) return;
+      const channel = state.current.channels.find((item) => item.name === button.dataset.channel);
+      if (!channel) return;
+      channel.enabled = !channel.enabled;
+      renderChannels(state.current.channels);
+      setDirty(hasEditableChanges());
+    });
+  });
 }
 
 function renderSecrets(status) {
@@ -435,6 +471,9 @@ function editableSnapshot() {
       voice_sample: el("ttsSample").value,
       voice_sample_text: el("ttsSampleText").value,
     },
+    channels: Object.fromEntries(
+      (state.current?.channels || []).map((channel) => [channel.name, Boolean(channel.enabled)])
+    ),
     heartbeat: {
       interval_minutes: el("hbInterval").value,
       interval_min_minutes: el("hbMin").value,
@@ -476,8 +515,8 @@ function parseHeartbeatNumber(value) {
 
 function collectEditableChanges() {
   const current = editableSnapshot();
-  const original = state.originalEditable || { identity: {}, tts: {}, heartbeat: {} };
-  const changes = { identity: {}, tts: {}, heartbeat: {} };
+  const original = state.originalEditable || { identity: {}, tts: {}, channels: {}, heartbeat: {} };
+  const changes = { identity: {}, tts: {}, channels: {}, heartbeat: {} };
 
   for (const [key, value] of Object.entries(current.identity)) {
     if (value !== original.identity?.[key]) {
@@ -488,6 +527,12 @@ function collectEditableChanges() {
   for (const [key, value] of Object.entries(current.tts)) {
     if (value !== original.tts?.[key]) {
       changes.tts[key] = value;
+    }
+  }
+
+  for (const [key, value] of Object.entries(current.channels)) {
+    if (value !== original.channels?.[key]) {
+      changes.channels[key] = value;
     }
   }
 
@@ -504,6 +549,7 @@ function hasEditableChanges() {
   const changes = collectEditableChanges();
   return Object.keys(changes.identity).length > 0
     || Object.keys(changes.tts).length > 0
+    || Object.keys(changes.channels).length > 0
     || Object.keys(changes.heartbeat).length > 0;
 }
 
