@@ -534,6 +534,90 @@ input[type="number"]::-webkit-outer-spin-button {
   accent-color: var(--accent);
 }
 
+/* ── Heartbeat ── */
+
+.section.open .hb-body {
+  display: flex;
+  gap: 24px;
+}
+
+.hb-group {
+  flex: 1;
+  min-width: 0;
+}
+
+.hb-group-label {
+  font: 500 10px/1 var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-tertiary);
+  margin-bottom: 10px;
+}
+
+.hb-row {
+  display: grid;
+  grid-template-columns: 72px 1fr 28px;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+}
+
+.hb-row + .hb-row {
+  border-top: 1px solid rgba(255, 255, 255, 0.025);
+}
+
+.hb-label {
+  font: 11px/1 var(--mono);
+  color: var(--text-secondary);
+}
+
+.hb-input {
+  width: 100%;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text-primary);
+  font: 500 12px/1 var(--mono);
+  text-align: center;
+  margin-top: 0;
+}
+
+.hb-input:focus {
+  border-color: var(--accent-line);
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(249, 115, 22, 0.1);
+}
+
+.hb-input:read-only {
+  color: var(--text-tertiary);
+  cursor: default;
+}
+
+.hb-unit {
+  font: 11px/1 var(--mono);
+  color: var(--text-tertiary);
+}
+
+.hb-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 0 2px;
+  cursor: pointer;
+  color: var(--text-secondary);
+  font: 12px/1 var(--body);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.hb-toggle input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
 textarea {
   min-height: 78px;
   font: 12px/1.55 var(--mono);
@@ -1112,6 +1196,11 @@ textarea {
 
   .tuning-extras {
     gap: 12px;
+  }
+
+  .hb-body {
+    flex-direction: column;
+    gap: 18px;
   }
 
   .persona-hero {

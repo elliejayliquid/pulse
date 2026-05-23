@@ -112,19 +112,41 @@
           <span><em>04</em> Heartbeat</span>
           <b class="section-chevron" aria-hidden="true"></b>
         </button>
-        <div class="section-body">
-          <div class="field-grid three">
-            <label title="Base interval between heartbeats in minutes">Interval (min)<input id="hbInterval" type="number" min="1" max="1440"></label>
-            <label title="Shortest possible heartbeat interval when randomized">Min (min)<input id="hbMin" type="number" min="1" max="1440"></label>
-            <label title="Longest possible heartbeat interval when randomized">Max (min)<input id="hbMax" type="number" min="1" max="1440"></label>
-          </div>
-          <div class="field-grid three">
-            <label title="Hour (0–23) when the persona stops sending notifications">Quiet Start (hour)<input id="hbQuietStart" type="number" min="0" max="23"></label>
-            <label title="Hour (0–23) when the persona resumes notifications">Quiet End (hour)<input id="hbQuietEnd" type="number" min="0" max="23"></label>
-            <label class="check-label-inline" title="Vary the interval between min and max instead of using a fixed interval">
+        <div class="section-body hb-body">
+          <div class="hb-group">
+            <div class="hb-group-label">Timing</div>
+            <div class="hb-row" title="Base interval between heartbeats in minutes">
+              <span class="hb-label">Interval</span>
+              <input id="hbInterval" class="hb-input" type="number" min="1" max="1440">
+              <span class="hb-unit">min</span>
+            </div>
+            <div class="hb-row" title="Shortest possible heartbeat interval when randomized">
+              <span class="hb-label">Min</span>
+              <input id="hbMin" class="hb-input" type="number" min="1" max="1440">
+              <span class="hb-unit">min</span>
+            </div>
+            <div class="hb-row" title="Longest possible heartbeat interval when randomized">
+              <span class="hb-label">Max</span>
+              <input id="hbMax" class="hb-input" type="number" min="1" max="1440">
+              <span class="hb-unit">min</span>
+            </div>
+            <label class="hb-toggle" title="Vary the interval between min and max instead of using a fixed interval">
               <input id="hbRandomize" type="checkbox">
-              Randomize interval
+              <span>Randomize interval</span>
             </label>
+          </div>
+          <div class="hb-group">
+            <div class="hb-group-label">Quiet Hours</div>
+            <div class="hb-row" title="Hour (0–23) when the persona stops sending notifications">
+              <span class="hb-label">Start</span>
+              <input id="hbQuietStart" class="hb-input" type="number" min="0" max="23">
+              <span class="hb-unit">h</span>
+            </div>
+            <div class="hb-row" title="Hour (0–23) when the persona resumes notifications">
+              <span class="hb-label">End</span>
+              <input id="hbQuietEnd" class="hb-input" type="number" min="0" max="23">
+              <span class="hb-unit">h</span>
+            </div>
           </div>
         </div>
       </section>
