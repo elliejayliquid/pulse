@@ -53,7 +53,7 @@ class ConfigEditor:
 
     def preview(self, persona: str, changes: dict[str, Any]) -> dict[str, Any]:
         persona_dir = self._persona_dir(persona)
-        normalized = self._normalize_changes(changes)
+        normalized = self._normalize_changes(changes, persona_dir)
         rendered = self._render_files(persona_dir, normalized)
         changed_files = [
             result for result in rendered
@@ -71,7 +71,7 @@ class ConfigEditor:
 
     def save(self, persona: str, changes: dict[str, Any]) -> dict[str, Any]:
         persona_dir = self._persona_dir(persona)
-        normalized = self._normalize_changes(changes)
+        normalized = self._normalize_changes(changes, persona_dir)
         rendered = self._render_files(persona_dir, normalized)
         changed_files = [
             result for result in rendered
@@ -113,25 +113,31 @@ class ConfigEditor:
             raise FileNotFoundError(f"Persona not found: {persona}")
         return persona_dir
 
-    def _normalize_changes(self, changes: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    def _normalize_changes(self, changes: dict[str, Any], persona_dir: Path) -> dict[str, dict[str, Any]]:
         if not isinstance(changes, dict):
             raise ValueError("Changes must be an object.")
 
         identity = changes.get("identity", {}) or {}
         tts = changes.get("tts", {}) or {}
         heartbeat = changes.get("heartbeat", {}) or {}
+        skills = changes.get("skills", {}) or {}
         channels = changes.get("channels", {}) or {}
+        if not isinstance(skills, dict):
+            raise ValueError("Skills changes must be an object.")
         if not isinstance(channels, dict):
             raise ValueError("Channels changes must be an object.")
+        valid_skills = self._editable_skill_names(persona_dir)
         unknown_identity = sorted(set(identity) - set(IDENTITY_FIELDS))
         unknown_tts = sorted(set(tts) - set(TTS_FIELDS))
         unknown_heartbeat = sorted(set(heartbeat) - set(HEARTBEAT_FIELDS))
+        unknown_skills = sorted(set(skills) - valid_skills)
         unknown_channels = sorted(set(channels) - CHANNEL_NAMES)
-        if unknown_identity or unknown_tts or unknown_heartbeat or unknown_channels:
+        if unknown_identity or unknown_tts or unknown_heartbeat or unknown_skills or unknown_channels:
             unknown = (
                 unknown_identity
                 + [f"tts.{name}" for name in unknown_tts]
                 + [f"heartbeat.{name}" for name in unknown_heartbeat]
+                + [f"skills.{name}" for name in unknown_skills]
                 + [f"channels.{name}" for name in unknown_channels]
             )
             raise ValueError(f"Unsupported field(s): {', '.join(unknown)}")
@@ -148,6 +154,10 @@ class ConfigEditor:
             "heartbeat": {
                 key: self._clean_heartbeat_value(key, value)
                 for key, value in heartbeat.items()
+            },
+            "skills": {
+                key: self._clean_skill_value(key, value)
+                for key, value in skills.items()
             },
             "channels": {
                 key: self._clean_channel_value(key, value)
@@ -184,6 +194,25 @@ class ConfigEditor:
             raise ValueError(f"{key.title()} channel must be true or false.")
         return value
 
+    def _clean_skill_value(self, key: str, value: Any) -> bool:
+        if type(value) is not bool:
+            raise ValueError(f"{key.replace('_', ' ').title()} skill must be true or false.")
+        return value
+
+    def _editable_skill_names(self, persona_dir: Path) -> set[str]:
+        skills_dir = self.root / "skills"
+        names = set()
+        if skills_dir.exists():
+            names.update(
+                path.stem
+                for path in skills_dir.glob("*.py")
+                if path.stem not in ("__init__", "base")
+            )
+        config_path = persona_dir / "config.yaml"
+        if config_path.exists():
+            names.update(_nested_keys(config_path.read_text(encoding="utf-8"), "skills"))
+        return names
+
     def _render_files(self, persona_dir: Path, changes: dict[str, dict[str, Any]]) -> list[dict]:
         rendered = []
         if changes["identity"]:
@@ -194,7 +223,7 @@ class ConfigEditor:
                 updated = _set_top_level_field(updated, key, value)
             rendered.append({"path": identity_path, "original": original, "updated": updated})
 
-        if changes["tts"] or changes["heartbeat"] or changes["channels"]:
+        if changes["tts"] or changes["heartbeat"] or changes["skills"] or changes["channels"]:
             config_path = persona_dir / "config.yaml"
             original = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
             updated = original
@@ -202,6 +231,8 @@ class ConfigEditor:
                 updated = _set_nested_field(updated, "tts", key, value)
             for key, value in changes["heartbeat"].items():
                 updated = _set_nested_field(updated, "heartbeat", key, value)
+            for key, value in changes["skills"].items():
+                updated = _set_deep_nested_field(updated, ["skills", key, "enabled"], value)
             for key, value in changes["channels"].items():
                 updated = _set_deep_nested_field(updated, ["channels", key, "enabled"], value)
             rendered.append({"path": config_path, "original": original, "updated": updated})
@@ -352,6 +383,21 @@ def _nested_range(lines: list[str], start: int, end: int, key: str, indent: int)
                 field_end += 1
             return i, field_end
     return None, None
+
+
+def _nested_keys(text: str, parent: str) -> set[str]:
+    lines = text.splitlines()
+    parent_start, parent_end = _top_level_range(lines, parent)
+    if parent_start is None:
+        return set()
+    indent = _child_indent(lines, parent_start + 1, parent_end)
+    prefix = " " * indent
+    pattern = re.compile(rf"^{re.escape(prefix)}([A-Za-z_][\w-]*)\s*:")
+    return {
+        match.group(1)
+        for line in lines[parent_start + 1:parent_end]
+        if (match := pattern.match(line))
+    }
 
 
 def _child_indent(lines: list[str], start: int, end: int) -> int:

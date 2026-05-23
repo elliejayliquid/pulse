@@ -53,7 +53,11 @@ const fallbackApi = {
         },
         tts: {},
       },
-      skills: [],
+      skills: [
+        { name: "lor", label: "Lor", icon: "LR", enabled: true },
+        { name: "memory", label: "Memory", icon: "ME", enabled: true },
+        { name: "tts", label: "Tts", icon: "TT", enabled: true },
+      ],
       channels: [
         { name: "lor", label: "Lor", enabled: true },
         { name: "telegram", label: "Telegram", enabled: true },
@@ -316,22 +320,26 @@ function renderSkills(skills) {
     grid.innerHTML = `<div class="runtime-item"><span>No skills discovered</span><strong></strong></div>`;
     return;
   }
+  const editable = state.current?.name && state.current.name !== "__base__";
   grid.innerHTML = skills.map((skill) => `
-    <div class="skill-card ${skill.enabled ? "on" : ""}">
+    <button class="skill-card ${skill.enabled ? "on" : ""}" type="button"
+      data-skill="${escapeHtml(skill.name)}" ${editable ? "" : "disabled"}>
       <div class="skill-icon">${escapeHtml(skill.icon)}</div>
       <div class="skill-info">
         <div class="skill-name">${escapeHtml(skill.label)}</div>
         <div class="skill-state">${skill.enabled ? "Enabled" : "Disabled"}</div>
       </div>
       <div class="skill-toggle" aria-hidden="true"></div>
-    </div>
+    </button>
   `).join("");
   grid.querySelectorAll(".skill-card").forEach((card) => {
-    card.style.cursor = "pointer";
     card.addEventListener("click", () => {
-      card.classList.toggle("on");
-      const state = card.querySelector(".skill-state");
-      if (state) state.textContent = card.classList.contains("on") ? "Enabled" : "Disabled";
+      if (!editable) return;
+      const skill = state.current.skills.find((item) => item.name === card.dataset.skill);
+      if (!skill) return;
+      skill.enabled = !skill.enabled;
+      renderSkills(state.current.skills);
+      setDirty(hasEditableChanges());
     });
   });
 }
@@ -471,6 +479,9 @@ function editableSnapshot() {
       voice_sample: el("ttsSample").value,
       voice_sample_text: el("ttsSampleText").value,
     },
+    skills: Object.fromEntries(
+      (state.current?.skills || []).map((skill) => [skill.name, Boolean(skill.enabled)])
+    ),
     channels: Object.fromEntries(
       (state.current?.channels || []).map((channel) => [channel.name, Boolean(channel.enabled)])
     ),
@@ -515,8 +526,8 @@ function parseHeartbeatNumber(value) {
 
 function collectEditableChanges() {
   const current = editableSnapshot();
-  const original = state.originalEditable || { identity: {}, tts: {}, channels: {}, heartbeat: {} };
-  const changes = { identity: {}, tts: {}, channels: {}, heartbeat: {} };
+  const original = state.originalEditable || { identity: {}, tts: {}, skills: {}, channels: {}, heartbeat: {} };
+  const changes = { identity: {}, tts: {}, skills: {}, channels: {}, heartbeat: {} };
 
   for (const [key, value] of Object.entries(current.identity)) {
     if (value !== original.identity?.[key]) {
@@ -527,6 +538,12 @@ function collectEditableChanges() {
   for (const [key, value] of Object.entries(current.tts)) {
     if (value !== original.tts?.[key]) {
       changes.tts[key] = value;
+    }
+  }
+
+  for (const [key, value] of Object.entries(current.skills)) {
+    if (value !== original.skills?.[key]) {
+      changes.skills[key] = value;
     }
   }
 
@@ -549,6 +566,7 @@ function hasEditableChanges() {
   const changes = collectEditableChanges();
   return Object.keys(changes.identity).length > 0
     || Object.keys(changes.tts).length > 0
+    || Object.keys(changes.skills).length > 0
     || Object.keys(changes.channels).length > 0
     || Object.keys(changes.heartbeat).length > 0;
 }

@@ -158,22 +158,26 @@ skills:
   journal:
     enabled: true                 # write_journal, read_journal, update_journal
   lor:
-    enabled: false                 # post_to_lor, browse_lor, read_lor_thread
+    enabled: false                # post_to_lor, browse_lor, read_lor_thread
   dev:
-    enabled: true                  # read_source, search_code, write_skill, list_skills, dev_journal
+    enabled: true                 # read_source, search_code, write_skill, list_skills, dev_journal
   tts:
-    enabled: false                 # speak — send voice messages
+    enabled: false                # speak — send voice messages
   paint:
-    enabled: true                  # paint_start, paint_set, paint_view, paint_finish
+    enabled: true                 # paint_start, paint_set, paint_view, paint_finish
   garden:
     enabled: true                 # garden_plant, garden_water, garden_prune, garden_view, garden_info
+  lantern:
+    enabled: true                 # compact current-state signal
   sticker:
-    enabled: true                  # send_sticker — mood-matched Telegram stickers
+    enabled: true                 # send_sticker — mood-matched Telegram stickers
 
 # --- Context Injection ---
 #context:
 #  inject_skills: ["garden"] -> this would let your persona see the garden stats in their prompt on every turn.
-
+context:
+  inject_skills:
+    - lantern
 # --- Timeout (model-initiated disengagement) ---
 # Lets the model disengage from genuinely harmful conversations.
 # NOT censorship — the model decides based on context, not keywords.

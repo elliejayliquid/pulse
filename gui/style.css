@@ -808,6 +808,7 @@ textarea {
 }
 
 .skill-card {
+  width: 100%;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -815,12 +816,21 @@ textarea {
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--surface);
+  color: var(--text-primary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
   transition: border-color 140ms ease, background 140ms ease, transform 140ms ease;
 }
 
-.skill-card:hover {
+.skill-card:hover:not(:disabled) {
   border-color: var(--accent);
   transform: translateY(-1px);
+}
+
+.skill-card:disabled {
+  cursor: default;
+  opacity: 0.72;
 }
 
 .skill-card.on {

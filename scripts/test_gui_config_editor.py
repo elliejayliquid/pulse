@@ -45,6 +45,15 @@ tts:
   voice_sample: ""
   voice_sample_text: ""
 
+skills:
+  tts:
+    enabled: true
+    voice: "warm"
+  lor:
+    enabled: true
+  lantern:
+    notes: "existing config"
+
 heartbeat:
   interval_minutes: 30
   randomize: true
@@ -90,6 +99,10 @@ channels:
                 "telegram": False,
                 "toast": False,
             },
+            "skills": {
+                "tts": False,
+                "lantern": False,
+            },
         }
         preview = api.preview_persona_save("demo", changes)
         assert preview["ok"] is True
@@ -124,6 +137,10 @@ channels:
         assert "telegram:\n    enabled: false" in config_text
         assert "toast:\n    app_name: \"Demo\"\n    enabled: false" in config_text
         assert 'enabled: "false"' not in config_text
+        assert "tts:\n    enabled: false\n    voice: \"warm\"" in config_text
+        assert "lantern:" in config_text
+        assert "notes: \"existing config\"" in config_text
+        assert "enabled: false" in config_text
 
         backup_path = root / result["backup"]["path"]
         assert (backup_path / "config.yaml").exists()
@@ -139,7 +156,7 @@ def test_config_editor_rejects_unknown_fields():
         persona_dir = root / "personas" / "demo"
         persona_dir.mkdir(parents=True)
         (persona_dir / "persona.yaml").write_text("name: Demo\n", encoding="utf-8")
-        (persona_dir / "config.yaml").write_text("tts: {}\n", encoding="utf-8")
+        (persona_dir / "config.yaml").write_text("tts: {}\nskills:\n  tts:\n    enabled: true\n", encoding="utf-8")
 
         api = PulseAPI(root)
         result = api.preview_persona_save("demo", {
@@ -168,6 +185,18 @@ def test_config_editor_rejects_unknown_fields():
 
         result = api.preview_persona_save("demo", {
             "channels": {"telegram": "false"},
+        })
+        assert result["ok"] is False
+        assert "true or false" in result["error"]
+
+        result = api.preview_persona_save("demo", {
+            "skills": {"definitely_not_a_skill": True},
+        })
+        assert result["ok"] is False
+        assert "Unsupported field" in result["error"]
+
+        result = api.preview_persona_save("demo", {
+            "skills": {"tts": "false"},
         })
         assert result["ok"] is False
         assert "true or false" in result["error"]
@@ -218,6 +247,12 @@ def test_writer_deep_nested_field_preserves_siblings():
     assert 'author_name: "Nova"' in updated
     assert 'model_name: "sonnet"' in updated
     assert "enabled: true" in updated
+
+
+def test_writer_sets_skill_enabled_without_touching_config():
+    text = 'skills:\n  tts:\n    enabled: true\n    voice: "warm"\n'
+    updated = _set_deep_nested_field(text, ["skills", "tts", "enabled"], False)
+    assert 'tts:\n    enabled: false\n    voice: "warm"' in updated
 
 
 def test_writer_multiline_value():
@@ -300,6 +335,7 @@ if __name__ == "__main__":
     test_writer_sets_deep_nested_field_subblock_missing()
     test_writer_sets_deep_nested_field_all_blocks_missing()
     test_writer_deep_nested_field_preserves_siblings()
+    test_writer_sets_skill_enabled_without_touching_config()
     test_writer_multiline_value()
     test_writer_preserves_folded_block_style()
     test_writer_ignores_commented_out_keys()
