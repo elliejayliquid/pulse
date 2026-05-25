@@ -1,6 +1,26 @@
 const NOTICE_INFO_MS = 6000;
 const NOTICE_WARNING_MS = 7000;
 
+const PROVIDER_LABELS = {
+  openrouter: "OpenRouter API Key",
+  openai: "OpenAI API Key",
+  anthropic: "Anthropic API Key",
+  custom: "API Key",
+};
+
+const PROVIDER_NAMES = {
+  openrouter: "OpenRouter",
+  openai: "OpenAI",
+  anthropic: "Anthropic",
+  custom: "Custom",
+};
+
+const EXPECTED_ENV_VARS = {
+  openrouter: "OPENROUTER_API_KEY",
+  openai: "OPENAI_API_KEY",
+  anthropic: "ANTHROPIC_API_KEY",
+};
+
 const state = {
   personas: [],
   current: null,
@@ -36,6 +56,7 @@ const fallbackApi = {
         model_display: name === "__base__" ? "base" : "Grok 4.2",
         provider_model: "",
         provider_type: name === "__base__" ? "local" : "openrouter",
+        base_url: "",
         max_context: "",
         temperature: 0.7,
         max_response_tokens: 2048,
@@ -70,7 +91,16 @@ const fallbackApi = {
         { name: "telegram", label: "Telegram", enabled: true },
         { name: "toast", label: "Toast", enabled: true },
       ],
-      key_status: { api_key_env: "API_KEY", api_key_set: false, telegram_set: false },
+      key_status: {
+        provider_type: name === "__base__" ? "local" : "openrouter",
+        api_key_env: "API_KEY",
+        expected_api_key_env: "OPENROUTER_API_KEY",
+        api_key_set: false,
+        provider_key_status: { openrouter: false, openai: false, anthropic: false },
+        telegram_key: "TELEGRAM_BOT_TOKEN",
+        telegram_set: false,
+        telegram_enabled: true,
+      },
       status: {
         running: false,
         phase: "browser fallback",
@@ -266,21 +296,71 @@ function renderStatus(status) {
   }
 }
 
+function selectedProviderType(status = {}) {
+  const field = el("providerType");
+  return field?.value || status.provider_type || state.current?.summary?.provider_type || "local";
+}
+
+function normalizeKeyStatus(status = {}) {
+  const providerType = selectedProviderType(status);
+  const providerChanged = Boolean(status.provider_type) && status.provider_type !== providerType;
+  const expected = status.provider_type === providerType
+    ? status.expected_api_key_env || EXPECTED_ENV_VARS[providerType] || ""
+    : EXPECTED_ENV_VARS[providerType] || "";
+  const telegramChannel = state.current?.channels?.find((item) => item.name === "telegram");
+  const apiKeyEnv = providerChanged ? "" : status.api_key_env || "";
+  const configuredKeyMatches = Boolean(apiKeyEnv && apiKeyEnv === expected);
+  const providerKeyStatus = status.provider_key_status || {};
+  const providerKeySet = providerKeyStatus[providerType];
+  return {
+    provider_type: providerType,
+    api_key_env: apiKeyEnv,
+    expected_api_key_env: expected,
+    api_key_set: providerKeySet !== undefined
+      ? Boolean(providerKeySet)
+      : providerChanged && providerType !== "local" && !configuredKeyMatches
+        ? false
+        : Boolean(status.api_key_set),
+    provider_key_status: providerKeyStatus,
+    telegram_key: status.telegram_key || "TELEGRAM_BOT_TOKEN",
+    telegram_set: Boolean(status.telegram_set),
+    telegram_enabled: telegramChannel ? Boolean(telegramChannel.enabled) : Boolean(status.telegram_enabled),
+  };
+}
+
+function currentKeyStatus() {
+  return normalizeKeyStatus(state.current?.key_status || {});
+}
+
+function providerKeyEnv(status) {
+  return status.api_key_env || status.expected_api_key_env || "";
+}
+
+function providerKeyMissing(status = currentKeyStatus()) {
+  return status.provider_type !== "local" && !status.api_key_set;
+}
+
 function renderProcessButton(data) {
   const btn = el("pulseToggle");
   const isBase = data?.name === "__base__";
   const status = data?.status || {};
   const active = Boolean(status.running) && !status.stale;
   const stopping = status.phase === "stopping";
-
-  btn.disabled = isBase || stopping;
+  const keyStatus = currentKeyStatus();
+  const missingKey = providerKeyMissing(keyStatus);
 
   if (active || stopping) {
     btn.textContent = stopping ? "Stopping..." : "■ Stop";
     btn.className = "hero-stop-btn";
+    btn.disabled = isBase || stopping;
+    btn.title = "";
   } else {
     btn.textContent = "▶ Start";
     btn.className = "hero-start-btn";
+    btn.disabled = isBase || missingKey;
+    btn.title = missingKey
+      ? `API key missing - set ${providerKeyEnv(keyStatus) || "provider.api_key_env"} in .env to start`
+      : "";
   }
 }
 
@@ -447,16 +527,64 @@ function renderChannels(channels) {
       channel.enabled = !channel.enabled;
       renderChannels(state.current.channels);
       setDirty(hasEditableChanges());
+      renderSecrets(state.current.key_status || {});
     });
   });
 }
 
+function providerKeyLabel(status) {
+  if (status.provider_type === "custom") return status.api_key_env || "API Key";
+  return PROVIDER_LABELS[status.provider_type] || status.api_key_env || "API Key";
+}
+
+function providerDisplayName(status) {
+  return PROVIDER_NAMES[status.provider_type] || status.provider_type || "Provider";
+}
+
+function renderProviderWarnings(status) {
+  const box = el("providerWarnings");
+  const messages = [];
+
+  if (providerKeyMissing(status)) {
+    const envVar = providerKeyEnv(status);
+    if (status.provider_type === "custom" && !envVar) {
+      messages.push("No API key configured - set provider.api_key_env in config.yaml");
+    } else {
+      messages.push(`${providerDisplayName(status)} API key not found - set ${envVar || "provider.api_key_env"} in your .env file`);
+    }
+  }
+
+  if (status.telegram_enabled && !status.telegram_set) {
+    messages.push("Telegram enabled but TELEGRAM_BOT_TOKEN not found in .env");
+  }
+
+  if (!messages.length) {
+    box.classList.add("hidden");
+    box.innerHTML = "";
+    return;
+  }
+
+  box.innerHTML = messages.map((message) => (
+    `<div class="provider-warning">${escapeHtml(message)}</div>`
+  )).join("");
+  box.classList.remove("hidden");
+}
+
 function renderSecrets(status) {
-  el("apiKeyName").textContent = status.api_key_env || "API key env not configured";
-  el("apiKeyStatus").textContent = status.api_key_set ? "Set" : "Missing";
-  el("apiKeyStatus").className = status.api_key_set ? "set" : "missing";
-  el("telegramStatus").textContent = status.telegram_set ? "Set" : "Missing";
-  el("telegramStatus").className = status.telegram_set ? "set" : "missing";
+  const normalized = normalizeKeyStatus(status || {});
+
+  const isLocal = normalized.provider_type === "local";
+  el("apiKeyRow").classList.toggle("hidden", isLocal);
+  if (!isLocal) {
+    el("apiKeyName").textContent = providerKeyLabel(normalized);
+    el("apiKeyStatus").textContent = normalized.api_key_set ? "Set" : "Missing";
+    el("apiKeyStatus").className = normalized.api_key_set ? "set" : "missing";
+  }
+
+  el("telegramStatus").textContent = normalized.telegram_set ? "Set" : "Missing";
+  el("telegramStatus").className = normalized.telegram_set ? "set" : "missing";
+  renderProviderWarnings(normalized);
+  renderProcessButton(state.current);
 }
 
 function renderIdentity(data) {
@@ -498,12 +626,19 @@ function renderHero(data) {
   }
 }
 
+function syncBaseUrlVisibility() {
+  const isCustom = el("providerType").value === "custom";
+  el("baseUrlRow").classList.toggle("hidden", !isCustom);
+}
+
 function renderProvider(data) {
   const summary = data.summary || {};
   const tts = summary.tts || {};
   el("providerType").value = text(summary.provider_type);
   el("providerModel").value = text(summary.provider_model);
+  el("providerBaseUrl").value = text(summary.base_url);
   el("maxContext").value = text(summary.max_context);
+  syncBaseUrlVisibility();
   el("ttsVoice").value = text(tts.voice_description);
   el("ttsSample").value = text(tts.voice_sample);
   el("ttsSampleText").value = text(tts.voice_sample_text);
@@ -542,6 +677,7 @@ function editableSnapshot() {
     provider: {
       type: el("providerType").value,
       model: el("providerModel").value,
+      base_url: el("providerBaseUrl").value,
       max_context: el("maxContext").value,
     },
     model: {
@@ -587,6 +723,7 @@ function setEditableState(data) {
     "identityModel",
     "voiceNotes",
     "providerModel",
+    "providerBaseUrl",
     "maxContext",
     "ttsVoice",
     "ttsSampleText",
@@ -897,6 +1034,7 @@ function wireEvents() {
     "identityModel",
     "voiceNotes",
     "providerModel",
+    "providerBaseUrl",
     "maxContext",
     "ttsVoice",
     "ttsSampleText",
@@ -908,8 +1046,10 @@ function wireEvents() {
   ].forEach((id) => {
     el(id).addEventListener("input", () => setDirty(hasEditableChanges()));
   });
-  ["providerType"].forEach((id) => {
-    el(id).addEventListener("change", () => setDirty(hasEditableChanges()));
+  el("providerType").addEventListener("change", () => {
+    syncBaseUrlVisibility();
+    setDirty(hasEditableChanges());
+    renderSecrets(state.current?.key_status || {});
   });
   el("hbRandomize").addEventListener("change", () => setDirty(hasEditableChanges()));
   el("hbDebug").addEventListener("change", () => setDirty(hasEditableChanges()));

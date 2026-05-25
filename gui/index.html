@@ -92,8 +92,11 @@
             <label title="The specific AI model to use, e.g. gpt-5.1 or claude-sonnet-4">Provider Model<input id="providerModel" type="text"></label>
             <label title="How many tokens the model can see at once. Bigger isn't always better — tighter context means better attention and earlier summarization. 32k–65k is a good range">Max Context<input id="maxContext" type="number" min="1024" max="1048576"></label>
           </div>
+          <div id="baseUrlRow" class="field-grid one hidden">
+            <label title="API endpoint URL for custom providers (e.g. https://api.nanogpt.com/v1). Not needed for standard providers — they auto-configure">Base URL<input id="providerBaseUrl" type="text" placeholder="https://api.example.com/v1"></label>
+          </div>
           <div class="secret-list">
-            <div class="secret-row">
+            <div id="apiKeyRow" class="secret-row">
               <span id="apiKeyName">API key</span>
               <strong id="apiKeyStatus">Unknown</strong>
             </div>
@@ -102,6 +105,7 @@
               <strong id="telegramStatus">Unknown</strong>
             </div>
           </div>
+          <div id="providerWarnings" class="provider-warnings hidden"></div>
         </div>
       </section>
 

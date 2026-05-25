@@ -73,8 +73,13 @@ voice_notes: Warm.
         assert demo["display_name"] == "Demo"
         assert demo["summary"]["provider_type"] == "openrouter"
         assert demo["summary"]["provider_model"] == "demo/model"
+        assert demo["key_status"]["provider_type"] == "openrouter"
+        assert demo["key_status"]["api_key_env"] == "DEMO_KEY"
+        assert demo["key_status"]["expected_api_key_env"] == "OPENROUTER_API_KEY"
         assert demo["key_status"]["api_key_set"] is True
+        assert demo["key_status"]["provider_key_status"]["openrouter"] is False
         assert demo["key_status"]["telegram_set"] is False
+        assert demo["key_status"]["telegram_enabled"] is False
         channels = {channel["name"]: channel["enabled"] for channel in demo["channels"]}
         assert channels["telegram"] is False
         assert channels["toast"] is True
@@ -106,6 +111,44 @@ voice_notes: Warm.
         assert api.get_status("demo")["stale"] is True
 
 
+def test_gui_api_standard_provider_env_fallback():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "personas" / "demo").mkdir(parents=True)
+        (root / "logs").mkdir()
+
+        (root / "config.yaml").write_text(
+            """
+provider:
+  type: openai
+channels:
+  telegram:
+    enabled: true
+""",
+            encoding="utf-8",
+        )
+        (root / "persona.yaml").write_text("name: Base\n", encoding="utf-8")
+        (root / ".env").write_text(
+            "OPENAI_API_KEY=secret\nOPENROUTER_API_KEY=other\nTELEGRAM_BOT_TOKEN=token\n",
+            encoding="utf-8",
+        )
+        (root / "personas" / "demo" / "config.yaml").write_text("", encoding="utf-8")
+        (root / "personas" / "demo" / "persona.yaml").write_text("name: Demo\n", encoding="utf-8")
+
+        api = PulseAPI(root)
+        status = api.load_persona("demo")["key_status"]
+        assert status["provider_type"] == "openai"
+        assert status["api_key_env"] == ""
+        assert status["expected_api_key_env"] == "OPENAI_API_KEY"
+        assert status["api_key_set"] is True
+        assert status["provider_key_status"]["openai"] is True
+        assert status["provider_key_status"]["openrouter"] is True
+        assert status["provider_key_status"]["anthropic"] is False
+        assert status["telegram_enabled"] is True
+        assert status["telegram_set"] is True
+
+
 if __name__ == "__main__":
     test_gui_api_read_only_persona_loading()
+    test_gui_api_standard_provider_env_fallback()
     print("[OK] GUI API")

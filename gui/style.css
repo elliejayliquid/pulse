@@ -483,6 +483,10 @@ h1 {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+.field-grid.one {
+  grid-template-columns: 1fr;
+}
+
 label {
   display: block;
   color: var(--text-tertiary);
@@ -760,12 +764,32 @@ textarea {
   background: #18181d;
 }
 
+.secret-row.hidden {
+  display: none;
+}
+
 .secret-row strong.set {
   color: var(--success);
 }
 
 .secret-row strong.missing {
   color: var(--warning);
+}
+
+.provider-warnings {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.provider-warning {
+  padding: 8px 12px;
+  border: 1px solid rgba(245, 158, 11, 0.25);
+  border-radius: 7px;
+  background: rgba(245, 158, 11, 0.06);
+  color: var(--warning);
+  font: 12px/1.4 var(--body);
 }
 
 .runtime-grid {

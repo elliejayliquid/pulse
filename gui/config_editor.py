@@ -27,6 +27,7 @@ PROVIDER_FIELDS = {
     "type": "Provider Type",
     "model": "Provider Model",
     "max_context": "Max Context",
+    "base_url": "Base URL",
 }
 
 PROVIDER_TYPES = {"local", "openrouter", "openai", "anthropic", "custom"}
@@ -259,6 +260,8 @@ class ConfigEditor:
                 raise ValueError(f"{label} must be one of: {', '.join(sorted(PROVIDER_TYPES))}.")
             return value
         if key == "model":
+            return self._clean_text(value, label)
+        if key == "base_url":
             return self._clean_text(value, label)
         if type(value) is not int:
             raise ValueError(f"{label} must be a whole number.")

@@ -27,6 +27,13 @@ from gui.config_editor import ConfigEditor
 STATUS_STALE_AFTER_SECONDS = 120
 
 
+PROVIDER_KEY_MAP = {
+    "openrouter": "OPENROUTER_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+}
+
+
 SKILL_ICONS = {
     "dev": "{}",
     "garden": "🌱",
@@ -255,13 +262,28 @@ class PulseAPI:
         persona_env = _parse_env(self.personas_dir / persona / ".env") if persona and persona != "__base__" else {}
         env = {**root_env, **persona_env}
 
-        api_key_env = config.get("provider", {}).get("api_key_env", "")
+        provider = config.get("provider", {})
+        provider_type = provider.get("type", "local")
+        api_key_env = provider.get("api_key_env", "")
+        expected_api_key_env = PROVIDER_KEY_MAP.get(provider_type, "")
+        effective_api_key_env = api_key_env or expected_api_key_env
+        provider_key_status = {
+            key: bool(env.get(value))
+            for key, value in PROVIDER_KEY_MAP.items()
+        }
+        channels = config.get("channels", {})
+        telegram = channels.get("telegram", {})
+        telegram_enabled = telegram.get("enabled", True) if isinstance(telegram, dict) else bool(telegram)
         telegram_key = "TELEGRAM_BOT_TOKEN"
         return {
+            "provider_type": provider_type,
             "api_key_env": api_key_env,
-            "api_key_set": bool(api_key_env and env.get(api_key_env)),
+            "expected_api_key_env": expected_api_key_env,
+            "api_key_set": bool(effective_api_key_env and env.get(effective_api_key_env)),
+            "provider_key_status": provider_key_status,
             "telegram_key": telegram_key,
             "telegram_set": bool(env.get(telegram_key)),
+            "telegram_enabled": telegram_enabled,
         }
 
     def get_status(self, persona: str | None = None) -> dict:
@@ -511,6 +533,7 @@ class PulseAPI:
             "model_display": model_display,
             "provider_model": provider_model,
             "provider_type": provider_type,
+            "base_url": provider.get("base_url", ""),
             "max_context": max_context,
             "max_response_tokens": model_cfg.get("max_response_tokens", ""),
             "temperature": model_cfg.get("temperature", config.get("model", {}).get("temperature", 0.7)),
