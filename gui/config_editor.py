@@ -23,6 +23,45 @@ TTS_FIELDS = {
     "voice_sample_text": "TTS Voice Sample Text",
 }
 
+PROVIDER_FIELDS = {
+    "type": "Provider Type",
+    "model": "Provider Model",
+    "max_context": "Max Context",
+}
+
+PROVIDER_TYPES = {"local", "openrouter", "openai", "anthropic", "custom"}
+
+MODEL_FIELDS = {
+    "temperature": "Temperature",
+    "max_response_tokens": "Max Response Tokens",
+    "frequency_penalty": "Frequency Penalty",
+    "presence_penalty": "Presence Penalty",
+    "top_p": "Top P",
+    "reasoning": "Reasoning",
+    "reasoning_effort": "Reasoning Effort",
+    "show_reasoning": "Show Reasoning",
+    "max_tool_rounds": "Max Tool Rounds",
+}
+
+MODEL_LIMITS = {
+    "temperature": (0.0, 2.0),
+    "max_response_tokens": (256, 32768),
+    "frequency_penalty": (0.0, 2.0),
+    "presence_penalty": (0.0, 2.0),
+    "top_p": (0.0, 1.0),
+    "max_tool_rounds": (1, 32),
+}
+
+REASONING_EFFORTS = {"", "low", "medium", "high"}
+
+CONTEXT_BUDGET_FIELDS = {
+    "recent_tail_exchanges": "Recent Tail Exchanges",
+}
+
+CONTEXT_BUDGET_LIMITS = {
+    "recent_tail_exchanges": (1, 10),
+}
+
 HEARTBEAT_FIELDS = {
     "interval_minutes": "Heartbeat Interval",
     "randomize": "Randomize Heartbeat",
@@ -30,6 +69,7 @@ HEARTBEAT_FIELDS = {
     "interval_max_minutes": "Heartbeat Max Interval",
     "quiet_hours_start": "Quiet Hours Start",
     "quiet_hours_end": "Quiet Hours End",
+    "debug": "Heartbeat Debug",
 }
 
 HEARTBEAT_LIMITS = {
@@ -119,9 +159,18 @@ class ConfigEditor:
 
         identity = changes.get("identity", {}) or {}
         tts = changes.get("tts", {}) or {}
+        provider = changes.get("provider", {}) or {}
+        model = changes.get("model", {}) or {}
+        context_budget = changes.get("context_budget", {}) or {}
         heartbeat = changes.get("heartbeat", {}) or {}
         skills = changes.get("skills", {}) or {}
         channels = changes.get("channels", {}) or {}
+        if not isinstance(provider, dict):
+            raise ValueError("Provider changes must be an object.")
+        if not isinstance(model, dict):
+            raise ValueError("Model changes must be an object.")
+        if not isinstance(context_budget, dict):
+            raise ValueError("Context budget changes must be an object.")
         if not isinstance(skills, dict):
             raise ValueError("Skills changes must be an object.")
         if not isinstance(channels, dict):
@@ -129,13 +178,28 @@ class ConfigEditor:
         valid_skills = self._editable_skill_names(persona_dir)
         unknown_identity = sorted(set(identity) - set(IDENTITY_FIELDS))
         unknown_tts = sorted(set(tts) - set(TTS_FIELDS))
+        unknown_provider = sorted(set(provider) - set(PROVIDER_FIELDS))
+        unknown_model = sorted(set(model) - set(MODEL_FIELDS))
+        unknown_context_budget = sorted(set(context_budget) - set(CONTEXT_BUDGET_FIELDS))
         unknown_heartbeat = sorted(set(heartbeat) - set(HEARTBEAT_FIELDS))
         unknown_skills = sorted(set(skills) - valid_skills)
         unknown_channels = sorted(set(channels) - CHANNEL_NAMES)
-        if unknown_identity or unknown_tts or unknown_heartbeat or unknown_skills or unknown_channels:
+        if (
+            unknown_identity
+            or unknown_tts
+            or unknown_provider
+            or unknown_model
+            or unknown_context_budget
+            or unknown_heartbeat
+            or unknown_skills
+            or unknown_channels
+        ):
             unknown = (
                 unknown_identity
                 + [f"tts.{name}" for name in unknown_tts]
+                + [f"provider.{name}" for name in unknown_provider]
+                + [f"model.{name}" for name in unknown_model]
+                + [f"context_budget.{name}" for name in unknown_context_budget]
                 + [f"heartbeat.{name}" for name in unknown_heartbeat]
                 + [f"skills.{name}" for name in unknown_skills]
                 + [f"channels.{name}" for name in unknown_channels]
@@ -150,6 +214,18 @@ class ConfigEditor:
             "tts": {
                 key: self._clean_text(value, TTS_FIELDS[key])
                 for key, value in tts.items()
+            },
+            "provider": {
+                key: self._clean_provider_value(key, value)
+                for key, value in provider.items()
+            },
+            "model": {
+                key: self._clean_model_value(key, value)
+                for key, value in model.items()
+            },
+            "context_budget": {
+                key: self._clean_context_budget_value(key, value)
+                for key, value in context_budget.items()
             },
             "heartbeat": {
                 key: self._clean_heartbeat_value(key, value)
@@ -176,9 +252,57 @@ class ConfigEditor:
             raise ValueError(f"{label} is too long.")
         return value.replace("\r\n", "\n").replace("\r", "\n")
 
+    def _clean_provider_value(self, key: str, value: Any) -> str | int:
+        label = PROVIDER_FIELDS[key]
+        if key == "type":
+            if not isinstance(value, str) or value not in PROVIDER_TYPES:
+                raise ValueError(f"{label} must be one of: {', '.join(sorted(PROVIDER_TYPES))}.")
+            return value
+        if key == "model":
+            return self._clean_text(value, label)
+        if type(value) is not int:
+            raise ValueError(f"{label} must be a whole number.")
+        if not 1024 <= value <= 1048576:
+            raise ValueError(f"{label} must be between 1024 and 1048576.")
+        return value
+
+    def _clean_model_value(self, key: str, value: Any) -> str | int | float | bool:
+        label = MODEL_FIELDS[key]
+        if key in ("reasoning", "show_reasoning"):
+            if type(value) is not bool:
+                raise ValueError(f"{label} must be true or false.")
+            return value
+        if key == "reasoning_effort":
+            if not isinstance(value, str) or value not in REASONING_EFFORTS:
+                raise ValueError(f"{label} must be one of: low, medium, high, or empty.")
+            return value
+        if key in ("max_response_tokens", "max_tool_rounds"):
+            if type(value) is not int:
+                raise ValueError(f"{label} must be a whole number.")
+            low, high = MODEL_LIMITS[key]
+            if not low <= value <= high:
+                raise ValueError(f"{label} must be between {low} and {high}.")
+            return value
+        if not isinstance(value, (int, float)) or type(value) is bool:
+            raise ValueError(f"{label} must be a number.")
+        cleaned = round(float(value), 2)
+        low, high = MODEL_LIMITS[key]
+        if not low <= cleaned <= high:
+            raise ValueError(f"{label} must be between {low} and {high}.")
+        return cleaned
+
+    def _clean_context_budget_value(self, key: str, value: Any) -> int:
+        label = CONTEXT_BUDGET_FIELDS[key]
+        if type(value) is not int:
+            raise ValueError(f"{label} must be a whole number.")
+        low, high = CONTEXT_BUDGET_LIMITS[key]
+        if not low <= value <= high:
+            raise ValueError(f"{label} must be between {low} and {high}.")
+        return value
+
     def _clean_heartbeat_value(self, key: str, value: Any) -> int | bool:
         label = HEARTBEAT_FIELDS[key]
-        if key == "randomize":
+        if key in ("randomize", "debug"):
             if type(value) is not bool:
                 raise ValueError(f"{label} must be true or false.")
             return value
@@ -223,12 +347,26 @@ class ConfigEditor:
                 updated = _set_top_level_field(updated, key, value)
             rendered.append({"path": identity_path, "original": original, "updated": updated})
 
-        if changes["tts"] or changes["heartbeat"] or changes["skills"] or changes["channels"]:
+        if (
+            changes["tts"]
+            or changes["provider"]
+            or changes["model"]
+            or changes["context_budget"]
+            or changes["heartbeat"]
+            or changes["skills"]
+            or changes["channels"]
+        ):
             config_path = persona_dir / "config.yaml"
             original = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
             updated = original
             for key, value in changes["tts"].items():
                 updated = _set_nested_field(updated, "tts", key, value)
+            for key, value in changes["provider"].items():
+                updated = _set_nested_field(updated, "provider", key, value)
+            for key, value in changes["model"].items():
+                updated = _set_nested_field(updated, "model", key, value)
+            for key, value in changes["context_budget"].items():
+                updated = _set_nested_field(updated, "context_budget", key, value)
             for key, value in changes["heartbeat"].items():
                 updated = _set_nested_field(updated, "heartbeat", key, value)
             for key, value in changes["skills"].items():
@@ -462,6 +600,11 @@ def _format_field(key: str, value: Any, indent: int, block_indicator: str | None
         return f"{prefix}{key}: {'true' if value else 'false'}"
     if type(value) is int:
         return f"{prefix}{key}: {value}"
+    if type(value) is float:
+        formatted = f"{value:.2f}".rstrip("0")
+        if formatted.endswith("."):
+            formatted += "0"
+        return f"{prefix}{key}: {formatted}"
     if "\n" in value:
         lines = value.split("\n")
         body = "\n".join(f"{prefix}  {line}" if line else f"{prefix}" for line in lines)

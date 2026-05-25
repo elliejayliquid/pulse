@@ -521,6 +521,7 @@ class PulseAPI:
             "reasoning_effort": model_cfg.get("reasoning_effort", ""),
             "show_reasoning": model_cfg.get("show_reasoning", False),
             "max_tool_rounds": model_cfg.get("max_tool_rounds", ""),
+            "context_budget": config.get("context_budget", {}),
             "heartbeat": config.get("heartbeat", {}),
             "tts": config.get("tts", {}),
         }

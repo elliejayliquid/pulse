@@ -39,6 +39,22 @@ voice_notes: |
             """# Persona config overlay
 provider:
   type: "openrouter"
+  model: "old/provider"
+  max_context: 131072
+
+model:
+  temperature: 0.7
+  max_response_tokens: 2048
+  frequency_penalty: 0.3
+  presence_penalty: 0.2
+  top_p: 1.0
+  reasoning: true
+  reasoning_effort: "high"
+  show_reasoning: false
+  max_tool_rounds: 8
+
+context_budget:
+  recent_tail_exchanges: 4
 
 tts:
   voice_description: "Old voice"
@@ -61,6 +77,7 @@ heartbeat:
   interval_max_minutes: 60
   quiet_hours_start: 23
   quiet_hours_end: 8
+  debug: true
 
 channels:
   lor:
@@ -87,6 +104,25 @@ channels:
                 "voice_sample": "personas/demo/data/tts/ref.ogg",
                 "voice_sample_text": "Reference text",
             },
+            "provider": {
+                "type": "openai",
+                "model": "gpt-5.1",
+                "max_context": 262144,
+            },
+            "model": {
+                "temperature": 0.85,
+                "max_response_tokens": 4096,
+                "frequency_penalty": 0.35,
+                "presence_penalty": 0.15,
+                "top_p": 0.95,
+                "reasoning": False,
+                "reasoning_effort": "medium",
+                "show_reasoning": True,
+                "max_tool_rounds": 12,
+            },
+            "context_budget": {
+                "recent_tail_exchanges": 6,
+            },
             "heartbeat": {
                 "interval_minutes": 45,
                 "randomize": False,
@@ -94,6 +130,7 @@ channels:
                 "interval_max_minutes": 50,
                 "quiet_hours_start": 22,
                 "quiet_hours_end": 7,
+                "debug": False,
             },
             "channels": {
                 "telegram": False,
@@ -127,12 +164,26 @@ channels:
         assert 'voice_description: "New voice"' in config_text
         assert 'voice_sample: "personas/demo/data/tts/ref.ogg"' in config_text
         assert 'voice_sample_text: "Reference text"' in config_text
+        assert 'type: "openai"' in config_text
+        assert 'model: "gpt-5.1"' in config_text
+        assert "max_context: 262144" in config_text
+        assert "temperature: 0.85" in config_text
+        assert "max_response_tokens: 4096" in config_text
+        assert "frequency_penalty: 0.35" in config_text
+        assert "presence_penalty: 0.15" in config_text
+        assert "top_p: 0.95" in config_text
+        assert "reasoning: false" in config_text
+        assert 'reasoning_effort: "medium"' in config_text
+        assert "show_reasoning: true" in config_text
+        assert "max_tool_rounds: 12" in config_text
+        assert "recent_tail_exchanges: 6" in config_text
         assert "interval_minutes: 45" in config_text
         assert "randomize: false" in config_text
         assert "interval_min_minutes: 20" in config_text
         assert "interval_max_minutes: 50" in config_text
         assert "quiet_hours_start: 22" in config_text
         assert "quiet_hours_end: 7" in config_text
+        assert "debug: false" in config_text
         assert 'interval_minutes: "45"' not in config_text
         assert "telegram:\n    enabled: false" in config_text
         assert "toast:\n    app_name: \"Demo\"\n    enabled: false" in config_text
@@ -200,6 +251,48 @@ def test_config_editor_rejects_unknown_fields():
         })
         assert result["ok"] is False
         assert "true or false" in result["error"]
+
+        result = api.preview_persona_save("demo", {
+            "provider": {"type": "madeup"},
+        })
+        assert result["ok"] is False
+        assert "Provider Type" in result["error"]
+
+        for provider_type in ("local", "openrouter", "openai", "anthropic", "custom"):
+            result = api.preview_persona_save("demo", {
+                "provider": {"type": provider_type},
+            })
+            assert result["ok"] is True
+
+        result = api.preview_persona_save("demo", {
+            "model": {"temperature": -0.1},
+        })
+        assert result["ok"] is False
+        assert "Temperature" in result["error"]
+
+        result = api.preview_persona_save("demo", {
+            "model": {"top_p": 1.5},
+        })
+        assert result["ok"] is False
+        assert "Top P" in result["error"]
+
+        result = api.preview_persona_save("demo", {
+            "model": {"frequency_penalty": "0.5"},
+        })
+        assert result["ok"] is False
+        assert "Frequency Penalty" in result["error"]
+
+        result = api.preview_persona_save("demo", {
+            "model": {"reasoning_effort": "extreme"},
+        })
+        assert result["ok"] is False
+        assert "Reasoning Effort" in result["error"]
+
+        for effort in ("", "low", "medium", "high"):
+            result = api.preview_persona_save("demo", {
+                "model": {"reasoning_effort": effort},
+            })
+            assert result["ok"] is True
 
 
 def test_writer_sets_new_top_level_field():
@@ -307,6 +400,13 @@ def test_writer_formats_numbers_and_booleans():
     assert _format_field("randomize", False, 2) == "  randomize: false"
 
 
+def test_writer_formats_floats():
+    assert _format_field("temperature", 0.85, 2) == "  temperature: 0.85"
+    assert _format_field("top_p", 1.0, 2) == "  top_p: 1.0"
+    assert _format_field("frequency_penalty", 0.3, 2) == "  frequency_penalty: 0.3"
+    assert '"0.85"' not in _format_field("temperature", 0.85, 2)
+
+
 def test_writer_special_chars_json_encoded():
     updated = _set_top_level_field("", "model", 'A "quoted": value # not comment')
     assert updated == 'model: "A \\"quoted\\": value # not comment"\n'
@@ -344,6 +444,7 @@ if __name__ == "__main__":
     test_writer_rejects_duplicate_keys()
     test_writer_empty_string_value()
     test_writer_formats_numbers_and_booleans()
+    test_writer_formats_floats()
     test_writer_special_chars_json_encoded()
     test_writer_trailing_newline_stable()
     test_writer_same_value_round_trip_no_diff()

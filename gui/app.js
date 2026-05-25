@@ -1,3 +1,6 @@
+const NOTICE_INFO_MS = 6000;
+const NOTICE_WARNING_MS = 7000;
+
 const state = {
   personas: [],
   current: null,
@@ -43,6 +46,9 @@ const fallbackApi = {
         reasoning_effort: "high",
         show_reasoning: false,
         max_tool_rounds: 8,
+        context_budget: {
+          recent_tail_exchanges: 2,
+        },
         heartbeat: {
           interval_minutes: 30,
           randomize: true,
@@ -50,6 +56,7 @@ const fallbackApi = {
           interval_max_minutes: 60,
           quiet_hours_start: 23,
           quiet_hours_end: 8,
+          debug: false,
         },
         tts: {},
       },
@@ -115,8 +122,11 @@ function el(id) {
   return document.getElementById(id);
 }
 
-function setNotice(message, kind = "info") {
+let noticeTimer = null;
+
+function setNotice(message, kind = "info", autoHideMs = 0) {
   const box = el("notice");
+  if (noticeTimer) { clearTimeout(noticeTimer); noticeTimer = null; }
   if (!message) {
     box.classList.add("hidden");
     return;
@@ -124,6 +134,9 @@ function setNotice(message, kind = "info") {
   box.textContent = message;
   box.dataset.kind = kind;
   box.classList.remove("hidden");
+  if (autoHideMs > 0) {
+    noticeTimer = setTimeout(() => { box.classList.add("hidden"); noticeTimer = null; }, autoHideMs);
+  }
 }
 
 function setDirty(value) {
@@ -170,11 +183,11 @@ function renderPersonaMenu() {
 function renderTuning(summary) {
   const s = summary || {};
   const sliders = [
-    { label: "Temperature",    key: "temperature",        min: 0, max: 2,    fmt: 2 },
-    { label: "Max Response",   key: "max_response_tokens", min: 0, max: 8192, fmt: 0 },
-    { label: "Freq Penalty",   key: "frequency_penalty",  min: 0, max: 2,    fmt: 2 },
-    { label: "Pres Penalty",   key: "presence_penalty",   min: 0, max: 2,    fmt: 2 },
-    { label: "Top P",          key: "top_p",              min: 0, max: 1,    fmt: 2 },
+    { label: "Temperature",    key: "temperature",        min: 0, max: 2,    fmt: 2, tip: "How creative vs predictable. 0.7–0.85 is the sweet spot. Above 1.0 gets chaotic fast" },
+    { label: "Max Response",   key: "max_response_tokens", min: 256, max: 32768, fmt: 0, tip: "Max reply length in tokens (~750 words per 1000). 2048–4096 is a good range — too high and replies get rambly" },
+    { label: "Freq Penalty",   key: "frequency_penalty",  min: 0, max: 2,    fmt: 2, tip: "Discourages repeating the same words. 0.3–0.5 works well — above 1.0 causes awkward word avoidance" },
+    { label: "Pres Penalty",   key: "presence_penalty",   min: 0, max: 2,    fmt: 2, tip: "Encourages new topics. 0.1–0.3 is natural — too high and the companion jumps topics mid-thought" },
+    { label: "Top P",          key: "top_p",              min: 0, max: 1,    fmt: 2, tip: "Word choice diversity. 0.95–1.0 is good. Lower values make responses safer but can feel flat" },
   ];
 
   let html = "";
@@ -184,7 +197,7 @@ function renderTuning(summary) {
     const ok = !isNaN(val);
     const pct = ok ? Math.min(100, Math.max(0, ((val - sl.min) / (sl.max - sl.min)) * 100)) : 0;
     const display = ok ? val.toFixed(sl.fmt) : "default";
-    html += `<div class="slider-row" data-min="${sl.min}" data-max="${sl.max}" data-fmt="${sl.fmt}">
+    html += `<div class="slider-row" data-key="${sl.key}" data-min="${sl.min}" data-max="${sl.max}" data-fmt="${sl.fmt}" title="${escapeHtml(sl.tip)}">
       <span class="slider-label">${escapeHtml(sl.label)}</span>
       <div class="slider-track">
         <div class="slider-fill" style="width:${pct}%"></div>
@@ -195,27 +208,40 @@ function renderTuning(summary) {
   }
 
   const reasoning = s.reasoning;
-  const effort = text(s.reasoning_effort, "default");
+  const effort = text(s.reasoning_effort, "");
   const showR = s.show_reasoning;
   const rounds = text(s.max_tool_rounds, "default");
+  const tail = text(s.context_budget?.recent_tail_exchanges, "2");
 
   html += `<div class="tuning-extras">
-    <div class="check-row">
-      <span class="check-box${reasoning ? " checked" : ""}">${reasoning ? "✓" : ""}</span>
-      <span class="check-label">Reasoning</span>
-    </div>
-    <span class="tuning-tag">${escapeHtml(effort)}</span>
-    <div class="check-row">
-      <span class="check-box${showR ? " checked" : ""}">${showR ? "✓" : ""}</span>
-      <span class="check-label">Show Reasoning</span>
-    </div>
-    <div class="check-row" style="margin-left:auto">
-      <span class="check-label" style="color:var(--text-secondary)">Max Tool Rounds</span>
-      <span class="tuning-tag">${escapeHtml(rounds)}</span>
-    </div>
+    <label class="check-label-inline" title="Let the model think step-by-step before answering. Uses more tokens but improves quality on complex tasks">
+      <input id="tuningReasoning" type="checkbox" ${reasoning ? "checked" : ""}>
+      Reasoning
+    </label>
+    <select id="tuningEffort" class="tuning-select" title="How hard the model thinks. High gives better answers but is slower and costs more. Some cheap models need this bumped up">
+      <option value="" ${effort === "" ? "selected" : ""}>Default</option>
+      <option value="low" ${effort === "low" ? "selected" : ""}>Low</option>
+      <option value="medium" ${effort === "medium" ? "selected" : ""}>Medium</option>
+      <option value="high" ${effort === "high" ? "selected" : ""}>High</option>
+    </select>
+    <label class="check-label-inline" title="Show the model's inner monologue in Telegram as an expandable blockquote. Fun for thinking models">
+      <input id="tuningShowReasoning" type="checkbox" ${showR ? "checked" : ""}>
+      Show Reasoning
+    </label>
+    <label class="tuning-inline-label" style="margin-left:auto" title="How many tool calls the model can chain per turn. Default 8 is good — higher lets it do more autonomously but takes longer">
+      Max Tool Rounds
+      <input id="tuningMaxRounds" class="tuning-inline-input" type="number" min="1" max="32" value="${escapeHtml(rounds)}">
+    </label>
+  </div>
+  <div class="tuning-extras">
+    <label class="tuning-inline-label" title="Message pairs kept word-for-word after summarization. 2–4 is good — keeps continuity without eating up context">
+      Recent Tail Exchanges
+      <input id="tuningTailExchanges" class="tuning-inline-input" type="number" min="1" max="10" value="${escapeHtml(tail)}">
+    </label>
   </div>`;
 
   el("tuningGrid").innerHTML = html;
+  wireTuningControls();
 }
 
 function renderStatus(status) {
@@ -492,6 +518,7 @@ function renderHeartbeat(summary) {
   el("hbQuietStart").value = text(hb.quiet_hours_start);
   el("hbQuietEnd").value = text(hb.quiet_hours_end);
   el("hbRandomize").checked = Boolean(hb.randomize);
+  el("hbDebug").checked = Boolean(hb.debug);
 }
 
 function syncTtsMode() {
@@ -512,6 +539,25 @@ function editableSnapshot() {
       model: el("identityModel").value,
       voice_notes: el("voiceNotes").value,
     },
+    provider: {
+      type: el("providerType").value,
+      model: el("providerModel").value,
+      max_context: el("maxContext").value,
+    },
+    model: {
+      temperature: readSliderValue("temperature"),
+      max_response_tokens: readSliderValue("max_response_tokens"),
+      frequency_penalty: readSliderValue("frequency_penalty"),
+      presence_penalty: readSliderValue("presence_penalty"),
+      top_p: readSliderValue("top_p"),
+      reasoning: Boolean(el("tuningReasoning")?.checked),
+      reasoning_effort: el("tuningEffort")?.value || "",
+      show_reasoning: Boolean(el("tuningShowReasoning")?.checked),
+      max_tool_rounds: el("tuningMaxRounds")?.value || "",
+    },
+    context_budget: {
+      recent_tail_exchanges: el("tuningTailExchanges")?.value || "",
+    },
     tts: {
       voice_description: el("ttsVoice").value,
       voice_sample: el("ttsSample").value,
@@ -530,6 +576,7 @@ function editableSnapshot() {
       quiet_hours_start: el("hbQuietStart").value,
       quiet_hours_end: el("hbQuietEnd").value,
       randomize: el("hbRandomize").checked,
+      debug: el("hbDebug").checked,
     },
   };
 }
@@ -539,6 +586,8 @@ function setEditableState(data) {
   [
     "identityModel",
     "voiceNotes",
+    "providerModel",
+    "maxContext",
     "ttsVoice",
     "ttsSampleText",
     "hbInterval",
@@ -546,8 +595,13 @@ function setEditableState(data) {
     "hbMax",
     "hbQuietStart",
     "hbQuietEnd",
+    "tuningMaxRounds",
+    "tuningTailExchanges",
   ].forEach((id) => {
     el(id).readOnly = !editable;
+  });
+  ["providerType", "tuningReasoning", "tuningEffort", "tuningShowReasoning", "hbDebug"].forEach((id) => {
+    el(id).disabled = !editable;
   });
   el("ttsSample").readOnly = true;
   el("hbRandomize").disabled = !editable;
@@ -562,14 +616,51 @@ function parseHeartbeatNumber(value) {
   return value === "" ? "" : Number(value);
 }
 
+function readSliderValue(key) {
+  const row = document.querySelector(`.slider-row[data-key="${key}"]`);
+  if (!row) return "";
+  const raw = row.querySelector(".slider-value")?.textContent || "";
+  const value = Number(raw);
+  if (Number.isNaN(value)) return "";
+  return row.dataset.fmt === "0" ? String(Math.round(value)) : value.toFixed(2);
+}
+
+function numberOrEmpty(value) {
+  return value === "" ? "" : Number(value);
+}
+
 function collectEditableChanges() {
   const current = editableSnapshot();
-  const original = state.originalEditable || { identity: {}, tts: {}, skills: {}, channels: {}, heartbeat: {} };
-  const changes = { identity: {}, tts: {}, skills: {}, channels: {}, heartbeat: {} };
+  const original = state.originalEditable || { identity: {}, provider: {}, model: {}, context_budget: {}, tts: {}, skills: {}, channels: {}, heartbeat: {} };
+  const changes = { identity: {}, provider: {}, model: {}, context_budget: {}, tts: {}, skills: {}, channels: {}, heartbeat: {} };
 
   for (const [key, value] of Object.entries(current.identity)) {
     if (value !== original.identity?.[key]) {
       changes.identity[key] = value;
+    }
+  }
+
+  for (const [key, value] of Object.entries(current.provider)) {
+    if (value !== original.provider?.[key]) {
+      changes.provider[key] = key === "max_context" ? numberOrEmpty(value) : value;
+    }
+  }
+
+  for (const [key, value] of Object.entries(current.model)) {
+    if (value !== original.model?.[key]) {
+      changes.model[key] = ["reasoning", "show_reasoning"].includes(key)
+        ? value
+        : ["max_response_tokens", "max_tool_rounds"].includes(key)
+          ? numberOrEmpty(value)
+          : ["temperature", "frequency_penalty", "presence_penalty", "top_p"].includes(key)
+            ? numberOrEmpty(value)
+            : value;
+    }
+  }
+
+  for (const [key, value] of Object.entries(current.context_budget)) {
+    if (value !== original.context_budget?.[key]) {
+      changes.context_budget[key] = numberOrEmpty(value);
     }
   }
 
@@ -593,7 +684,7 @@ function collectEditableChanges() {
 
   for (const [key, value] of Object.entries(current.heartbeat)) {
     if (value !== original.heartbeat?.[key]) {
-      changes.heartbeat[key] = key === "randomize" ? value : parseHeartbeatNumber(value);
+      changes.heartbeat[key] = ["randomize", "debug"].includes(key) ? value : parseHeartbeatNumber(value);
     }
   }
 
@@ -603,6 +694,9 @@ function collectEditableChanges() {
 function hasEditableChanges() {
   const changes = collectEditableChanges();
   return Object.keys(changes.identity).length > 0
+    || Object.keys(changes.provider).length > 0
+    || Object.keys(changes.model).length > 0
+    || Object.keys(changes.context_budget).length > 0
     || Object.keys(changes.tts).length > 0
     || Object.keys(changes.skills).length > 0
     || Object.keys(changes.channels).length > 0
@@ -631,6 +725,29 @@ function validateHeartbeatFields() {
   const hbMax = el("hbMax").value === "" ? null : Number(el("hbMax").value);
   if (hbMin !== null && hbMax !== null && hbMin > hbMax) {
     return "Heartbeat min interval cannot be greater than max interval.";
+  }
+  return "";
+}
+
+function validateProviderAndTuningFields() {
+  const maxContext = el("maxContext").value;
+  if (maxContext === "") return "Max Context must be set.";
+  const contextValue = Number(maxContext);
+  if (!Number.isInteger(contextValue) || contextValue < 1024 || contextValue > 1048576) {
+    return "Max Context must be a whole number between 1024 and 1048576.";
+  }
+
+  const numeric = [
+    ["tuningMaxRounds", "Max Tool Rounds", 1, 32],
+    ["tuningTailExchanges", "Recent Tail Exchanges", 1, 10],
+  ];
+  for (const [id, label, min, max] of numeric) {
+    const raw = el(id).value;
+    if (raw === "") return `${label} must be set.`;
+    const value = Number(raw);
+    if (!Number.isInteger(value) || value < min || value > max) {
+      return `${label} must be a whole number between ${min} and ${max}.`;
+    }
   }
   return "";
 }
@@ -739,6 +856,17 @@ function formatDiff(raw) {
   }).join("\n");
 }
 
+function wireTuningControls() {
+  ["tuningMaxRounds", "tuningTailExchanges"].forEach((id) => {
+    const node = el(id);
+    if (node) node.addEventListener("input", () => setDirty(hasEditableChanges()));
+  });
+  ["tuningReasoning", "tuningEffort", "tuningShowReasoning"].forEach((id) => {
+    const node = el(id);
+    if (node) node.addEventListener("change", () => setDirty(hasEditableChanges()));
+  });
+}
+
 function wireEvents() {
   el("personaPicker").addEventListener("click", () => {
     const menu = el("personaMenu");
@@ -768,6 +896,8 @@ function wireEvents() {
   [
     "identityModel",
     "voiceNotes",
+    "providerModel",
+    "maxContext",
     "ttsVoice",
     "ttsSampleText",
     "hbInterval",
@@ -778,7 +908,11 @@ function wireEvents() {
   ].forEach((id) => {
     el(id).addEventListener("input", () => setDirty(hasEditableChanges()));
   });
+  ["providerType"].forEach((id) => {
+    el(id).addEventListener("change", () => setDirty(hasEditableChanges()));
+  });
   el("hbRandomize").addEventListener("change", () => setDirty(hasEditableChanges()));
+  el("hbDebug").addEventListener("change", () => setDirty(hasEditableChanges()));
   el("ttsSamplePicker").addEventListener("click", async () => {
     if (!state.current || state.current.name === "__base__") return;
     const result = await api().pick_voice_sample(state.current.name, el("ttsSample").value || "");
@@ -814,6 +948,11 @@ function wireEvents() {
       setNotice(heartbeatError, "warning");
       return;
     }
+    const tuningError = validateProviderAndTuningFields();
+    if (tuningError) {
+      setNotice(tuningError, "warning");
+      return;
+    }
     const changes = collectEditableChanges();
     const preview = await api().preview_persona_save(state.current.name, changes);
     if (!preview.ok) {
@@ -842,9 +981,9 @@ function wireEvents() {
     setDirty(false);
     setCanUndo(Boolean(result.changed));
     if (result.changed && wasRunning) {
-      setNotice("Saved. Restart the persona for changes to take effect.", "warning");
+      setNotice("Saved. Restart the persona for changes to take effect.", "warning", NOTICE_WARNING_MS);
     } else {
-      setNotice(result.changed ? "Saved with backup." : "No changes to save.");
+      setNotice(result.changed ? "Saved with backup." : "No changes to save.", "info", NOTICE_INFO_MS);
     }
   });
   el("undoBtn").addEventListener("click", async () => {
@@ -865,9 +1004,9 @@ function wireEvents() {
     await loadPersona(state.current.name);
     setCanUndo(false);
     if (result.changed && wasRunning) {
-      setNotice("Restored. Restart the persona for changes to take effect.", "warning");
+      setNotice("Restored. Restart the persona for changes to take effect.", "warning", NOTICE_WARNING_MS);
     } else {
-      setNotice(result.changed ? "Restored latest backup." : "Nothing to restore.");
+      setNotice(result.changed ? "Restored latest backup." : "Nothing to restore.", "info", NOTICE_INFO_MS);
     }
   });
   el("pulseToggle").addEventListener("click", async () => {
@@ -964,9 +1103,9 @@ async function restoreBackup(path) {
   await loadPersona(persona);
   setCanUndo(Boolean(result.changed));
   if (result.changed && wasRunning) {
-    setNotice("Restored. Restart the persona for changes to take effect.", "warning");
+    setNotice("Restored. Restart the persona for changes to take effect.", "warning", NOTICE_WARNING_MS);
   } else {
-    setNotice(result.changed ? "Restored selected backup." : "Nothing to restore.");
+    setNotice(result.changed ? "Restored selected backup." : "Nothing to restore.", "info", NOTICE_INFO_MS);
   }
 }
 
@@ -993,9 +1132,16 @@ function wireSliders() {
     valEl.classList.remove("default");
   }
 
+  function finishSliderDrag() {
+    if (!active) return;
+    active = null;
+    setDirty(hasEditableChanges());
+  }
+
   document.addEventListener("mousedown", (e) => {
     const track = e.target.closest(".slider-track");
     if (!track) return;
+    if (state.current?.name === "__base__") return;
     const row = track.closest(".slider-row");
     if (!row) return;
     active = { row, track };
@@ -1008,11 +1154,12 @@ function wireSliders() {
     applySlider(active.row, pctFromEvent(e, active.track));
   });
 
-  document.addEventListener("mouseup", () => { active = null; });
+  document.addEventListener("mouseup", finishSliderDrag);
 
   document.addEventListener("touchstart", (e) => {
     const track = e.target.closest(".slider-track");
     if (!track) return;
+    if (state.current?.name === "__base__") return;
     const row = track.closest(".slider-row");
     if (!row) return;
     active = { row, track };
@@ -1024,7 +1171,55 @@ function wireSliders() {
     applySlider(active.row, pctFromEvent(e, active.track));
   }, { passive: true });
 
-  document.addEventListener("touchend", () => { active = null; });
+  document.addEventListener("touchend", finishSliderDrag);
+
+  document.addEventListener("click", (e) => {
+    const valEl = e.target.closest(".slider-value");
+    if (!valEl || valEl.dataset.editing) return;
+    if (state.current?.name === "__base__") return;
+    const row = valEl.closest(".slider-row");
+    if (!row) return;
+
+    const oldText = valEl.textContent;
+    const fmt = parseInt(row.dataset.fmt, 10);
+    const min = parseFloat(row.dataset.min);
+    const max = parseFloat(row.dataset.max);
+
+    const input = document.createElement("input");
+    input.type = "number";
+    input.className = "slider-edit";
+    input.value = oldText;
+    input.step = fmt === 0 ? "1" : "0.01";
+    input.min = row.dataset.min;
+    input.max = row.dataset.max;
+    valEl.replaceWith(input);
+    input.focus();
+    input.select();
+
+    function commit() {
+      const num = parseFloat(input.value);
+      const clamped = isNaN(num) ? min : Math.min(max, Math.max(min, num));
+      const pct = ((clamped - min) / (max - min)) * 100;
+
+      const span = document.createElement("span");
+      span.className = "slider-value";
+      span.textContent = clamped.toFixed(fmt);
+
+      const fill = row.querySelector(".slider-fill");
+      const handle = row.querySelector(".slider-handle");
+      fill.style.width = pct + "%";
+      handle.style.left = pct + "%";
+
+      input.replaceWith(span);
+      setDirty(hasEditableChanges());
+    }
+
+    input.addEventListener("blur", commit);
+    input.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter") { ev.preventDefault(); input.blur(); }
+      if (ev.key === "Escape") { input.value = oldText; input.blur(); }
+    });
+  });
 }
 
 function showConfirm(title, body, okLabel = "Confirm", okStyle = "danger") {

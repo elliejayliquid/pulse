@@ -491,7 +491,7 @@ label {
   letter-spacing: 0.08em;
 }
 
-input, textarea {
+input, textarea, select {
   width: 100%;
   margin-top: 6px;
   padding: 9px 11px;
@@ -499,13 +499,27 @@ input, textarea {
   border-radius: 7px;
   background: var(--surface);
   color: var(--text-primary);
-  resize: vertical;
   text-transform: none;
   letter-spacing: 0;
 }
 
-input:hover, textarea:hover {
+input, textarea {
+  resize: vertical;
+}
+
+select {
+  font: inherit;
+  cursor: pointer;
+  appearance: none;
+}
+
+input:hover, textarea:hover, select:hover {
   border-color: rgba(249, 115, 22, 0.32);
+}
+
+select:disabled {
+  cursor: default;
+  opacity: 0.5;
 }
 
 input[type="number"] {
@@ -766,6 +780,35 @@ textarea {
   gap: 0;
 }
 
+.tuning-select {
+  width: auto;
+  min-width: 96px;
+  margin-top: 0;
+  padding: 5px 8px;
+  border-radius: 6px;
+  font: 500 11px/1 var(--mono);
+}
+
+.tuning-inline-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-secondary);
+  font: 12px/1 var(--body);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.tuning-inline-input {
+  width: 64px;
+  margin-top: 0;
+  padding: 5px 8px;
+  border-radius: 6px;
+  background: var(--surface);
+  font: 500 12px/1 var(--mono);
+  text-align: center;
+}
+
 .slider-row {
   display: grid;
   grid-template-columns: 130px 1fr 56px;
@@ -824,10 +867,23 @@ textarea {
   font: 500 11px/1 var(--mono);
   color: var(--accent);
   text-align: right;
+  cursor: text;
 }
 
 .slider-value.default {
   color: var(--text-tertiary);
+}
+
+.slider-edit {
+  width: 56px;
+  margin-top: 0;
+  padding: 2px 4px;
+  border: 1px solid var(--accent-line);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--accent);
+  font: 500 11px/1 var(--mono);
+  text-align: right;
 }
 
 .tuning-extras {

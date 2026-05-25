@@ -80,9 +80,17 @@
         </button>
         <div class="section-body">
           <div class="field-grid three">
-            <label>Type<input id="providerType" type="text" readonly></label>
-            <label>Provider Model<input id="providerModel" type="text" readonly></label>
-            <label>Max Context<input id="maxContext" type="text" readonly></label>
+            <label title="Where the AI model runs — locally via llama.cpp or through a cloud API like OpenRouter">Type
+              <select id="providerType">
+                <option value="local">Local</option>
+                <option value="openrouter">OpenRouter</option>
+                <option value="openai">OpenAI</option>
+                <option value="anthropic">Anthropic</option>
+                <option value="custom">Custom</option>
+              </select>
+            </label>
+            <label title="The specific AI model to use, e.g. gpt-5.1 or claude-sonnet-4">Provider Model<input id="providerModel" type="text"></label>
+            <label title="How many tokens the model can see at once. Bigger isn't always better — tighter context means better attention and earlier summarization. 32k–65k is a good range">Max Context<input id="maxContext" type="number" min="1024" max="1048576"></label>
           </div>
           <div class="secret-list">
             <div class="secret-row">
@@ -133,6 +141,10 @@
             <label class="hb-toggle" title="Vary the interval between min and max instead of using a fixed interval">
               <input id="hbRandomize" type="checkbox">
               <span>Randomize interval</span>
+            </label>
+            <label class="hb-toggle" title="Show detailed heartbeat debug info in the console log">
+              <input id="hbDebug" type="checkbox">
+              <span>Debug logging</span>
             </label>
           </div>
           <div class="hb-group">
