@@ -27,6 +27,10 @@ body {
   font: 13px/1.5 var(--body);
 }
 
+body.modal-open {
+  overflow: hidden;
+}
+
 button, input, textarea {
   font: inherit;
 }
@@ -1032,6 +1036,10 @@ textarea {
   box-shadow: 0 24px 60px rgba(0, 0, 0, 0.6);
 }
 
+.backup-card {
+  width: min(640px, calc(100vw - 48px));
+}
+
 .modal-title {
   font-size: 16px;
   font-weight: 700;
@@ -1068,6 +1076,70 @@ textarea {
 .diff-hunk { color: var(--accent); opacity: 0.7; }
 .diff-add  { color: #22c55e; background: rgba(34, 197, 94, 0.08); display: inline-block; width: 100%; }
 .diff-del  { color: #ef4444; background: rgba(239, 68, 68, 0.08); display: inline-block; width: 100%; }
+
+.backup-list {
+  display: grid;
+  gap: 10px;
+  max-height: min(420px, 60vh);
+  overflow: auto;
+  overscroll-behavior: contain;
+  margin: 14px 0 22px;
+}
+
+.backup-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-raised);
+}
+
+.backup-info {
+  min-width: 0;
+}
+
+.backup-info strong,
+.backup-info span {
+  display: block;
+}
+
+.backup-info strong {
+  color: var(--text-primary);
+  font: 500 12px/1 var(--mono);
+  margin-bottom: 4px;
+}
+
+.backup-info span,
+.backup-empty {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.backup-item:hover {
+  border-color: rgba(249, 115, 22, 0.22);
+  background: #222228;
+}
+
+.backup-restore-btn {
+  flex: 0 0 auto;
+  padding: 8px 18px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text-secondary);
+  font: 600 12px/1 var(--body);
+  cursor: pointer;
+  transition: border-color 140ms ease, background 140ms ease, color 140ms ease;
+}
+
+.backup-restore-btn:hover {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+  color: var(--text-primary);
+}
 
 .modal-actions {
   display: flex;

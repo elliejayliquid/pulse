@@ -224,6 +224,7 @@
     <footer class="footer">
       <span id="filePath" class="file-path">Read-only Phase 1</span>
       <div>
+        <button id="backupsBtn" class="secondary-btn" type="button" disabled>Backups</button>
         <button id="undoBtn" class="secondary-btn" type="button" disabled>Undo</button>
         <button id="saveBtn" class="secondary-btn" type="button" disabled>Save</button>
         <button id="reloadBtn" class="primary-btn" type="button">Refresh</button>
@@ -238,6 +239,16 @@
       <div class="modal-actions">
         <button id="confirmOk" class="modal-btn danger" type="button">Confirm</button>
         <button id="confirmCancel" class="modal-btn ghost" type="button">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="backupsDialog" class="modal-overlay hidden">
+    <div class="modal-card backup-card">
+      <h2 class="modal-title">Backups</h2>
+      <div id="backupList" class="backup-list"></div>
+      <div class="modal-actions">
+        <button id="backupCloseBtn" class="modal-btn ghost" type="button">Close</button>
       </div>
     </div>
   </div>

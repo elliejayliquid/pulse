@@ -82,6 +82,20 @@ const fallbackApi = {
   async save_prefs() { return { ok: true }; },
   async preview_persona_save() { return { ok: false, error: "Run through pywebview to save." }; },
   async save_persona() { return { ok: false, error: "Run through pywebview to save." }; },
+  async list_backups() {
+    return {
+      ok: true,
+      backups: [
+        {
+          path: "gui_data/backups/kai/20260525_120000",
+          created_at: "2026-05-25T12:00:00Z",
+          reason: "pre-edit",
+          files: ["config.yaml", "persona.yaml"],
+        },
+      ],
+    };
+  },
+  async restore_backup() { return { ok: false, error: "Run through pywebview to restore backups." }; },
   async restore_last_backup() { return { ok: false, error: "Run through pywebview to undo." }; },
   async pick_voice_sample() { return { ok: false, error: "Run through pywebview to pick files." }; },
   async get_log_tail() { return "Run through pywebview to read logs."; },
@@ -122,6 +136,11 @@ function setCanUndo(value) {
   state.canUndo = Boolean(value);
   const isBase = state.current?.name === "__base__";
   el("undoBtn").disabled = isBase || !state.canUndo;
+}
+
+function setBackupState() {
+  const isBase = state.current?.name === "__base__";
+  el("backupsBtn").disabled = !state.current || isBase;
 }
 
 function text(value, fallback = "") {
@@ -266,6 +285,25 @@ function formatTimeAgo(iso) {
   if (diff < 60) return "just now";
   if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
   return `${Math.floor(diff / 3600)}h ${Math.floor((diff % 3600) / 60)}m ago`;
+}
+
+function formatBackupTime(iso) {
+  if (!iso) return "Unknown time";
+  const when = new Date(iso);
+  if (Number.isNaN(when.getTime())) return iso;
+  return when.toLocaleString([], {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function humanizeReason(reason) {
+  const map = { "pre-edit": "Before save", "pre-restore": "Before restore" };
+  if (!reason) return "Backup";
+  return map[reason] || reason.replace(/[-_]/g, " ").replace(/^\w/, (c) => c.toUpperCase());
 }
 
 function runtimeState(value, labels) {
@@ -617,6 +655,7 @@ async function loadPersona(name) {
   renderChannels(data.channels || []);
   renderProcessButton(data);
   setEditableState(data);
+  setBackupState();
   el("filePath").textContent = data.paths?.config
     ? `Editable safe fields: ${data.paths.config}`
     : "Safe edit mode";
@@ -717,6 +756,11 @@ function wireEvents() {
     if (!state.current) return;
     const result = await api().open_folder(state.current.name);
     if (!result.ok) setNotice(result.error || "Could not open folder.", "warning");
+  });
+  el("backupsBtn").addEventListener("click", openBackupsDialog);
+  el("backupCloseBtn").addEventListener("click", hideBackupsDialog);
+  el("backupsDialog").addEventListener("click", (e) => {
+    if (e.target === el("backupsDialog")) hideBackupsDialog();
   });
   document.querySelectorAll(".section-header").forEach((header) => {
     header.addEventListener("click", () => header.parentElement.classList.toggle("open"));
@@ -856,6 +900,74 @@ function wireEvents() {
     renderRuntime(state.current.status, state.current.summary || {});
     renderProcessButton(state.current);
   });
+}
+
+async function openBackupsDialog() {
+  if (!state.current || state.current.name === "__base__") return;
+  const list = el("backupList");
+  list.innerHTML = `<div class="backup-empty">Loading backups...</div>`;
+  el("backupsDialog").classList.remove("hidden");
+  document.body.classList.add("modal-open");
+
+  const result = await api().list_backups(state.current.name);
+  if (!result.ok) {
+    list.innerHTML = `<div class="backup-empty">${escapeHtml(result.error || "Could not list backups.")}</div>`;
+    return;
+  }
+  const backups = result.backups || [];
+  if (!backups.length) {
+    list.innerHTML = `<div class="backup-empty">No backups found for this persona.</div>`;
+    return;
+  }
+  list.innerHTML = backups.map((backup) => {
+    const files = Array.isArray(backup.files) ? backup.files.join(", ") : "";
+    const reason = humanizeReason(backup.reason);
+    return `<div class="backup-item">
+      <div class="backup-info">
+        <strong>${escapeHtml(formatBackupTime(backup.created_at))}</strong>
+        <span>${escapeHtml(reason)}${files ? " · " + escapeHtml(files) : ""}</span>
+      </div>
+      <button class="backup-restore-btn" type="button"
+        data-path="${escapeHtml(backup.path)}">Restore</button>
+    </div>`;
+  }).join("");
+  list.querySelectorAll(".backup-restore-btn").forEach((button) => {
+    button.addEventListener("click", () => restoreBackup(button.dataset.path));
+  });
+}
+
+function hideBackupsDialog() {
+  el("backupsDialog").classList.add("hidden");
+  document.body.classList.remove("modal-open");
+}
+
+async function restoreBackup(path) {
+  if (!state.current || !path) return;
+  hideBackupsDialog();
+  const dirtyNote = state.dirty
+    ? " Unsaved GUI edits will be discarded."
+    : "";
+  const ok = await showConfirm(
+    "Restore this backup?",
+    `This will restore the selected config backup for this persona. A safety backup will be created first.${dirtyNote}`,
+    "Restore",
+    "secondary"
+  );
+  if (!ok) return;
+  const wasRunning = currentPersonaIsRunning();
+  const persona = state.current.name;
+  const result = await api().restore_backup(persona, path);
+  if (!result.ok) {
+    setNotice(result.error || "Restore failed.", "warning");
+    return;
+  }
+  await loadPersona(persona);
+  setCanUndo(Boolean(result.changed));
+  if (result.changed && wasRunning) {
+    setNotice("Restored. Restart the persona for changes to take effect.", "warning");
+  } else {
+    setNotice(result.changed ? "Restored selected backup." : "Nothing to restore.");
+  }
 }
 
 function wireSliders() {
