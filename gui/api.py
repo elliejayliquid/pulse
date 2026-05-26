@@ -424,12 +424,16 @@ class PulseAPI:
         persona_dir = self.root if persona == "__base__" else self.personas_dir / persona
         if not persona_dir.is_dir():
             return {"ok": False, "error": f"Folder not found: {persona}"}
+        self._open_path(persona_dir)
+        return {"ok": True}
+
+    def _open_path(self, path: Path) -> None:
         if os.name == "nt":
-            os.startfile(str(persona_dir))
+            os.startfile(str(path))
         else:
             import subprocess as _sp
-            _sp.Popen(["xdg-open", str(persona_dir)])
-        return {"ok": True}
+            opener = "open" if sys.platform == "darwin" else "xdg-open"
+            _sp.Popen([opener, str(path)])
 
     # Preferences
 

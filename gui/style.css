@@ -1096,6 +1096,14 @@ textarea {
   font: 11px var(--mono);
 }
 
+.footer-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .modal-overlay {
   position: fixed;
   inset: 0;
@@ -1335,6 +1343,20 @@ textarea {
 }
 
 @media (max-width: 760px) {
+  .footer {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .file-path {
+    max-width: 100%;
+  }
+
+  .footer-actions {
+    justify-content: flex-start;
+  }
+
   .field-grid.three,
   .skills-grid,
   .runtime-grid {
