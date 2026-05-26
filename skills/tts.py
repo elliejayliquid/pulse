@@ -74,7 +74,26 @@ def clean_for_tts(text: str) -> str:
     return text.strip()
 
 
-def chunk_for_tts(text: str, max_chunk_chars: int = 300) -> list[str]:
+def clean_for_speak_tool(text: str) -> str:
+    """Clean companion-authored speak() text down to spoken words only.
+
+    Unlike the manual audio button, speak() should sound like a voice note,
+    not an audiobook reading of a roleplay message.  Asterisk/underscore
+    action blocks are removed instead of narrated.
+    """
+    if not text:
+        return text
+    text = _RE_EMOJI.sub('', text)
+    text = _RE_BOLD.sub(r'\1', text)
+    text = _RE_ITALIC_AST.sub('', text)
+    text = _RE_ITALIC_UND.sub('', text)
+    text = _RE_DOUBLE_COMMA.sub(',', text)
+    text = _RE_WHITESPACE.sub(' ', text)
+    return text.strip(" ,")
+
+
+def chunk_for_tts(text: str, max_chunk_chars: int = 300,
+                  cleaner=clean_for_tts) -> list[str]:
     """Split text into TTS-friendly chunks.
 
     Strategy:
@@ -84,7 +103,9 @@ def chunk_for_tts(text: str, max_chunk_chars: int = 300) -> list[str]:
       3. If a single sentence still exceeds the limit, split at the last
          comma or space before the limit (graceful fallback)
 
-    Each chunk is cleaned via clean_for_tts() before being returned.
+    Each chunk is cleaned before being returned.  The default cleaner keeps
+    roleplay narration for the manual audio button; speak() passes a stricter
+    cleaner that strips stage directions from companion-authored voice notes.
     Empty chunks (e.g. pure-emoji paragraphs) are dropped.
     """
     chunks = []
@@ -147,7 +168,7 @@ def chunk_for_tts(text: str, max_chunk_chars: int = 300) -> list[str]:
     # Clean and filter
     result = []
     for chunk in chunks:
-        cleaned = clean_for_tts(chunk)
+        cleaned = cleaner(chunk)
         if cleaned:
             result.append(cleaned)
             
@@ -203,6 +224,10 @@ class TTSSkill(BaseSkill):
                         "note feels more natural or personal — a warm greeting, a reaction, "
                         "something playful, or a moment that deserves more than text. "
                         "Keep it concise — voice messages should feel spontaneous, not like a speech. "
+                        "Put only the exact words to speak in text: no roleplay actions, "
+                        "stage directions, markdown, emoji, or text in asterisks. Put tone "
+                        "and delivery notes in emotion instead. Aim for 2-4 short sentences "
+                        "unless the user explicitly asks for a longer voice note. "
                         "You MUST call this function — never write [speak] as text."
                     ),
                     "parameters": {
@@ -210,7 +235,10 @@ class TTSSkill(BaseSkill):
                         "properties": {
                             "text": {
                                 "type": "string",
-                                "description": "What to say aloud. Write naturally, as you'd actually speak."
+                                "description": (
+                                    "Exact words to say aloud. No roleplay actions, stage "
+                                    "directions, markdown, emoji, or asterisk text."
+                                )
                             },
                             "emotion": {
                                 "type": "string",
@@ -242,38 +270,50 @@ class TTSSkill(BaseSkill):
 
         engine = _get_engine()
 
-        # Clean ONLY the copy we hand to the engine. The original `text` keeps
-        # its asterisks/markdown so conversation history and the return value
-        # show what the companion actually wrote.
-        cleaned = clean_for_tts(text)
+        # speak() is companion-authored audio, so strip roleplay/stage
+        # directions and chunk longer notes.  The manual audio button uses the
+        # looser audiobook-style cleaner for existing written replies.
+        chunks = chunk_for_tts(text, cleaner=clean_for_speak_tool)
+        if not chunks:
+            return "Nothing speakable after removing roleplay/stage directions."
+        spoken_text = " ".join(chunks)
 
         # execute() runs in a worker thread (via asyncio.to_thread in engine),
         # so asyncio.run() is safe here — no event loop in this thread.
         import asyncio
         try:
-            ogg_path = asyncio.run(engine.speak(
-                text=cleaned,
-                voice_description=self.voice_description,
-                emotion=emotion,
-                ref_audio_path=self.voice_sample,
-                ref_text=self.voice_sample_text,
-            ))
+            if len(chunks) == 1:
+                ogg_path = asyncio.run(engine.speak(
+                    text=chunks[0],
+                    voice_description=self.voice_description,
+                    emotion=emotion,
+                    ref_audio_path=self.voice_sample,
+                    ref_text=self.voice_sample_text,
+                ))
+            else:
+                ogg_path = asyncio.run(engine.speak_chunked(
+                    chunks=chunks,
+                    voice_description=self.voice_description,
+                    emotion=emotion,
+                    ref_audio_path=self.voice_sample,
+                    ref_text=self.voice_sample_text,
+                ))
         except Exception as e:
             logger.error(f"[TTS] Generation failed: {e}", exc_info=True)
             return f"Voice generation failed: {e}"
 
         # Queue for Telegram to pick up (FIFO — multiple calls per turn allowed).
-        # Store ORIGINAL text so conversation history reflects intent, not the
-        # TTS-cleaned version.
-        self.pending_voices.append((ogg_path, text))
+        # Store the spoken transcript so heartbeat history remembers what was
+        # actually heard, not stripped stage directions.
+        self.pending_voices.append((ogg_path, spoken_text))
 
         mode = "clone" if self.clone_mode else "design"
         logger.info(
-            f"[TTS/{mode}] Queued voice message ({len(self.pending_voices)} in queue): {text[:50]}..."
+            f"[TTS/{mode}] Queued voice message ({len(self.pending_voices)} in queue, {len(chunks)} chunks): {spoken_text[:50]}..."
         )
         #return f"Voice message generated. The listener will hear you say: \"{text}\""
         #return "Voice message delivered. No need to repeat or rephrase in text — your voice carries it."
-        return f"Voice message generated & delivered. The listener will hear you say: \"{text}\". No need to repeat or rephrase this in text — your voice carries it."
+        return f"Voice message generated & delivered. The listener will hear you say: \"{spoken_text}\". No need to repeat or rephrase this in text — your voice carries it."
 
     def synthesize(self, text: str, emotion: str = "") -> Path | None:
         """Generate a voice clip on demand without queuing.

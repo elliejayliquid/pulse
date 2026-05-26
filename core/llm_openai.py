@@ -16,7 +16,7 @@ from typing import Optional
 
 from openai import OpenAI, APIError, APIConnectionError
 
-from core.llm import PulseResponse, strip_think_tags, detect_tool_loop
+from core.llm import PulseResponse, strip_think_tags, detect_tool_loop, extend_tools_unique
 
 logger = logging.getLogger(__name__)
 
@@ -271,7 +271,7 @@ class OpenAIResponsesClient:
                     if fc.name == "search_tools" and hasattr(skill_registry, 'search_tools'):
                         found_tools, result = skill_registry.search_tools(args.get("query", ""))
                         if found_tools:
-                            tools.extend(found_tools)
+                            extend_tools_unique(tools, found_tools)
                     else:
                         result = skill_registry.execute(fc.name, args)
                     

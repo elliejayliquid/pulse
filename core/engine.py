@@ -557,6 +557,19 @@ class PulseEngine:
         })
         return self.context.save_conversation(history)
 
+    @staticmethod
+    def _is_voice_delivery_meta(response: PulseResponse | None) -> bool:
+        """True when the final heartbeat notification only describes speak()."""
+        if not response or response.action != "notify" or not response.message:
+            return False
+        msg = response.message.strip().lower()
+        return (
+            msg.startswith("voice message sent")
+            or msg.startswith("voice sent")
+            or msg.startswith("sent a voice")
+            or msg.startswith("i sent a voice")
+        )
+
     async def _dispatch(self, response: PulseResponse) -> int | None:
         """Route a response to the appropriate channel."""
         tg_msg_id = None
@@ -971,6 +984,10 @@ class PulseEngine:
 
             if text:
                 response = PulseResponse.from_llm_output(text)
+                if voice_text and self._is_voice_delivery_meta(response):
+                    logger.info("Suppressing heartbeat voice-delivery meta notification.")
+                    response.action = "silent"
+                    response.message = ""
                 if self._heartbeat_debug:
                     await self._send_heartbeat_debug(
                         response, tools_used, int(elapsed)

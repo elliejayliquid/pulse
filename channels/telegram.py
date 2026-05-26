@@ -43,6 +43,18 @@ from channels.base import Channel
 logger = logging.getLogger(__name__)
 
 
+def _voice_duration_seconds(ogg_path: Path) -> int | None:
+    """Best-effort duration hint for Telegram voice uploads."""
+    try:
+        import soundfile as sf
+        info = sf.info(str(ogg_path))
+        if info.samplerate and info.frames:
+            return max(1, round(info.frames / info.samplerate))
+    except Exception as e:
+        logger.debug(f"Could not infer voice duration for {ogg_path}: {e}")
+    return None
+
+
 class TelegramChannel(Channel):
     """Bidirectional Telegram bot channel."""
 
@@ -301,17 +313,30 @@ class TelegramChannel(Channel):
         if not self.app or not self.chat_id:
             logger.warning("Telegram: no chat_id yet. User needs to /start the bot first.")
             return
+        if not ogg_path.exists() or ogg_path.stat().st_size <= 0:
+            logger.error(f"Skipping empty/missing voice file: {ogg_path}")
+            try:
+                ogg_path.unlink()
+            except Exception:
+                pass
+            return
+        duration = _voice_duration_seconds(ogg_path)
         for attempt in range(1, 4):
             try:
+                duration_kwargs = {"duration": duration} if duration else {}
                 with open(ogg_path, "rb") as f:
                     await self.app.bot.send_voice(
                         chat_id=self.chat_id,
-                        voice=f,
+                        voice=InputFile(f, filename=ogg_path.name),
+                        **duration_kwargs,
                         read_timeout=30,
                         write_timeout=60,
                         connect_timeout=15,
                         pool_timeout=15,
                     )
+                size_kb = ogg_path.stat().st_size / 1024
+                duration_label = f", {duration}s" if duration else ""
+                logger.info(f"Telegram voice message sent: {ogg_path.name} ({size_kb:.0f}KB{duration_label})")
                 break
             except Exception as e:
                 if attempt < 3:
@@ -484,16 +509,29 @@ class TelegramChannel(Channel):
         The OGG file is re-opened for each attempt because the file
         handle is consumed by the upload.
         """
+        if not ogg_path.exists() or ogg_path.stat().st_size <= 0:
+            logger.error(f"Skipping empty/missing voice file: {ogg_path}")
+            try:
+                ogg_path.unlink()
+            except Exception:
+                pass
+            return
+        duration = _voice_duration_seconds(ogg_path)
         for attempt in range(1, retries + 1):
             try:
+                duration_kwargs = {"duration": duration} if duration else {}
                 with open(ogg_path, "rb") as f:
                     await message.reply_voice(
-                        voice=f,
+                        voice=InputFile(f, filename=ogg_path.name),
+                        **duration_kwargs,
                         read_timeout=30,
                         write_timeout=60,
                         connect_timeout=15,
                         pool_timeout=15,
                     )
+                size_kb = ogg_path.stat().st_size / 1024
+                duration_label = f", {duration}s" if duration else ""
+                logger.info(f"Telegram voice reply sent: {ogg_path.name} ({size_kb:.0f}KB{duration_label})")
                 break
             except Exception as e:
                 if attempt < retries:

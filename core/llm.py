@@ -22,6 +22,32 @@ from openai import OpenAI, APIConnectionError
 logger = logging.getLogger(__name__)
 
 
+def tool_definition_name(tool: dict) -> str:
+    """Return the function name from an OpenAI-format tool definition."""
+    return tool.get("function", {}).get("name", "")
+
+
+def extend_tools_unique(tools: list[dict], new_tools: list[dict]) -> list[dict]:
+    """Append tool definitions by name, skipping duplicates.
+
+    Some providers reject duplicate function definitions with a hard 400.
+    This can happen when search_tools is called more than once and two
+    searches return the same on-demand skill.
+    """
+    existing = {tool_definition_name(tool) for tool in tools}
+    added = []
+    for tool in new_tools:
+        name = tool_definition_name(tool)
+        if not name or name in existing:
+            if name:
+                logger.debug(f"Skipping duplicate tool definition: {name}")
+            continue
+        tools.append(tool)
+        added.append(tool)
+        existing.add(name)
+    return added
+
+
 def extract_think_content(text: str) -> str:
     """Pull out the reasoning content from `<think>...</think>` blocks.
 
@@ -539,7 +565,7 @@ class LLMClient:
                     if func_name == "search_tools" and hasattr(skill_registry, 'search_tools'):
                         found_tools, result = skill_registry.search_tools(args.get("query", ""))
                         if found_tools:
-                            tools.extend(found_tools)
+                            extend_tools_unique(tools, found_tools)
                     else:
                         result = skill_registry.execute(func_name, args)
 

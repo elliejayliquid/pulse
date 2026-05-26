@@ -15,7 +15,13 @@ from typing import Optional
 
 from anthropic import Anthropic, APIConnectionError, APIStatusError, InternalServerError
 
-from core.llm import PulseResponse, extract_think_content, strip_think_tags, detect_tool_loop
+from core.llm import (
+    PulseResponse,
+    extract_think_content,
+    strip_think_tags,
+    detect_tool_loop,
+    extend_tools_unique,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -413,8 +419,8 @@ class AnthropicClient:
                     if func_name == "search_tools" and hasattr(skill_registry, 'search_tools'):
                         found_tools, result = skill_registry.search_tools(args.get("query", ""))
                         if found_tools:
-                            tools.extend(found_tools)
-                            anthropic_tools.extend(_openai_tools_to_anthropic(found_tools))
+                            added_tools = extend_tools_unique(tools, found_tools)
+                            anthropic_tools.extend(_openai_tools_to_anthropic(added_tools))
                     else:
                         result = skill_registry.execute(func_name, args)
 
