@@ -26,6 +26,9 @@ def test_config_editor_preview_and_save():
             """name: Demo
 user_name: Lena
 model: "Old Model"
+traits:
+  - careful
+  - playful
 
 system_prompt: |
   Keep this block.
@@ -108,7 +111,11 @@ channels:
         api = PulseAPI(root)
         changes = {
             "identity": {
+                "name": "Demo Updated",
+                "user_name": "Lena Updated",
                 "model": "New Model",
+                "system_prompt": "Keep this updated block.\nStay kind.",
+                "traits": ["playful", "patient", "Playful", ""],
                 "voice_notes": "Line one.\nLine two.",
             },
             "tts": {
@@ -177,9 +184,14 @@ channels:
         assert result["backup"]
 
         persona_text = (persona_dir / "persona.yaml").read_text(encoding="utf-8")
+        assert 'name: "Demo Updated"' in persona_text
+        assert 'user_name: "Lena Updated"' in persona_text
         assert 'model: "New Model"' in persona_text
+        assert 'traits:\n  - "playful"\n  - "patient"' in persona_text
+        assert persona_text.count("playful") == 1
         assert "system_prompt: |" in persona_text
-        assert "  Keep this block." in persona_text
+        assert "  Keep this updated block." in persona_text
+        assert "  Stay kind." in persona_text
         assert "voice_notes: |" in persona_text
         assert "  Line one." in persona_text
 
@@ -244,12 +256,6 @@ def test_config_editor_rejects_unknown_fields():
         (persona_dir / "config.yaml").write_text("tts: {}\nskills:\n  tts:\n    enabled: true\n", encoding="utf-8")
 
         api = PulseAPI(root)
-        result = api.preview_persona_save("demo", {
-            "identity": {"system_prompt": "Nope."},
-        })
-        assert result["ok"] is False
-        assert "Unsupported field" in result["error"]
-
         result = api.preview_persona_save("demo", {
             "heartbeat": {"quiet_hours_start": 24},
         })
@@ -518,6 +524,11 @@ def test_writer_formats_floats():
     assert '"0.85"' not in _format_field("temperature", 0.85, 2)
 
 
+def test_writer_formats_lists():
+    assert _format_field("traits", ["careful", "warm"], 0) == 'traits:\n  - "careful"\n  - "warm"'
+    assert _format_field("traits", [], 0) == "traits: []"
+
+
 def test_writer_special_chars_json_encoded():
     updated = _set_top_level_field("", "model", 'A "quoted": value # not comment')
     assert updated == 'model: "A \\"quoted\\": value # not comment"\n'
@@ -576,6 +587,7 @@ if __name__ == "__main__":
     test_writer_empty_string_value()
     test_writer_formats_numbers_and_booleans()
     test_writer_formats_floats()
+    test_writer_formats_lists()
     test_writer_special_chars_json_encoded()
     test_writer_trailing_newline_stable()
     test_writer_same_value_round_trip_no_diff()

@@ -867,6 +867,62 @@ textarea {
   background: rgba(249, 115, 22, 0.16);
 }
 
+#traits .chip {
+  cursor: pointer;
+}
+
+.chip-editing {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.chip-edit {
+  min-width: 120px;
+  max-width: 300px;
+  padding: 4px 8px;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  outline: none;
+  background: var(--surface);
+  color: var(--text-primary);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.chip-edit:focus {
+  box-shadow: 0 0 0 2px rgba(249, 115, 22, 0.25);
+}
+
+.chip-cancel,
+.chip-delete {
+  padding: 2px 4px;
+  border: 0;
+  background: transparent;
+  color: var(--text-tertiary);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.chip-cancel {
+  font-size: 14px;
+}
+
+.chip-delete {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.chip-cancel:hover {
+  color: var(--text-primary);
+}
+
+.chip-delete:hover {
+  color: var(--danger);
+}
+
 .secret-list {
   display: grid;
   gap: 8px;
@@ -1247,6 +1303,10 @@ textarea {
   box-shadow: 0 24px 60px rgba(0, 0, 0, 0.6);
 }
 
+.modal-card.diff-card {
+  width: min(760px, calc(100vw - 48px));
+}
+
 .backup-card {
   width: min(640px, calc(100vw - 48px));
 }
@@ -1273,7 +1333,7 @@ textarea {
   margin-top: 10px;
   font-size: 11px;
   line-height: 1.45;
-  max-height: 220px;
+  max-height: min(520px, 58vh);
   overflow: auto;
   white-space: pre-wrap;
   color: var(--text-secondary);

@@ -1,6 +1,5 @@
 const NOTICE_INFO_MS = 6000;
 const NOTICE_WARNING_MS = 7000;
-
 const PROVIDER_LABELS = {
   openrouter: "OpenRouter API Key",
   openai: "OpenAI API Key",
@@ -29,6 +28,7 @@ const state = {
   dirty: false,
   canUndo: false,
   originalEditable: null,
+  currentTraits: [],
 };
 
 const fallbackApi = {
@@ -610,11 +610,158 @@ function renderIdentity(data) {
   el("identityModel").value = text(identity.model || summary.model_display);
   el("systemPrompt").value = text(identity.system_prompt);
   el("voiceNotes").value = text(identity.voice_notes || identity.relationship_context);
-  const traits = Array.isArray(identity.traits) ? identity.traits : [];
-  el("traits").innerHTML = (traits.length
-    ? traits.map((trait) => `<span class="chip">${escapeHtml(trait)}</span>`).join("")
-    : `<span class="chip">No traits listed</span>`)
-    + `<span class="chip-add">+ add</span>`;
+  state.currentTraits = Array.isArray(identity.traits) ? [...identity.traits] : [];
+  renderTraits();
+}
+
+function renderTraits() {
+  const container = el("traits");
+  const editable = Boolean(state.current?.name && state.current.name !== "__base__");
+  container.innerHTML = "";
+
+  if (!state.currentTraits.length && !editable) {
+    const empty = document.createElement("span");
+    empty.className = "chip";
+    empty.textContent = "No traits listed";
+    container.appendChild(empty);
+    return;
+  }
+
+  state.currentTraits.forEach((trait, index) => {
+    const chip = document.createElement("span");
+    chip.className = "chip";
+    chip.textContent = trait;
+    if (editable) chip.addEventListener("click", () => startTraitEdit(index));
+    container.appendChild(chip);
+  });
+
+  if (editable) {
+    const add = document.createElement("span");
+    add.className = "chip-add";
+    add.textContent = "+ add";
+    add.addEventListener("click", startTraitAdd);
+    container.appendChild(add);
+  }
+}
+
+function markDirtyIfChanged() {
+  setDirty(hasEditableChanges());
+}
+
+function traitExists(text, ignoreIndex = -1) {
+  const normalized = text.trim().toLowerCase();
+  return state.currentTraits.some((trait, index) => (
+    index !== ignoreIndex && trait.trim().toLowerCase() === normalized
+  ));
+}
+
+function startTraitEdit(index) {
+  if (state.current?.name === "__base__") return;
+  const container = el("traits");
+  const chip = container.children[index];
+  if (!chip) return;
+
+  const wrapper = document.createElement("span");
+  wrapper.className = "chip-editing";
+
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "chip-edit";
+  input.value = state.currentTraits[index] || "";
+  input.maxLength = 200;
+
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "chip-cancel";
+  cancel.textContent = "×";
+  cancel.title = "Cancel edit";
+  cancel.addEventListener("click", () => renderTraits());
+
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "chip-delete";
+  remove.textContent = "Delete";
+  remove.title = "Delete trait";
+  remove.addEventListener("click", () => {
+    state.currentTraits.splice(index, 1);
+    renderTraits();
+    markDirtyIfChanged();
+  });
+
+  wrapper.appendChild(input);
+  wrapper.appendChild(cancel);
+  wrapper.appendChild(remove);
+  chip.replaceWith(wrapper);
+  input.focus();
+  input.select();
+
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      commitTraitEdit(index, input.value);
+    }
+    if (e.key === "Escape") {
+      renderTraits();
+    }
+  });
+  input.addEventListener("blur", (e) => {
+    if (e.relatedTarget === cancel || e.relatedTarget === remove) return;
+    commitTraitEdit(index, input.value);
+  });
+}
+
+function startTraitAdd() {
+  if (state.current?.name === "__base__") return;
+  const container = el("traits");
+  const addBtn = container.querySelector(".chip-add");
+  if (!addBtn) return;
+
+  const wrapper = document.createElement("span");
+  wrapper.className = "chip-editing";
+
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "chip-edit";
+  input.placeholder = "new trait";
+  input.maxLength = 200;
+
+  wrapper.appendChild(input);
+  addBtn.before(wrapper);
+  input.focus();
+
+  let committed = false;
+  function commit() {
+    if (committed) return;
+    committed = true;
+    const text = input.value.trim();
+    if (text && !traitExists(text)) {
+      state.currentTraits.push(text);
+      markDirtyIfChanged();
+    }
+    renderTraits();
+  }
+
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      commit();
+    }
+    if (e.key === "Escape") {
+      renderTraits();
+    }
+  });
+  input.addEventListener("blur", commit);
+}
+
+function commitTraitEdit(index, value) {
+  const text = value.trim();
+  if (text && !traitExists(text, index)) {
+    state.currentTraits[index] = text;
+  } else if (!text) {
+    state.currentTraits.splice(index, 1);
+  }
+  renderTraits();
+  markDirtyIfChanged();
 }
 
 function renderHero(data) {
@@ -713,8 +860,12 @@ function syncTtsMode() {
 function editableSnapshot() {
   return {
     identity: {
+      name: el("identityName").value,
+      user_name: el("identityUser").value,
       model: el("identityModel").value,
+      system_prompt: el("systemPrompt").value,
       voice_notes: el("voiceNotes").value,
+      traits: [...state.currentTraits],
     },
     provider: {
       type: el("providerType").value,
@@ -774,7 +925,10 @@ function editableSnapshot() {
 function setEditableState(data) {
   const editable = data?.name && data.name !== "__base__";
   [
+    "identityName",
+    "identityUser",
     "identityModel",
+    "systemPrompt",
     "voiceNotes",
     "providerModel",
     "providerBaseUrl",
@@ -840,7 +994,11 @@ function collectEditableChanges() {
   const changes = { identity: {}, provider: {}, server: {}, model: {}, context_budget: {}, tts: {}, skills: {}, channels: {}, heartbeat: {} };
 
   for (const [key, value] of Object.entries(current.identity)) {
-    if (value !== original.identity?.[key]) {
+    if (key === "traits") {
+      if (JSON.stringify(value) !== JSON.stringify(original.identity?.traits || [])) {
+        changes.identity.traits = value;
+      }
+    } else if (value !== original.identity?.[key]) {
       changes.identity[key] = value;
     }
   }
@@ -1073,9 +1231,8 @@ async function previewCurrentSave() {
 function savePreviewBody(preview, intro) {
   const changed = preview.changes.map((item) => item.file).join(", ");
   const diff = preview.diff || "";
-  const shownDiff = diff.length > 1200 ? diff.slice(0, 1200) + "\n..." : diff;
   return `${intro} <strong>${escapeHtml(changed)}</strong>. A backup will be created first.`
-    + (shownDiff ? `<pre class="diff-block">${formatDiff(shownDiff)}</pre>` : "");
+    + (diff ? `<pre class="diff-block">${formatDiff(diff)}</pre>` : "");
 }
 
 async function applyCurrentSave(changes, { notice = true } = {}) {
@@ -1282,7 +1439,10 @@ function wireEvents() {
     header.addEventListener("click", () => header.parentElement.classList.toggle("open"));
   });
   [
+    "identityName",
+    "identityUser",
     "identityModel",
+    "systemPrompt",
     "voiceNotes",
     "providerModel",
     "providerBaseUrl",
@@ -1606,14 +1766,17 @@ function showConfirm(title, body, okLabel = "Confirm", okStyle = "danger") {
   return new Promise((resolve) => {
     el("confirmTitle").textContent = title;
     el("confirmBody").innerHTML = body;
+    const dialogCard = el("confirmDialog").querySelector(".modal-card");
     const okBtn = el("confirmOk");
     const secondaryBtn = el("confirmSecondary");
     okBtn.textContent = okLabel;
     okBtn.className = "modal-btn " + okStyle;
     secondaryBtn.classList.add("hidden");
+    dialogCard.classList.toggle("diff-card", body.includes("diff-block"));
     el("confirmDialog").classList.remove("hidden");
     function cleanup(result) {
       el("confirmDialog").classList.add("hidden");
+      dialogCard.classList.remove("diff-card");
       okBtn.replaceWith(okBtn.cloneNode(true));
       secondaryBtn.replaceWith(secondaryBtn.cloneNode(true));
       el("confirmCancel").replaceWith(el("confirmCancel").cloneNode(true));
@@ -1628,6 +1791,7 @@ function showChoice(title, body, { okLabel, okStyle = "secondary", secondaryLabe
   return new Promise((resolve) => {
     el("confirmTitle").textContent = title;
     el("confirmBody").innerHTML = body;
+    const dialogCard = el("confirmDialog").querySelector(".modal-card");
     const okBtn = el("confirmOk");
     const secondaryBtn = el("confirmSecondary");
     const cancelBtn = el("confirmCancel");
@@ -1636,9 +1800,11 @@ function showChoice(title, body, { okLabel, okStyle = "secondary", secondaryLabe
     secondaryBtn.textContent = secondaryLabel;
     secondaryBtn.className = "modal-btn secondary";
     cancelBtn.textContent = cancelLabel;
+    dialogCard.classList.toggle("diff-card", body.includes("diff-block"));
     el("confirmDialog").classList.remove("hidden");
     function cleanup(result) {
       el("confirmDialog").classList.add("hidden");
+      dialogCard.classList.remove("diff-card");
       okBtn.replaceWith(okBtn.cloneNode(true));
       secondaryBtn.replaceWith(secondaryBtn.cloneNode(true));
       cancelBtn.replaceWith(cancelBtn.cloneNode(true));

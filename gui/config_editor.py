@@ -13,8 +13,12 @@ from gui.backup import BackupManager, IDENTITY_FILES
 
 
 IDENTITY_FIELDS = {
+    "name": "Companion Name",
+    "user_name": "User Name",
     "model": "Display Model Name",
+    "system_prompt": "System Prompt",
     "voice_notes": "Voice Notes",
+    "traits": "Traits",
 }
 
 TTS_FIELDS = {
@@ -233,11 +237,15 @@ class ConfigEditor:
             )
             raise ValueError(f"Unsupported field(s): {', '.join(unknown)}")
 
+        normalized_identity = {}
+        for key, value in identity.items():
+            if key == "traits":
+                normalized_identity[key] = self._clean_traits(value)
+            else:
+                normalized_identity[key] = self._clean_text(value, IDENTITY_FIELDS[key])
+
         return {
-            "identity": {
-                key: self._clean_text(value, IDENTITY_FIELDS[key])
-                for key, value in identity.items()
-            },
+            "identity": normalized_identity,
             "tts": {
                 key: self._clean_text(value, TTS_FIELDS[key])
                 for key, value in tts.items()
@@ -282,6 +290,30 @@ class ConfigEditor:
         if len(value) > 20000:
             raise ValueError(f"{label} is too long.")
         return value.replace("\r\n", "\n").replace("\r", "\n")
+
+    def _clean_traits(self, value: Any) -> list[str]:
+        if not isinstance(value, list):
+            raise ValueError("Traits must be a list.")
+        if len(value) > 20:
+            raise ValueError("Too many traits (max 20).")
+        cleaned = []
+        seen = set()
+        for item in value:
+            if not isinstance(item, str):
+                raise ValueError("Each trait must be text.")
+            text = item.replace("\r\n", "\n").replace("\r", "\n").strip()
+            if "\x00" in text:
+                raise ValueError("Trait cannot contain null bytes.")
+            if not text:
+                continue
+            if len(text) > 200:
+                raise ValueError(f"Trait too long (max 200 chars): {text[:30]}...")
+            lower = text.lower()
+            if lower in seen:
+                continue
+            seen.add(lower)
+            cleaned.append(text)
+        return cleaned
 
     def _clean_provider_value(self, key: str, value: Any) -> str | int:
         label = PROVIDER_FIELDS[key]
@@ -667,6 +699,14 @@ def _indent_of(line: str) -> int:
 
 def _format_field(key: str, value: Any, indent: int, block_indicator: str | None = None) -> str:
     prefix = " " * indent
+    if isinstance(value, list):
+        if not value:
+            return f"{prefix}{key}: []"
+        items = "\n".join(
+            f"{prefix}  - {json.dumps(item, ensure_ascii=False)}"
+            for item in value
+        )
+        return f"{prefix}{key}:\n{items}"
     if type(value) is bool:
         return f"{prefix}{key}: {'true' if value else 'false'}"
     if type(value) is int:
