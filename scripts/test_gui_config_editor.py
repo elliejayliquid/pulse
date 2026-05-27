@@ -37,12 +37,24 @@ voice_notes: |
         )
         (persona_dir / "config.yaml").write_text(
             """# Persona config overlay
+server:
+  llama_cpp_dir: "C:\\llama-cpp"
+  models_dir: "C:\\llama-cpp\\models"
+  host: "127.0.0.1"
+  port: 8012
+  gpu_layers: -1
+  flash_attention: true
+  parallel: 1
+
 provider:
   type: "openrouter"
   model: "old/provider"
   max_context: 131072
 
 model:
+  model_file: "old.gguf"
+  mmproj_file: ""
+  max_context: 16384
   temperature: 0.7
   max_response_tokens: 2048
   frequency_penalty: 0.3
@@ -109,7 +121,19 @@ channels:
                 "model": "gpt-5.1",
                 "max_context": 262144,
             },
+            "server": {
+                "llama_cpp_dir": "D:/llama.cpp",
+                "models_dir": "D:/models",
+                "host": "127.0.0.1",
+                "port": 8013,
+                "gpu_layers": 35,
+                "flash_attention": False,
+                "parallel": 2,
+            },
             "model": {
+                "model_file": "new-model.gguf",
+                "mmproj_file": "mmproj.gguf",
+                "max_context": 32768,
                 "temperature": 0.85,
                 "max_response_tokens": 4096,
                 "frequency_penalty": 0.35,
@@ -167,6 +191,16 @@ channels:
         assert 'type: "openai"' in config_text
         assert 'model: "gpt-5.1"' in config_text
         assert "max_context: 262144" in config_text
+        assert 'llama_cpp_dir: "D:/llama.cpp"' in config_text
+        assert 'models_dir: "D:/models"' in config_text
+        assert 'host: "127.0.0.1"' in config_text
+        assert "port: 8013" in config_text
+        assert "gpu_layers: 35" in config_text
+        assert "flash_attention: false" in config_text
+        assert "parallel: 2" in config_text
+        assert 'model_file: "new-model.gguf"' in config_text
+        assert 'mmproj_file: "mmproj.gguf"' in config_text
+        assert "max_context: 32768" in config_text
         assert "temperature: 0.85" in config_text
         assert "max_response_tokens: 4096" in config_text
         assert "frequency_penalty: 0.35" in config_text
@@ -294,6 +328,63 @@ def test_config_editor_rejects_unknown_fields():
             })
             assert result["ok"] is True
 
+        result = api.preview_persona_save("demo", {
+            "server": {"port": 80},
+        })
+        assert result["ok"] is False
+        assert "Server Port" in result["error"]
+
+        result = api.preview_persona_save("demo", {
+            "server": {"port": 70000},
+        })
+        assert result["ok"] is False
+        assert "Server Port" in result["error"]
+
+        result = api.preview_persona_save("demo", {
+            "server": {"port": 8012},
+        })
+        assert result["ok"] is True
+
+        result = api.preview_persona_save("demo", {
+            "server": {"gpu_layers": -2},
+        })
+        assert result["ok"] is False
+        assert "GPU Layers" in result["error"]
+
+        for layers in (-1, 99):
+            result = api.preview_persona_save("demo", {
+                "server": {"gpu_layers": layers},
+            })
+            assert result["ok"] is True
+
+        result = api.preview_persona_save("demo", {
+            "server": {"parallel": 9},
+        })
+        assert result["ok"] is False
+        assert "Parallel Slots" in result["error"]
+
+        result = api.preview_persona_save("demo", {
+            "server": {"flash_attention": "false"},
+        })
+        assert result["ok"] is False
+        assert "Flash Attention" in result["error"]
+
+        result = api.preview_persona_save("demo", {
+            "server": {"flash_attention": False},
+        })
+        assert result["ok"] is True
+
+        result = api.preview_persona_save("demo", {
+            "model": {"model_file": "my-model.gguf"},
+        })
+        assert result["ok"] is True
+
+        result = api.preview_persona_save("demo", {
+            "model": {"model_file": "bad\x00model.gguf"},
+        })
+        assert result["ok"] is False
+        assert "null bytes" in result["error"]
+
 
 def test_writer_sets_new_top_level_field():
     assert _set_top_level_field("", "model", "Grok") == 'model: "Grok"\n'
@@ -367,6 +458,20 @@ def test_writer_ignores_commented_out_keys():
     assert updated.count("model:") == 2
 
 
+def test_writer_preserves_commented_out_sibling_keys():
+    text = """provider:
+  #type: "openrouter"
+  type: "openai"
+  #api_key_env: "OPENROUTER_API_KEY"
+  api_key_env: "OPENAI_API_KEY"
+"""
+    updated = _set_nested_field(text, "provider", "type", "local")
+    assert '#type: "openrouter"' in updated
+    assert '#api_key_env: "OPENROUTER_API_KEY"' in updated
+    assert 'type: "local"' in updated
+    assert 'type: "openai"' not in updated
+
+
 def test_writer_preserves_four_space_indent():
     text = 'tts:\n    voice_description: "Old"\n    voice_sample: ""\n'
     updated = _set_nested_field(text, "tts", "voice_description", "New")
@@ -379,6 +484,12 @@ def test_writer_handles_comments_with_different_indent():
     updated = _set_nested_field(text, "tts", "voice_sample", "ref.ogg")
     assert '    voice_sample: "ref.ogg"' in updated
     assert "model:\n  reasoning: true" in updated
+
+
+def test_writer_inserts_before_top_level_divider_comment():
+    text = 'model:\n  model_file: "main.gguf"\n\n# --- Paths ---\npaths:\n  database: demo.db\n'
+    updated = _set_nested_field(text, "model", "mmproj_file", "mmproj.gguf")
+    assert 'model_file: "main.gguf"\n  mmproj_file: "mmproj.gguf"\n\n# --- Paths ---' in updated
 
 
 def test_writer_rejects_duplicate_keys():
@@ -424,6 +535,24 @@ def test_writer_same_value_round_trip_no_diff():
     assert updated == text
 
 
+def test_preview_diff_handles_missing_final_newline():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        persona_dir = root / "personas" / "demo"
+        persona_dir.mkdir(parents=True)
+        (persona_dir / "persona.yaml").write_text("name: Demo\n", encoding="utf-8")
+        (persona_dir / "config.yaml").write_text('lor_identity:\n  nickname: "Demo"', encoding="utf-8")
+
+        api = PulseAPI(root)
+        result = api.preview_persona_save("demo", {
+            "server": {"models_dir": "D:/models"},
+        })
+        assert result["ok"] is True
+        diff = result["preview"]["diff"]
+        assert '-  nickname: "Demo"+  nickname: "Demo"' not in diff
+        assert '+server:' in diff
+
+
 if __name__ == "__main__":
     test_config_editor_preview_and_save()
     test_config_editor_rejects_unknown_fields()
@@ -439,8 +568,10 @@ if __name__ == "__main__":
     test_writer_multiline_value()
     test_writer_preserves_folded_block_style()
     test_writer_ignores_commented_out_keys()
+    test_writer_preserves_commented_out_sibling_keys()
     test_writer_preserves_four_space_indent()
     test_writer_handles_comments_with_different_indent()
+    test_writer_inserts_before_top_level_divider_comment()
     test_writer_rejects_duplicate_keys()
     test_writer_empty_string_value()
     test_writer_formats_numbers_and_booleans()
@@ -448,4 +579,5 @@ if __name__ == "__main__":
     test_writer_special_chars_json_encoded()
     test_writer_trailing_newline_stable()
     test_writer_same_value_round_trip_no_diff()
+    test_preview_diff_handles_missing_final_newline()
     print("[OK] GUI config editor")

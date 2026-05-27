@@ -8,7 +8,9 @@ and shuts it down gracefully (waiting for in-flight inference to finish).
 import asyncio
 import logging
 import subprocess
+import threading
 import time
+from collections import deque
 from pathlib import Path
 from typing import Optional
 
@@ -47,6 +49,8 @@ class LlamaServer:
 
         # Process handle
         self._process: Optional[subprocess.Popen] = None
+        self._output_lines: deque[str] = deque(maxlen=80)
+        self._output_thread: Optional[threading.Thread] = None
         self._healthy = False
 
     @property
@@ -108,20 +112,30 @@ class LlamaServer:
         logger.debug(f"  Command: {' '.join(cmd)}")
 
         try:
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
             self._process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 bufsize=1,
+                creationflags=creationflags,
             )
         except OSError as e:
             logger.error(f"Failed to start llama-server: {e}")
             return False
+        self._start_output_drain()
 
         # Wait for the server to become healthy
         logger.info(f"Waiting for llama-server to load model (up to {timeout}s)...")
-        healthy = await self._wait_for_health(timeout)
+        try:
+            healthy = await self._wait_for_health(timeout)
+        except Exception as e:
+            logger.exception(f"Error while waiting for llama-server health: {e}")
+            await self.stop()
+            return False
 
         if healthy:
             self._healthy = True
@@ -139,26 +153,51 @@ class LlamaServer:
             while time.time() - start < timeout:
                 # Check if process died
                 if self._process and self._process.poll() is not None:
-                    # Read any output for debugging
-                    stdout = self._process.stdout.read() if self._process.stdout else ""
                     logger.error(f"llama-server exited with code {self._process.returncode}")
-                    if stdout:
-                        # Show last few lines
-                        lines = stdout.strip().split("\n")
-                        for line in lines[-10:]:
-                            logger.error(f"  server: {line}")
+                    self._log_recent_output()
                     return False
 
                 try:
                     resp = await client.get(self.health_url, timeout=2)
                     if resp.status_code == 200:
                         return True
-                except (httpx.ConnectError, httpx.ReadTimeout):
+                except (httpx.ConnectError, httpx.TimeoutException, httpx.RequestError):
                     pass
 
                 await asyncio.sleep(1)
 
+        logger.error("llama-server health check timed out.")
+        self._log_recent_output()
         return False
+
+    def _start_output_drain(self) -> None:
+        """Continuously drain llama-server stdout so the child cannot block."""
+        if not self._process or not self._process.stdout:
+            return
+
+        def drain() -> None:
+            try:
+                for line in self._process.stdout:
+                    cleaned = line.rstrip()
+                    if cleaned:
+                        self._output_lines.append(cleaned)
+                        logger.debug(f"llama-server: {cleaned}")
+            except Exception as e:
+                logger.debug(f"llama-server output reader stopped: {e}")
+
+        self._output_thread = threading.Thread(
+            target=drain,
+            name="llama-server-output",
+            daemon=True,
+        )
+        self._output_thread.start()
+
+    def _log_recent_output(self) -> None:
+        if not self._output_lines:
+            logger.error("  server: no output captured")
+            return
+        for line in list(self._output_lines)[-20:]:
+            logger.error(f"  server: {line}")
 
     async def stop(self):
         """Stop the llama-server gracefully.

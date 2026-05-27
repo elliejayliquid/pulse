@@ -251,6 +251,83 @@ class PulseAPI:
         rel_path = dest.relative_to(self.root).as_posix()
         return {"ok": True, "path": rel_path}
 
+    def pick_folder(self, current_path: str = "") -> dict:
+        if not self._window:
+            return {"ok": False, "error": "Folder dialog requires pywebview."}
+        start_dir = ""
+        if current_path:
+            candidate = Path(current_path)
+            if candidate.is_dir():
+                start_dir = str(candidate)
+            elif candidate.parent.is_dir():
+                start_dir = str(candidate.parent)
+        try:
+            import webview
+            result = self._window.create_file_dialog(
+                webview.FOLDER_DIALOG,
+                directory=start_dir,
+            )
+        except Exception as e:
+            return {"ok": False, "error": f"Folder dialog failed: {e}"}
+        if not result:
+            return {"ok": False}
+        chosen = result[0] if isinstance(result, (list, tuple)) else result
+        return {"ok": True, "path": str(chosen)}
+
+    def _relative_model_file(self, models_dir: str, chosen_path: str) -> str:
+        if not models_dir:
+            raise ValueError("Set Models Dir before choosing a model file.")
+        models_path = Path(models_dir).expanduser().resolve()
+        if not models_path.is_dir():
+            raise ValueError("Models Dir does not exist.")
+
+        chosen = Path(chosen_path).expanduser().resolve()
+        if not chosen.is_file():
+            raise ValueError("Selected file does not exist.")
+        if chosen.suffix.lower() != ".gguf":
+            raise ValueError("Choose a .gguf model file.")
+        try:
+            rel_path = chosen.relative_to(models_path)
+        except ValueError as e:
+            raise ValueError("Choose a .gguf file inside Models Dir.") from e
+        return rel_path.as_posix()
+
+    def pick_model_file(self, models_dir: str = "", current_file: str = "") -> dict:
+        if not self._window:
+            return {"ok": False, "error": "File dialog requires pywebview."}
+        if not models_dir:
+            return {"ok": False, "error": "Set Models Dir before choosing a model file."}
+
+        models_path = Path(models_dir).expanduser()
+        if not models_path.is_dir():
+            return {"ok": False, "error": "Models Dir does not exist."}
+
+        start_dir = str(models_path)
+        if current_file:
+            candidate = models_path / current_file
+            if candidate.parent.is_dir():
+                start_dir = str(candidate.parent)
+        try:
+            import webview
+            result = self._window.create_file_dialog(
+                webview.OPEN_DIALOG,
+                directory=start_dir,
+                allow_multiple=False,
+                file_types=(
+                    "GGUF Models (*.gguf)",
+                    "All Files (*.*)",
+                ),
+            )
+        except Exception as e:
+            return {"ok": False, "error": f"File dialog failed: {e}"}
+        if not result:
+            return {"ok": False}
+        chosen = result[0] if isinstance(result, (list, tuple)) else result
+        try:
+            return {"ok": True, "path": self._relative_model_file(models_dir, str(chosen))}
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+
     # Secrets/status/logs
 
     def get_key_status(self, persona: str) -> dict:
@@ -525,12 +602,14 @@ class PulseAPI:
     def _build_summary(self, name: str, config: dict, identity: dict) -> dict:
         provider = config.get("provider", {})
         model_cfg = config.get("model", {})
+        server_cfg = config.get("server", {})
         provider_type = provider.get("type", "local")
         provider_model = provider.get("model", "")
         identity_model = identity.get("model", "")
         model_file = model_cfg.get("model_file", "")
         model_display = identity_model or provider_model or Path(model_file).name or "not configured"
-        max_context = provider.get("max_context") or model_cfg.get("max_context") or ""
+        provider_max_context = provider.get("max_context", "")
+        local_max_context = model_cfg.get("max_context", "")
         return {
             "display_name": identity.get("name") or ("Base Config" if name == "__base__" else name.title()),
             "user_name": identity.get("user_name", ""),
@@ -538,7 +617,20 @@ class PulseAPI:
             "provider_model": provider_model,
             "provider_type": provider_type,
             "base_url": provider.get("base_url", ""),
-            "max_context": max_context,
+            "max_context": provider_max_context,
+            "provider_max_context": provider_max_context,
+            "local_max_context": local_max_context,
+            "model_file": model_cfg.get("model_file", ""),
+            "mmproj_file": model_cfg.get("mmproj_file", ""),
+            "server": {
+                "llama_cpp_dir": server_cfg.get("llama_cpp_dir", ""),
+                "models_dir": server_cfg.get("models_dir", ""),
+                "host": server_cfg.get("host", "127.0.0.1"),
+                "port": server_cfg.get("port", 8012),
+                "gpu_layers": server_cfg.get("gpu_layers", -1),
+                "flash_attention": server_cfg.get("flash_attention", True),
+                "parallel": server_cfg.get("parallel", 1),
+            },
             "max_response_tokens": model_cfg.get("max_response_tokens", ""),
             "temperature": model_cfg.get("temperature", config.get("model", {}).get("temperature", 0.7)),
             "frequency_penalty": model_cfg.get("frequency_penalty", ""),

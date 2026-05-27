@@ -640,6 +640,129 @@ input[type="number"]::-webkit-outer-spin-button {
   accent-color: var(--accent);
 }
 
+/* --- Local Server --- */
+
+.section.open .ls-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.ls-groups {
+  display: flex;
+  gap: 24px;
+}
+
+.ls-group {
+  flex: 1;
+  min-width: 0;
+}
+
+.ls-group-label {
+  font: 500 10px/1 var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-tertiary);
+  margin-bottom: 10px;
+}
+
+.ls-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.025);
+}
+
+.ls-label {
+  flex: 0 0 110px;
+  font: 11px/1 var(--mono);
+  color: var(--text-secondary);
+}
+
+.ls-input {
+  width: 90px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text-primary);
+  font: 500 12px/1 var(--mono);
+  text-align: center;
+  margin-top: 0;
+}
+
+.ls-input-wide {
+  width: 100%;
+  min-width: 0;
+  text-align: left;
+}
+
+.ls-picker-row {
+  flex: 1;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  min-width: 0;
+}
+
+.ls-picker-btn {
+  flex-shrink: 0;
+  width: 34px;
+  height: 30px;
+  font-size: 13px;
+}
+
+.ls-clear-btn {
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+}
+
+.ls-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 0 2px;
+  cursor: pointer;
+  color: var(--text-secondary);
+  font: 12px/1 var(--body);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.ls-toggle input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.ls-advanced-toggle {
+  width: fit-content;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  user-select: none;
+  font: 11px/1 var(--mono);
+  transition: color 140ms ease;
+}
+
+.ls-advanced-toggle:hover {
+  color: var(--text-secondary);
+}
+
+.ls-advanced-chevron {
+  display: inline-block;
+  width: 12px;
+  font-size: 9px;
+}
+
+.ls-advanced {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+
 textarea {
   min-height: 78px;
   font: 12px/1.55 var(--mono);
@@ -1373,6 +1496,13 @@ textarea {
   }
 
   .hb-body {
+    flex-direction: column;
+    gap: 18px;
+  }
+
+  .ls-groups,
+  .ls-advanced {
+    display: flex;
     flex-direction: column;
     gap: 18px;
   }

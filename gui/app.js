@@ -58,6 +58,19 @@ const fallbackApi = {
         provider_type: name === "__base__" ? "local" : "openrouter",
         base_url: "",
         max_context: "",
+        provider_max_context: "",
+        local_max_context: "16384",
+        model_file: "",
+        mmproj_file: "",
+        server: {
+          llama_cpp_dir: "C:\\llama-cpp",
+          models_dir: "C:\\llama-cpp\\models",
+          host: "127.0.0.1",
+          port: 8012,
+          gpu_layers: -1,
+          flash_attention: true,
+          parallel: 1,
+        },
         temperature: 0.7,
         max_response_tokens: 2048,
         frequency_penalty: 0.4,
@@ -135,6 +148,8 @@ const fallbackApi = {
   async restore_backup() { return { ok: false, error: "Run through pywebview to restore backups." }; },
   async restore_last_backup() { return { ok: false, error: "Run through pywebview to undo." }; },
   async pick_voice_sample() { return { ok: false, error: "Run through pywebview to pick files." }; },
+  async pick_folder() { return { ok: false, error: "Run through pywebview to pick folders." }; },
+  async pick_model_file() { return { ok: false, error: "Run through pywebview to pick model files." }; },
   async get_log_tail() { return "Run through pywebview to read logs."; },
   async start_pulse() { return { ok: false, error: "Run through pywebview to start Pulse." }; },
   async stop_pulse() { return { ok: false, error: "Run through pywebview to stop Pulse." }; },
@@ -631,18 +646,45 @@ function syncBaseUrlVisibility() {
   el("baseUrlRow").classList.toggle("hidden", !isCustom);
 }
 
+function syncLocalServerVisibility() {
+  const isLocal = el("providerType").value === "local";
+  el("localServerSection").classList.toggle("hidden", !isLocal);
+}
+
 function renderProvider(data) {
   const summary = data.summary || {};
   const tts = summary.tts || {};
   el("providerType").value = text(summary.provider_type);
   el("providerModel").value = text(summary.provider_model);
   el("providerBaseUrl").value = text(summary.base_url);
-  el("maxContext").value = text(summary.max_context);
+  el("maxContext").value = text(summary.provider_max_context ?? summary.max_context);
   syncBaseUrlVisibility();
+  syncLocalServerVisibility();
   el("ttsVoice").value = text(tts.voice_description);
   el("ttsSample").value = text(tts.voice_sample);
   el("ttsSampleText").value = text(tts.voice_sample_text);
   syncTtsMode();
+}
+
+function renderLocalServer(data) {
+  const summary = data.summary || {};
+  const server = summary.server || {};
+  el("lsLlamaCppDir").value = text(server.llama_cpp_dir);
+  el("lsModelsDir").value = text(server.models_dir);
+  el("lsModelFile").value = text(summary.model_file);
+  el("lsHost").value = text(server.host, "127.0.0.1");
+  el("lsPort").value = text(server.port, 8012);
+  el("lsGpuLayers").value = text(server.gpu_layers, -1);
+  el("lsMaxContext").value = text(summary.local_max_context, 16384);
+  el("lsFlashAttn").checked = server.flash_attention !== false;
+  el("lsParallel").value = text(server.parallel, 1);
+  el("lsMmproj").value = text(summary.mmproj_file);
+}
+
+function toggleLocalServerAdvanced() {
+  const panel = el("lsAdvanced");
+  const isNowHidden = panel.classList.toggle("hidden");
+  el("lsAdvancedChevron").textContent = isNowHidden ? "▶" : "▼";
 }
 
 function renderHeartbeat(summary) {
@@ -681,6 +723,9 @@ function editableSnapshot() {
       max_context: el("maxContext").value,
     },
     model: {
+      model_file: el("lsModelFile").value,
+      mmproj_file: el("lsMmproj").value,
+      max_context: el("lsMaxContext").value,
       temperature: readSliderValue("temperature"),
       max_response_tokens: readSliderValue("max_response_tokens"),
       frequency_penalty: readSliderValue("frequency_penalty"),
@@ -690,6 +735,15 @@ function editableSnapshot() {
       reasoning_effort: el("tuningEffort")?.value || "",
       show_reasoning: Boolean(el("tuningShowReasoning")?.checked),
       max_tool_rounds: el("tuningMaxRounds")?.value || "",
+    },
+    server: {
+      llama_cpp_dir: el("lsLlamaCppDir").value,
+      models_dir: el("lsModelsDir").value,
+      host: el("lsHost").value,
+      port: el("lsPort").value,
+      gpu_layers: el("lsGpuLayers").value,
+      flash_attention: el("lsFlashAttn").checked,
+      parallel: el("lsParallel").value,
     },
     context_budget: {
       recent_tail_exchanges: el("tuningTailExchanges")?.value || "",
@@ -725,6 +779,15 @@ function setEditableState(data) {
     "providerModel",
     "providerBaseUrl",
     "maxContext",
+    "lsLlamaCppDir",
+    "lsModelsDir",
+    "lsModelFile",
+    "lsHost",
+    "lsPort",
+    "lsGpuLayers",
+    "lsMaxContext",
+    "lsParallel",
+    "lsMmproj",
     "ttsVoice",
     "ttsSampleText",
     "hbInterval",
@@ -737,13 +800,18 @@ function setEditableState(data) {
   ].forEach((id) => {
     el(id).readOnly = !editable;
   });
-  ["providerType", "tuningReasoning", "tuningEffort", "tuningShowReasoning", "hbDebug"].forEach((id) => {
+  ["providerType", "lsFlashAttn", "tuningReasoning", "tuningEffort", "tuningShowReasoning", "hbDebug"].forEach((id) => {
     el(id).disabled = !editable;
   });
   el("ttsSample").readOnly = true;
   el("hbRandomize").disabled = !editable;
   el("ttsSamplePicker").disabled = !editable;
   el("ttsSampleClear").disabled = !editable;
+  el("lsLlamaCppDirPicker").disabled = !editable;
+  el("lsModelsDirPicker").disabled = !editable;
+  el("lsModelFilePicker").disabled = !editable;
+  el("lsMmprojPicker").disabled = !editable;
+  el("lsMmprojClear").disabled = !editable;
   state.originalEditable = editableSnapshot();
   setDirty(false);
   setCanUndo(false);
@@ -768,8 +836,8 @@ function numberOrEmpty(value) {
 
 function collectEditableChanges() {
   const current = editableSnapshot();
-  const original = state.originalEditable || { identity: {}, provider: {}, model: {}, context_budget: {}, tts: {}, skills: {}, channels: {}, heartbeat: {} };
-  const changes = { identity: {}, provider: {}, model: {}, context_budget: {}, tts: {}, skills: {}, channels: {}, heartbeat: {} };
+  const original = state.originalEditable || { identity: {}, provider: {}, server: {}, model: {}, context_budget: {}, tts: {}, skills: {}, channels: {}, heartbeat: {} };
+  const changes = { identity: {}, provider: {}, server: {}, model: {}, context_budget: {}, tts: {}, skills: {}, channels: {}, heartbeat: {} };
 
   for (const [key, value] of Object.entries(current.identity)) {
     if (value !== original.identity?.[key]) {
@@ -783,11 +851,21 @@ function collectEditableChanges() {
     }
   }
 
+  for (const [key, value] of Object.entries(current.server)) {
+    if (value !== original.server?.[key]) {
+      changes.server[key] = key === "flash_attention"
+        ? value
+        : ["llama_cpp_dir", "models_dir", "host"].includes(key)
+          ? value
+          : numberOrEmpty(value);
+    }
+  }
+
   for (const [key, value] of Object.entries(current.model)) {
     if (value !== original.model?.[key]) {
       changes.model[key] = ["reasoning", "show_reasoning"].includes(key)
         ? value
-        : ["max_response_tokens", "max_tool_rounds"].includes(key)
+        : ["max_response_tokens", "max_context", "max_tool_rounds"].includes(key)
           ? numberOrEmpty(value)
           : ["temperature", "frequency_penalty", "presence_penalty", "top_p"].includes(key)
             ? numberOrEmpty(value)
@@ -832,6 +910,7 @@ function hasEditableChanges() {
   const changes = collectEditableChanges();
   return Object.keys(changes.identity).length > 0
     || Object.keys(changes.provider).length > 0
+    || Object.keys(changes.server).length > 0
     || Object.keys(changes.model).length > 0
     || Object.keys(changes.context_budget).length > 0
     || Object.keys(changes.tts).length > 0
@@ -868,10 +947,12 @@ function validateHeartbeatFields() {
 
 function validateProviderAndTuningFields() {
   const maxContext = el("maxContext").value;
-  if (maxContext === "") return "Max Context must be set.";
-  const contextValue = Number(maxContext);
-  if (!Number.isInteger(contextValue) || contextValue < 1024 || contextValue > 1048576) {
-    return "Max Context must be a whole number between 1024 and 1048576.";
+  if (el("providerType").value !== "local" || maxContext !== "") {
+    if (maxContext === "") return "API Context must be set.";
+    const contextValue = Number(maxContext);
+    if (!Number.isInteger(contextValue) || contextValue < 1024 || contextValue > 1048576) {
+      return "API Context must be a whole number between 1024 and 1048576.";
+    }
   }
 
   const numeric = [
@@ -884,6 +965,22 @@ function validateProviderAndTuningFields() {
     const value = Number(raw);
     if (!Number.isInteger(value) || value < min || value > max) {
       return `${label} must be a whole number between ${min} and ${max}.`;
+    }
+  }
+  if (el("providerType").value === "local") {
+    const serverNumeric = [
+      ["lsPort", "Port", 1024, 65535],
+      ["lsGpuLayers", "GPU Layers", -1, 512],
+      ["lsMaxContext", "Context Size", 1024, 1048576],
+      ["lsParallel", "Parallel Slots", 1, 8],
+    ];
+    for (const [id, label, min, max] of serverNumeric) {
+      const raw = el(id).value;
+      if (raw === "") return `${label} must be set.`;
+      const value = Number(raw);
+      if (!Number.isInteger(value) || value < min || value > max) {
+        return `${label} must be a whole number between ${min} and ${max}.`;
+      }
     }
   }
   return "";
@@ -901,6 +998,7 @@ async function loadPersona(name) {
   renderStatus(data.status || {});
   renderIdentity(data);
   renderProvider(data);
+  renderLocalServer(data);
   renderHeartbeat(data.summary || {});
   renderSecrets(data.key_status || {});
   renderTuning(data.summary || {});
@@ -925,6 +1023,159 @@ async function loadPersona(name) {
 async function loadLogs() {
   if (!state.current) return;
   el("logTail").textContent = await api().get_log_tail(state.current.name, 100);
+}
+
+async function pickFolder(inputId) {
+  if (!state.current || state.current.name === "__base__") return;
+  const result = await api().pick_folder(el(inputId).value || "");
+  if (result?.ok && result.path) {
+    el(inputId).value = result.path;
+    setDirty(hasEditableChanges());
+  } else if (result && !result.ok && result.error) {
+    setNotice(result.error, "warning");
+  }
+}
+
+async function pickModelFile(inputId) {
+  if (!state.current || state.current.name === "__base__") return;
+  const result = await api().pick_model_file(el("lsModelsDir").value || "", el(inputId).value || "");
+  if (result?.ok && result.path) {
+    el(inputId).value = result.path;
+    setDirty(hasEditableChanges());
+  } else if (result && !result.ok && result.error) {
+    setNotice(result.error, "warning");
+  }
+}
+
+function validateSaveFields() {
+  if (el("ttsSample").value && !el("ttsSampleText").value) {
+    return "Voice sample is set but transcript is empty - clone mode needs both.";
+  }
+  return validateHeartbeatFields() || validateProviderAndTuningFields();
+}
+
+async function previewCurrentSave() {
+  if (!state.current || state.current.name === "__base__") {
+    return { ok: false, error: "Choose a persona first." };
+  }
+  const validationError = validateSaveFields();
+  if (validationError) {
+    return { ok: false, error: validationError };
+  }
+  const changes = collectEditableChanges();
+  const preview = await api().preview_persona_save(state.current.name, changes);
+  if (!preview.ok) {
+    return { ok: false, error: preview.error || "Could not preview changes." };
+  }
+  return { ok: true, changes, preview: preview.preview };
+}
+
+function savePreviewBody(preview, intro) {
+  const changed = preview.changes.map((item) => item.file).join(", ");
+  const diff = preview.diff || "";
+  const shownDiff = diff.length > 1200 ? diff.slice(0, 1200) + "\n..." : diff;
+  return `${intro} <strong>${escapeHtml(changed)}</strong>. A backup will be created first.`
+    + (shownDiff ? `<pre class="diff-block">${formatDiff(shownDiff)}</pre>` : "");
+}
+
+async function applyCurrentSave(changes, { notice = true } = {}) {
+  const wasRunning = currentPersonaIsRunning();
+  const personaName = state.current.name;
+  const result = await api().save_persona(personaName, changes);
+  if (!result.ok) {
+    setNotice(result.error || "Save failed.", "warning");
+    return { ok: false };
+  }
+  await loadPersona(personaName);
+  setDirty(false);
+  setCanUndo(Boolean(result.changed));
+  if (notice) {
+    if (result.changed && wasRunning) {
+      setNotice("Saved. Restart the persona for changes to take effect.", "warning", NOTICE_WARNING_MS);
+    } else {
+      setNotice(result.changed ? "Saved with backup." : "No changes to save.", "info", NOTICE_INFO_MS);
+    }
+  }
+  return { ok: true, changed: Boolean(result.changed), personaName };
+}
+
+async function saveCurrentPersona() {
+  const prepared = await previewCurrentSave();
+  if (!prepared.ok) {
+    setNotice(prepared.error, "warning");
+    return { ok: false };
+  }
+  if (!prepared.preview.has_changes) {
+    setDirty(false);
+    setNotice("No changes to save.");
+    return { ok: true, changed: false };
+  }
+  const ok = await showConfirm(
+    "Save changes?",
+    savePreviewBody(prepared.preview, "Saving to"),
+    "Save",
+    "secondary"
+  );
+  if (!ok) return { ok: false, canceled: true };
+  return applyCurrentSave(prepared.changes);
+}
+
+async function saveBeforeStartChoice() {
+  const prepared = await previewCurrentSave();
+  if (!prepared.ok) {
+    setNotice(prepared.error, "warning");
+    return { ok: false };
+  }
+  if (!prepared.preview.has_changes) {
+    setDirty(false);
+    return { ok: true, action: "start" };
+  }
+  const choice = await showChoice(
+    "Save before starting?",
+    savePreviewBody(prepared.preview, "Pulse starts from saved config. Saving to"),
+    {
+      okLabel: "Save & Start",
+      okStyle: "secondary",
+      secondaryLabel: "Save",
+      cancelLabel: "Cancel",
+    }
+  );
+  if (choice === "cancel") return { ok: false, canceled: true };
+  const result = await applyCurrentSave(prepared.changes, { notice: choice === "secondary" });
+  if (!result.ok) return { ok: false };
+  return { ok: true, action: choice === "ok" ? "start" : "saved", personaName: result.personaName };
+}
+
+async function saveBeforeStopChoice() {
+  const prepared = await previewCurrentSave();
+  if (!prepared.ok) {
+    const ok = await showConfirm(
+      "Stop with unsaved changes?",
+      `${escapeHtml(prepared.error)} Pulse can stop now, but these unsaved edits will be lost when the persona reloads.`,
+      "Stop",
+      "danger"
+    );
+    return { ok, action: ok ? "stop" : "cancel" };
+  }
+  if (!prepared.preview.has_changes) {
+    setDirty(false);
+    return { ok: true, action: "stop" };
+  }
+  const choice = await showChoice(
+    "Save before stopping?",
+    savePreviewBody(prepared.preview, "Stopping will reload from saved config. Saving to"),
+    {
+      okLabel: "Save & Stop",
+      okStyle: "secondary",
+      secondaryLabel: "Stop",
+      cancelLabel: "Cancel",
+    }
+  );
+  if (choice === "cancel") return { ok: false, action: "cancel" };
+  if (choice === "secondary") return { ok: true, action: "stop" };
+  const result = await applyCurrentSave(prepared.changes, { notice: false });
+  if (!result.ok) return { ok: false, action: "cancel" };
+  return { ok: true, action: "stop", personaName: result.personaName };
 }
 
 async function refreshAll() {
@@ -1036,6 +1287,15 @@ function wireEvents() {
     "providerModel",
     "providerBaseUrl",
     "maxContext",
+    "lsLlamaCppDir",
+    "lsModelsDir",
+    "lsModelFile",
+    "lsHost",
+    "lsPort",
+    "lsGpuLayers",
+    "lsMaxContext",
+    "lsParallel",
+    "lsMmproj",
     "ttsVoice",
     "ttsSampleText",
     "hbInterval",
@@ -1048,8 +1308,26 @@ function wireEvents() {
   });
   el("providerType").addEventListener("change", () => {
     syncBaseUrlVisibility();
+    syncLocalServerVisibility();
     setDirty(hasEditableChanges());
     renderSecrets(state.current?.key_status || {});
+  });
+  el("lsFlashAttn").addEventListener("change", () => setDirty(hasEditableChanges()));
+  el("lsLlamaCppDirPicker").addEventListener("click", () => pickFolder("lsLlamaCppDir"));
+  el("lsModelsDirPicker").addEventListener("click", () => pickFolder("lsModelsDir"));
+  el("lsModelFilePicker").addEventListener("click", () => pickModelFile("lsModelFile"));
+  el("lsMmprojPicker").addEventListener("click", () => pickModelFile("lsMmproj"));
+  el("lsMmprojClear").addEventListener("click", () => {
+    if (!el("lsMmproj").value) return;
+    el("lsMmproj").value = "";
+    setDirty(hasEditableChanges());
+  });
+  el("lsAdvancedToggle").addEventListener("click", toggleLocalServerAdvanced);
+  el("lsAdvancedToggle").addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      toggleLocalServerAdvanced();
+    }
   });
   el("hbRandomize").addEventListener("change", () => setDirty(hasEditableChanges()));
   el("hbDebug").addEventListener("change", () => setDirty(hasEditableChanges()));
@@ -1078,53 +1356,7 @@ function wireEvents() {
     setDirty(hasEditableChanges());
   });
   el("saveBtn").addEventListener("click", async () => {
-    if (!state.current || state.current.name === "__base__") return;
-    if (el("ttsSample").value && !el("ttsSampleText").value) {
-      setNotice("Voice sample is set but transcript is empty — clone mode needs both.", "warning");
-      return;
-    }
-    const heartbeatError = validateHeartbeatFields();
-    if (heartbeatError) {
-      setNotice(heartbeatError, "warning");
-      return;
-    }
-    const tuningError = validateProviderAndTuningFields();
-    if (tuningError) {
-      setNotice(tuningError, "warning");
-      return;
-    }
-    const changes = collectEditableChanges();
-    const preview = await api().preview_persona_save(state.current.name, changes);
-    if (!preview.ok) {
-      setNotice(preview.error || "Could not preview changes.", "warning");
-      return;
-    }
-    if (!preview.preview.has_changes) {
-      setDirty(false);
-      setNotice("No changes to save.");
-      return;
-    }
-    const changed = preview.preview.changes.map((item) => item.file).join(", ");
-    const diff = preview.preview.diff || "";
-    const shownDiff = diff.length > 1200 ? diff.slice(0, 1200) + "\n..." : diff;
-    const body = `Saving to <strong>${escapeHtml(changed)}</strong>. A backup will be created first.`
-      + (shownDiff ? `<pre class="diff-block">${formatDiff(shownDiff)}</pre>` : "");
-    const ok = await showConfirm("Save changes?", body, "Save", "secondary");
-    if (!ok) return;
-    const wasRunning = currentPersonaIsRunning();
-    const result = await api().save_persona(state.current.name, changes);
-    if (!result.ok) {
-      setNotice(result.error || "Save failed.", "warning");
-      return;
-    }
-    await loadPersona(state.current.name);
-    setDirty(false);
-    setCanUndo(Boolean(result.changed));
-    if (result.changed && wasRunning) {
-      setNotice("Saved. Restart the persona for changes to take effect.", "warning", NOTICE_WARNING_MS);
-    } else {
-      setNotice(result.changed ? "Saved with backup." : "No changes to save.", "info", NOTICE_INFO_MS);
-    }
+    await saveCurrentPersona();
   });
   el("undoBtn").addEventListener("click", async () => {
     if (!state.current || state.current.name === "__base__") return;
@@ -1155,6 +1387,10 @@ function wireEvents() {
     const active = Boolean(status.running) && !status.stale;
 
     if (active) {
+      if (state.dirty || hasEditableChanges()) {
+        const choice = await saveBeforeStopChoice();
+        if (!choice.ok) return;
+      }
       setNotice("Requesting graceful shutdown...");
       state.pendingTransition = "stopping";
       const result = await api().stop_pulse(state.current.name);
@@ -1165,6 +1401,10 @@ function wireEvents() {
       }
       state.current.status = result.status || {};
     } else {
+      if (state.dirty || hasEditableChanges()) {
+        const choice = await saveBeforeStartChoice();
+        if (!choice.ok || choice.action === "saved") return;
+      }
       setNotice("Starting Pulse...");
       state.pendingTransition = "starting";
       const result = await api().start_pulse(state.current.name);
@@ -1367,17 +1607,46 @@ function showConfirm(title, body, okLabel = "Confirm", okStyle = "danger") {
     el("confirmTitle").textContent = title;
     el("confirmBody").innerHTML = body;
     const okBtn = el("confirmOk");
+    const secondaryBtn = el("confirmSecondary");
     okBtn.textContent = okLabel;
     okBtn.className = "modal-btn " + okStyle;
+    secondaryBtn.classList.add("hidden");
     el("confirmDialog").classList.remove("hidden");
     function cleanup(result) {
       el("confirmDialog").classList.add("hidden");
       okBtn.replaceWith(okBtn.cloneNode(true));
+      secondaryBtn.replaceWith(secondaryBtn.cloneNode(true));
       el("confirmCancel").replaceWith(el("confirmCancel").cloneNode(true));
       resolve(result);
     }
     el("confirmOk").addEventListener("click", () => cleanup(true), { once: true });
     el("confirmCancel").addEventListener("click", () => cleanup(false), { once: true });
+  });
+}
+
+function showChoice(title, body, { okLabel, okStyle = "secondary", secondaryLabel, cancelLabel = "Cancel" }) {
+  return new Promise((resolve) => {
+    el("confirmTitle").textContent = title;
+    el("confirmBody").innerHTML = body;
+    const okBtn = el("confirmOk");
+    const secondaryBtn = el("confirmSecondary");
+    const cancelBtn = el("confirmCancel");
+    okBtn.textContent = okLabel;
+    okBtn.className = "modal-btn " + okStyle;
+    secondaryBtn.textContent = secondaryLabel;
+    secondaryBtn.className = "modal-btn secondary";
+    cancelBtn.textContent = cancelLabel;
+    el("confirmDialog").classList.remove("hidden");
+    function cleanup(result) {
+      el("confirmDialog").classList.add("hidden");
+      okBtn.replaceWith(okBtn.cloneNode(true));
+      secondaryBtn.replaceWith(secondaryBtn.cloneNode(true));
+      cancelBtn.replaceWith(cancelBtn.cloneNode(true));
+      resolve(result);
+    }
+    el("confirmOk").addEventListener("click", () => cleanup("ok"), { once: true });
+    el("confirmSecondary").addEventListener("click", () => cleanup("secondary"), { once: true });
+    el("confirmCancel").addEventListener("click", () => cleanup("cancel"), { once: true });
   });
 }
 

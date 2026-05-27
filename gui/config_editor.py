@@ -32,7 +32,20 @@ PROVIDER_FIELDS = {
 
 PROVIDER_TYPES = {"local", "openrouter", "openai", "anthropic", "custom"}
 
+SERVER_FIELDS = {
+    "llama_cpp_dir": "llama.cpp Directory",
+    "models_dir": "Models Directory",
+    "host": "Server Host",
+    "port": "Server Port",
+    "gpu_layers": "GPU Layers",
+    "flash_attention": "Flash Attention",
+    "parallel": "Parallel Slots",
+}
+
 MODEL_FIELDS = {
+    "model_file": "Model File",
+    "mmproj_file": "Vision Projector",
+    "max_context": "Max Context",
     "temperature": "Temperature",
     "max_response_tokens": "Max Response Tokens",
     "frequency_penalty": "Frequency Penalty",
@@ -50,7 +63,14 @@ MODEL_LIMITS = {
     "frequency_penalty": (0.0, 2.0),
     "presence_penalty": (0.0, 2.0),
     "top_p": (0.0, 1.0),
+    "max_context": (1024, 1048576),
     "max_tool_rounds": (1, 32),
+}
+
+SERVER_LIMITS = {
+    "port": (1024, 65535),
+    "gpu_layers": (-1, 512),
+    "parallel": (1, 8),
 }
 
 REASONING_EFFORTS = {"", "low", "medium", "high"}
@@ -161,6 +181,7 @@ class ConfigEditor:
         identity = changes.get("identity", {}) or {}
         tts = changes.get("tts", {}) or {}
         provider = changes.get("provider", {}) or {}
+        server = changes.get("server", {}) or {}
         model = changes.get("model", {}) or {}
         context_budget = changes.get("context_budget", {}) or {}
         heartbeat = changes.get("heartbeat", {}) or {}
@@ -168,6 +189,8 @@ class ConfigEditor:
         channels = changes.get("channels", {}) or {}
         if not isinstance(provider, dict):
             raise ValueError("Provider changes must be an object.")
+        if not isinstance(server, dict):
+            raise ValueError("Server changes must be an object.")
         if not isinstance(model, dict):
             raise ValueError("Model changes must be an object.")
         if not isinstance(context_budget, dict):
@@ -180,6 +203,7 @@ class ConfigEditor:
         unknown_identity = sorted(set(identity) - set(IDENTITY_FIELDS))
         unknown_tts = sorted(set(tts) - set(TTS_FIELDS))
         unknown_provider = sorted(set(provider) - set(PROVIDER_FIELDS))
+        unknown_server = sorted(set(server) - set(SERVER_FIELDS))
         unknown_model = sorted(set(model) - set(MODEL_FIELDS))
         unknown_context_budget = sorted(set(context_budget) - set(CONTEXT_BUDGET_FIELDS))
         unknown_heartbeat = sorted(set(heartbeat) - set(HEARTBEAT_FIELDS))
@@ -189,6 +213,7 @@ class ConfigEditor:
             unknown_identity
             or unknown_tts
             or unknown_provider
+            or unknown_server
             or unknown_model
             or unknown_context_budget
             or unknown_heartbeat
@@ -199,6 +224,7 @@ class ConfigEditor:
                 unknown_identity
                 + [f"tts.{name}" for name in unknown_tts]
                 + [f"provider.{name}" for name in unknown_provider]
+                + [f"server.{name}" for name in unknown_server]
                 + [f"model.{name}" for name in unknown_model]
                 + [f"context_budget.{name}" for name in unknown_context_budget]
                 + [f"heartbeat.{name}" for name in unknown_heartbeat]
@@ -219,6 +245,10 @@ class ConfigEditor:
             "provider": {
                 key: self._clean_provider_value(key, value)
                 for key, value in provider.items()
+            },
+            "server": {
+                key: self._clean_server_value(key, value)
+                for key, value in server.items()
             },
             "model": {
                 key: self._clean_model_value(key, value)
@@ -269,8 +299,25 @@ class ConfigEditor:
             raise ValueError(f"{label} must be between 1024 and 1048576.")
         return value
 
+    def _clean_server_value(self, key: str, value: Any) -> str | int | bool:
+        label = SERVER_FIELDS[key]
+        if key in ("llama_cpp_dir", "models_dir", "host"):
+            return self._clean_text(value, label)
+        if key == "flash_attention":
+            if type(value) is not bool:
+                raise ValueError(f"{label} must be true or false.")
+            return value
+        if type(value) is not int:
+            raise ValueError(f"{label} must be a whole number.")
+        low, high = SERVER_LIMITS[key]
+        if not low <= value <= high:
+            raise ValueError(f"{label} must be between {low} and {high}.")
+        return value
+
     def _clean_model_value(self, key: str, value: Any) -> str | int | float | bool:
         label = MODEL_FIELDS[key]
+        if key in ("model_file", "mmproj_file"):
+            return self._clean_text(value, label)
         if key in ("reasoning", "show_reasoning"):
             if type(value) is not bool:
                 raise ValueError(f"{label} must be true or false.")
@@ -279,7 +326,7 @@ class ConfigEditor:
             if not isinstance(value, str) or value not in REASONING_EFFORTS:
                 raise ValueError(f"{label} must be one of: low, medium, high, or empty.")
             return value
-        if key in ("max_response_tokens", "max_tool_rounds"):
+        if key in ("max_response_tokens", "max_context", "max_tool_rounds"):
             if type(value) is not int:
                 raise ValueError(f"{label} must be a whole number.")
             low, high = MODEL_LIMITS[key]
@@ -353,6 +400,7 @@ class ConfigEditor:
         if (
             changes["tts"]
             or changes["provider"]
+            or changes["server"]
             or changes["model"]
             or changes["context_budget"]
             or changes["heartbeat"]
@@ -366,6 +414,8 @@ class ConfigEditor:
                 updated = _set_nested_field(updated, "tts", key, value)
             for key, value in changes["provider"].items():
                 updated = _set_nested_field(updated, "provider", key, value)
+            for key, value in changes["server"].items():
+                updated = _set_nested_field(updated, "server", key, value)
             for key, value in changes["model"].items():
                 updated = _set_nested_field(updated, "model", key, value)
             for key, value in changes["context_budget"].items():
@@ -397,9 +447,11 @@ class ConfigEditor:
 
     def _diff(self, path: Path, original: str, updated: str) -> str:
         rel = path.relative_to(self.root).as_posix()
+        display_original = original if original.endswith("\n") or not original else f"{original}\n"
+        display_updated = updated if updated.endswith("\n") or not updated else f"{updated}\n"
         return "".join(difflib.unified_diff(
-            original.splitlines(keepends=True),
-            updated.splitlines(keepends=True),
+            display_original.splitlines(keepends=True),
+            display_updated.splitlines(keepends=True),
             fromfile=f"{rel} (current)",
             tofile=f"{rel} (proposed)",
         ))
@@ -443,7 +495,7 @@ def _set_nested_field(text: str, parent: str, key: str, value: Any) -> str:
     block_indicator = _block_indicator(lines[field_start]) if field_start is not None else None
     replacement = _format_field(key, value, indent, block_indicator=block_indicator)
     if field_start is None:
-        insert_at = parent_end
+        insert_at = _nested_insert_at(lines, parent_start + 1, parent_end)
         new_lines = lines[:insert_at] + replacement.splitlines() + lines[insert_at:]
     else:
         new_lines = lines[:field_start] + replacement.splitlines() + lines[field_end:]
@@ -474,7 +526,8 @@ def _set_deep_nested_field(text: str, path: list[str], value: Any) -> str:
         child_start, child_end = _nested_range(lines, block_start + 1, block_end, key, child_indent)
         if child_start is None:
             replacement = _format_deep_block(path[depth:], value, child_indent)
-            new_lines = lines[:block_end] + replacement.splitlines() + lines[block_end:]
+            insert_at = _nested_insert_at(lines, block_start + 1, block_end)
+            new_lines = lines[:insert_at] + replacement.splitlines() + lines[insert_at:]
             updated = "\n".join(new_lines) + "\n"
             _assert_no_duplicate_keys(updated)
             return updated
@@ -486,7 +539,8 @@ def _set_deep_nested_field(text: str, path: list[str], value: Any) -> str:
     leaf_start, leaf_end = _nested_range(lines, block_start + 1, block_end, leaf, leaf_indent)
     replacement = _format_field(leaf, value, leaf_indent)
     if leaf_start is None:
-        new_lines = lines[:block_end] + replacement.splitlines() + lines[block_end:]
+        insert_at = _nested_insert_at(lines, block_start + 1, block_end)
+        new_lines = lines[:insert_at] + replacement.splitlines() + lines[insert_at:]
     else:
         new_lines = lines[:leaf_start] + replacement.splitlines() + lines[leaf_end:]
     updated = "\n".join(new_lines) + "\n"
@@ -519,6 +573,8 @@ def _nested_range(lines: list[str], start: int, end: int, key: str, indent: int)
     nested = re.compile(rf"^{re.escape(prefix)}[A-Za-z_][\w-]*\s*:")
     for i in range(start, end):
         if pattern.match(lines[i]):
+            if _block_indicator(lines[i]) is None and not re.match(rf"^{re.escape(prefix)}{re.escape(key)}\s*:\s*$", lines[i]):
+                return i, i + 1
             field_end = i + 1
             while field_end < end and not nested.match(lines[field_end]) and not re.match(r"^[A-Za-z_]", lines[field_end]):
                 field_end += 1
@@ -539,6 +595,18 @@ def _nested_keys(text: str, parent: str) -> set[str]:
         for line in lines[parent_start + 1:parent_end]
         if (match := pattern.match(line))
     }
+
+
+def _nested_insert_at(lines: list[str], start: int, end: int) -> int:
+    insert_at = end
+    while insert_at > start:
+        line = lines[insert_at - 1]
+        stripped = line.strip()
+        if not stripped or line.startswith("#"):
+            insert_at -= 1
+            continue
+        break
+    return insert_at
 
 
 def _child_indent(lines: list[str], start: int, end: int) -> int:

@@ -90,7 +90,7 @@
               </select>
             </label>
             <label title="The specific AI model to use, e.g. gpt-5.1 or claude-sonnet-4">Provider Model<input id="providerModel" type="text"></label>
-            <label title="How many tokens the model can see at once. Bigger isn't always better — tighter context means better attention and earlier summarization. 32k–65k is a good range">Max Context<input id="maxContext" type="number" min="1024" max="1048576"></label>
+            <label title="Context budget used when this persona runs through a cloud/API provider. Local llama.cpp uses the Local Server context size instead">API Context<input id="maxContext" type="number" min="1024" max="1048576"></label>
           </div>
           <div id="baseUrlRow" class="field-grid one hidden">
             <label title="API endpoint URL for custom providers (e.g. https://api.nanogpt.com/v1). Not needed for standard providers — they auto-configure">Base URL<input id="providerBaseUrl" type="text" placeholder="https://api.example.com/v1"></label>
@@ -109,9 +109,84 @@
         </div>
       </section>
 
+      <section id="localServerSection" class="section hidden">
+        <button class="section-header" type="button">
+          <span><em>03</em> Local Server</span>
+          <b class="section-chevron" aria-hidden="true"></b>
+        </button>
+        <div class="section-body ls-body">
+          <div class="ls-groups">
+            <div class="ls-group">
+              <div class="ls-group-label">Paths</div>
+              <div class="ls-row" title="Directory where llama-server.exe is installed">
+                <span class="ls-label">llama.cpp Dir</span>
+                <div class="ls-picker-row">
+                  <input id="lsLlamaCppDir" class="ls-input ls-input-wide" type="text" placeholder="C:\llama-cpp">
+                  <button id="lsLlamaCppDirPicker" class="icon-btn ls-picker-btn" type="button" title="Browse for folder">📂</button>
+                </div>
+              </div>
+              <div class="ls-row" title="Directory where your .gguf model files are stored">
+                <span class="ls-label">Models Dir</span>
+                <div class="ls-picker-row">
+                  <input id="lsModelsDir" class="ls-input ls-input-wide" type="text" placeholder="C:\llama-cpp\models">
+                  <button id="lsModelsDirPicker" class="icon-btn ls-picker-btn" type="button" title="Browse for folder">📂</button>
+                </div>
+              </div>
+              <div class="ls-row" title="GGUF filename in your models directory (e.g. mistral-7b-q4_k_m.gguf)">
+                <span class="ls-label">Model File</span>
+                <div class="ls-picker-row">
+                  <input id="lsModelFile" class="ls-input ls-input-wide" type="text" placeholder="model-name.gguf">
+                  <button id="lsModelFilePicker" class="icon-btn ls-picker-btn" type="button" title="Choose GGUF model file">&#128196;</button>
+                </div>
+              </div>
+            </div>
+            <div class="ls-group">
+              <div class="ls-group-label">Server</div>
+              <div class="ls-row" title="Network address the llama-server listens on. Keep 127.0.0.1 unless you need remote access">
+                <span class="ls-label">Host</span>
+                <input id="lsHost" class="ls-input ls-input-wide" type="text">
+              </div>
+              <div class="ls-row" title="Port for the llama-server HTTP API. Change if 8012 conflicts with another service">
+                <span class="ls-label">Port</span>
+                <input id="lsPort" class="ls-input" type="number" min="1024" max="65535">
+              </div>
+              <div class="ls-row" title="How many model layers to offload to GPU. -1 = all layers if the model fits in VRAM. Lower values split between CPU and GPU">
+                <span class="ls-label">GPU Layers</span>
+                <input id="lsGpuLayers" class="ls-input" type="number" min="-1" max="512">
+              </div>
+              <div class="ls-row" title="llama.cpp context window in tokens. Higher values use more VRAM/RAM. For 16 GB VRAM, start around 16384-32768 and increase only if stable">
+                <span class="ls-label">Context Size</span>
+                <input id="lsMaxContext" class="ls-input" type="number" min="1024" max="1048576">
+              </div>
+              <label class="ls-toggle" title="KV-cache optimization for faster inference. Supported on most modern GPUs. Disable if you see garbage output">
+                <input id="lsFlashAttn" type="checkbox">
+                <span>Flash Attention</span>
+              </label>
+            </div>
+          </div>
+          <div id="lsAdvancedToggle" class="ls-advanced-toggle" role="button" tabindex="0">
+            <span id="lsAdvancedChevron" class="ls-advanced-chevron">▶</span> Advanced
+          </div>
+          <div id="lsAdvanced" class="ls-advanced hidden">
+            <div class="ls-row" title="Number of parallel inference slots. Higher values let multiple requests queue, but each slot uses more VRAM">
+              <span class="ls-label">Parallel Slots</span>
+              <input id="lsParallel" class="ls-input" type="number" min="1" max="8">
+            </div>
+            <div class="ls-row" title="Optional vision projector GGUF file for multimodal models (e.g. mmproj-F16.gguf). Leave empty for text-only models">
+              <span class="ls-label">Vision Projector</span>
+              <div class="ls-picker-row">
+                <input id="lsMmproj" class="ls-input ls-input-wide" type="text" placeholder="mmproj-file.gguf">
+                <button id="lsMmprojPicker" class="icon-btn ls-picker-btn" type="button" title="Choose vision projector file">&#128196;</button>
+                <button id="lsMmprojClear" class="icon-btn sample-clear-btn ls-clear-btn" type="button" title="Clear vision projector">&times;</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <section class="section">
         <button class="section-header" type="button">
-          <span><em>03</em> Model Tuning</span>
+          <span><em>04</em> Model Tuning</span>
           <b class="section-chevron" aria-hidden="true"></b>
         </button>
         <div class="section-body">
@@ -121,7 +196,7 @@
 
       <section class="section">
         <button class="section-header" type="button">
-          <span><em>04</em> Heartbeat</span>
+          <span><em>05</em> Heartbeat</span>
           <b class="section-chevron" aria-hidden="true"></b>
         </button>
         <div class="section-body hb-body">
@@ -169,7 +244,7 @@
 
       <section class="section">
         <button class="section-header" type="button">
-          <span><em>05</em> TTS Voice</span>
+          <span><em>06</em> TTS Voice</span>
           <b class="section-chevron" aria-hidden="true"></b>
         </button>
         <div class="section-body">
@@ -198,7 +273,7 @@
 
       <section class="section open">
         <button class="section-header" type="button">
-          <span><em>06</em> Skills</span>
+          <span><em>07</em> Skills</span>
           <b class="section-chevron" aria-hidden="true"></b>
         </button>
         <div class="section-body">
@@ -208,7 +283,7 @@
 
       <section class="section">
         <button class="section-header" type="button">
-          <span><em>07</em> Channels</span>
+          <span><em>08</em> Channels</span>
           <b class="section-chevron" aria-hidden="true"></b>
         </button>
         <div class="section-body">
@@ -218,7 +293,7 @@
 
       <section class="section">
         <button class="section-header" type="button">
-          <span><em>08</em> Runtime</span>
+          <span><em>09</em> Runtime</span>
           <b class="section-chevron" aria-hidden="true"></b>
         </button>
         <div class="section-body">
@@ -228,7 +303,7 @@
 
       <section class="section">
         <button class="section-header" type="button">
-          <span><em>09</em> Logs</span>
+          <span><em>10</em> Logs</span>
           <b class="section-chevron" aria-hidden="true"></b>
         </button>
         <div class="section-body">
@@ -254,6 +329,7 @@
       <p id="confirmBody" class="modal-body"></p>
       <div class="modal-actions">
         <button id="confirmOk" class="modal-btn danger" type="button">Confirm</button>
+        <button id="confirmSecondary" class="modal-btn secondary hidden" type="button">Other</button>
         <button id="confirmCancel" class="modal-btn ghost" type="button">Cancel</button>
       </div>
     </div>

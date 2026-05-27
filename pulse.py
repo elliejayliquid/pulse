@@ -262,7 +262,13 @@ async def main(config_path: str, persona_name: str | None = None):
         # Local llama.cpp — start and manage the server process
         server = LlamaServer(config)
         runtime_status.write("starting_llm_server", True)
-        if not await server.start():
+        try:
+            server_started = await server.start()
+        except Exception as e:
+            logger.exception(f"Unexpected error while starting llama-server: {e}")
+            runtime_status.write_stopped(last_error=f"llama-server startup error: {e}")
+            sys.exit(1)
+        if not server_started:
             logger.error("Failed to start llama-server. Exiting.")
             runtime_status.write_stopped(last_error="Failed to start llama-server")
             sys.exit(1)

@@ -20,6 +20,7 @@ def test_gui_api_read_only_persona_loading():
 provider:
   type: local
 model:
+  max_context: 16384
   max_response_tokens: 1024
 skills:
   memory:
@@ -42,6 +43,7 @@ provider:
   type: openrouter
   model: demo/model
   api_key_env: DEMO_KEY
+  max_context: 32768
 skills:
   tts:
     enabled: true
@@ -73,6 +75,13 @@ voice_notes: Warm.
         assert demo["display_name"] == "Demo"
         assert demo["summary"]["provider_type"] == "openrouter"
         assert demo["summary"]["provider_model"] == "demo/model"
+        assert demo["summary"]["max_context"] == 32768
+        assert demo["summary"]["provider_max_context"] == 32768
+        assert demo["summary"]["local_max_context"] == 16384
+        assert demo["summary"]["server"]["host"] == "127.0.0.1"
+        assert demo["summary"]["server"]["port"] == 8012
+        assert demo["summary"]["model_file"] == ""
+        assert demo["summary"]["mmproj_file"] == ""
         assert demo["key_status"]["provider_type"] == "openrouter"
         assert demo["key_status"]["api_key_env"] == "DEMO_KEY"
         assert demo["key_status"]["expected_api_key_env"] == "OPENROUTER_API_KEY"
@@ -148,7 +157,37 @@ channels:
         assert status["telegram_set"] is True
 
 
+def test_gui_api_model_file_path_validation():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        models_dir = root / "models"
+        nested_dir = models_dir / "vision"
+        outside_dir = root / "elsewhere"
+        nested_dir.mkdir(parents=True)
+        outside_dir.mkdir()
+        model_file = models_dir / "main.gguf"
+        projector_file = nested_dir / "mmproj.gguf"
+        outside_file = outside_dir / "main.gguf"
+        wrong_file = models_dir / "notes.txt"
+        model_file.write_text("", encoding="utf-8")
+        projector_file.write_text("", encoding="utf-8")
+        outside_file.write_text("", encoding="utf-8")
+        wrong_file.write_text("", encoding="utf-8")
+
+        api = PulseAPI(root)
+        assert api._relative_model_file(str(models_dir), str(model_file)) == "main.gguf"
+        assert api._relative_model_file(str(models_dir), str(projector_file)) == "vision/mmproj.gguf"
+
+        for chosen in (outside_file, wrong_file):
+            try:
+                api._relative_model_file(str(models_dir), str(chosen))
+                assert False, "Expected invalid model file path to be rejected"
+            except ValueError:
+                pass
+
+
 if __name__ == "__main__":
     test_gui_api_read_only_persona_loading()
     test_gui_api_standard_provider_env_fallback()
+    test_gui_api_model_file_path_validation()
     print("[OK] GUI API")
