@@ -29,6 +29,7 @@ const state = {
   canUndo: false,
   originalEditable: null,
   currentTraits: [],
+  secretsRows: new Map(),
 };
 
 const fallbackApi = {
@@ -110,8 +111,11 @@ const fallbackApi = {
         expected_api_key_env: "OPENROUTER_API_KEY",
         api_key_set: false,
         provider_key_status: { openrouter: false, openai: false, anthropic: false },
+        provider_key_sources: { openrouter: "missing", openai: "missing", anthropic: "missing" },
+        api_key_source: "missing",
         telegram_key: "TELEGRAM_BOT_TOKEN",
         telegram_set: false,
+        telegram_source: "missing",
         telegram_enabled: true,
       },
       status: {
@@ -132,6 +136,9 @@ const fallbackApi = {
   async save_prefs() { return { ok: true }; },
   async preview_persona_save() { return { ok: false, error: "Run through pywebview to save." }; },
   async save_persona() { return { ok: false, error: "Run through pywebview to save." }; },
+  async get_secrets() { return { ok: false, error: "Run through pywebview to edit secrets." }; },
+  async save_secrets() { return { ok: false, error: "Run through pywebview to edit secrets." }; },
+  async reveal_secret() { return { ok: false, error: "Run through pywebview to edit secrets." }; },
   async list_backups() {
     return {
       ok: true,
@@ -168,6 +175,8 @@ function el(id) {
 }
 
 let noticeTimer = null;
+let secretsBackdropPointerDown = false;
+let confirmBackdropPointerDown = false;
 
 function setNotice(message, kind = "info", autoHideMs = 0) {
   const box = el("notice");
@@ -349,8 +358,11 @@ function normalizeKeyStatus(status = {}) {
         ? false
         : Boolean(status.api_key_set),
     provider_key_status: providerKeyStatus,
+    provider_key_sources: status.provider_key_sources || {},
+    api_key_source: status.api_key_source || "missing",
     telegram_key: status.telegram_key || "TELEGRAM_BOT_TOKEN",
     telegram_set: Boolean(status.telegram_set),
+    telegram_source: status.telegram_source || "missing",
     telegram_enabled: telegramChannel ? Boolean(telegramChannel.enabled) : Boolean(status.telegram_enabled),
   };
 }
@@ -568,6 +580,18 @@ function providerDisplayName(status) {
   return PROVIDER_NAMES[status.provider_type] || status.provider_type || "Provider";
 }
 
+function secretStatusLabel(source, isSet) {
+  if (source === "persona") return "Set";
+  if (source === "inherited") return "Inherited";
+  return isSet ? "Set" : "Missing";
+}
+
+function secretStatusClass(source, isSet) {
+  if (source === "persona") return "set";
+  if (source === "inherited") return "inherited";
+  return isSet ? "set" : "missing";
+}
+
 function renderProviderWarnings(status) {
   const box = el("providerWarnings");
   const messages = [];
@@ -604,14 +628,249 @@ function renderSecrets(status) {
   el("apiKeyRow").classList.toggle("hidden", isLocal);
   if (!isLocal) {
     el("apiKeyName").textContent = providerKeyLabel(normalized);
-    el("apiKeyStatus").textContent = normalized.api_key_set ? "Set" : "Missing";
-    el("apiKeyStatus").className = normalized.api_key_set ? "set" : "missing";
+    el("apiKeyStatus").textContent = secretStatusLabel(normalized.api_key_source, normalized.api_key_set);
+    el("apiKeyStatus").className = secretStatusClass(normalized.api_key_source, normalized.api_key_set);
   }
 
-  el("telegramStatus").textContent = normalized.telegram_set ? "Set" : "Missing";
-  el("telegramStatus").className = normalized.telegram_set ? "set" : "missing";
+  el("telegramStatus").textContent = secretStatusLabel(normalized.telegram_source, normalized.telegram_set);
+  el("telegramStatus").className = secretStatusClass(normalized.telegram_source, normalized.telegram_set);
+  el("editSecretsBtn").disabled = !state.current || state.current.name === "__base__";
   renderProviderWarnings(normalized);
   renderProcessButton(state.current);
+}
+
+function secretBadgeLabel(source) {
+  if (source === "persona") return "Set";
+  if (source === "inherited") return "Inherited";
+  return "Missing";
+}
+
+function secretPlaceholder(key) {
+  const placeholders = {
+    OPENROUTER_API_KEY: "sk-or-v1-...",
+    OPENAI_API_KEY: "sk-proj-...",
+    ANTHROPIC_API_KEY: "sk-ant-...",
+    TELEGRAM_BOT_TOKEN: "123456:ABC-...",
+  };
+  return placeholders[key] || "paste key here";
+}
+
+function secretInputPlaceholder(secret) {
+  if (secret.source === "persona") return "Paste replacement, or use Reveal";
+  if (secret.source === "inherited") return "Inherited from root .env";
+  return secretPlaceholder(secret.key);
+}
+
+function updateSecretsSaveState() {
+  const dirty = Array.from(state.secretsRows.values()).some((row) => row.dirty);
+  el("secretsSave").disabled = !dirty;
+}
+
+async function revealSecret(row, input, button) {
+  if (row.dirty) {
+    const showing = input.type === "text";
+    input.type = showing ? "password" : "text";
+    button.textContent = showing ? "Reveal" : "Hide";
+    button.title = showing ? "Reveal value" : "Hide value";
+    return;
+  }
+  if (row.revealed) {
+    input.type = "password";
+    input.value = row.displayValue || "";
+    row.revealed = false;
+    button.textContent = "Reveal";
+    button.title = "Reveal value";
+    return;
+  }
+  if (!row.valueLoaded) {
+    const result = await api().reveal_secret(state.current.name, row.key);
+    if (!result.ok) {
+      setNotice(result.error || "Could not reveal secret.", "warning");
+      return;
+    }
+    row.loadedValue = result.value || "";
+    row.valueLoaded = true;
+  }
+  input.type = "text";
+  input.value = row.loadedValue;
+  row.revealed = true;
+  button.textContent = "Hide";
+  button.title = "Hide value";
+}
+
+async function copySecretToPersona(row, input) {
+  if (!row.valueLoaded) {
+    const result = await api().reveal_secret(state.current.name, row.key);
+    if (!result.ok) {
+      setNotice(result.error || "Could not copy inherited key.", "warning");
+      return;
+    }
+    row.loadedValue = result.value || "";
+    row.valueLoaded = true;
+  }
+  input.value = row.loadedValue;
+  input.type = "password";
+  row.revealed = false;
+  row.dirty = true;
+  row.remove = false;
+  row.value = row.loadedValue;
+  row.displayValue = row.loadedValue ? "********" : "";
+  updateSecretsSaveState();
+}
+
+function renderSecretsModal(data) {
+  const body = el("secretsBody");
+  state.secretsRows = new Map();
+  el("secretsTitle").textContent = `${providerDisplayName({ provider_type: data.provider_type })} Keys`;
+  body.innerHTML = "";
+
+  (data.secrets || []).forEach((secret) => {
+    const rowState = {
+      key: secret.key,
+      source: secret.source,
+      dirty: false,
+      remove: false,
+      revealed: false,
+      valueLoaded: false,
+      loadedValue: "",
+      value: "",
+      displayValue: "",
+    };
+    state.secretsRows.set(secret.key, rowState);
+
+    const row = document.createElement("div");
+    row.className = "secret-edit-row";
+    row.dataset.key = secret.key;
+    row.innerHTML = `
+      <div class="secret-edit-head">
+        <span class="secret-edit-label">${escapeHtml(secret.label || secret.key)}</span>
+        <span class="secret-badge secret-badge-${escapeHtml(secret.source)}">${escapeHtml(secretBadgeLabel(secret.source))}</span>
+      </div>
+      <div class="secret-input-row">
+        <input class="secret-input" type="password" placeholder="${escapeHtml(secretInputPlaceholder(secret))}">
+      </div>
+      <div class="secret-row-actions"></div>
+      <div class="secret-hint"></div>
+    `;
+    const input = row.querySelector(".secret-input");
+    const actions = row.querySelector(".secret-row-actions");
+    const hint = row.querySelector(".secret-hint");
+
+    if (secret.source === "persona") {
+      hint.textContent = `Stored in this persona's .env (${secret.masked || "masked"}). Paste a new value to replace it, or remove this persona's copy. Root .env is not touched.`;
+    } else if (secret.source === "inherited") {
+      hint.textContent = `Inherited from root .env (${secret.masked || "masked"}). Copy to persona if you want this companion to carry its own key.`;
+    } else {
+      hint.textContent = "Not set. Paste a key here to save it in this persona's .env.";
+    }
+
+    input.addEventListener("input", () => {
+      rowState.dirty = true;
+      rowState.remove = false;
+      rowState.value = input.value;
+      rowState.displayValue = input.value;
+      updateSecretsSaveState();
+    });
+
+    if (secret.source !== "missing") {
+      const revealBtn = document.createElement("button");
+      revealBtn.type = "button";
+      revealBtn.className = "secret-mini-btn";
+      revealBtn.textContent = "Reveal";
+      revealBtn.title = "Reveal value";
+      revealBtn.addEventListener("click", () => revealSecret(rowState, input, revealBtn));
+      actions.appendChild(revealBtn);
+    }
+
+    if (secret.source === "inherited") {
+      const copyBtn = document.createElement("button");
+      copyBtn.type = "button";
+      copyBtn.className = "secret-mini-btn";
+      copyBtn.textContent = "Copy to persona";
+      copyBtn.addEventListener("click", () => copySecretToPersona(rowState, input));
+      actions.appendChild(copyBtn);
+    }
+
+    if (secret.source === "persona") {
+      const removeBtn = document.createElement("button");
+      removeBtn.type = "button";
+      removeBtn.className = "secret-mini-btn danger";
+      removeBtn.textContent = "Remove persona copy";
+      removeBtn.title = "Delete this key only from the persona .env. Root .env is not touched.";
+      removeBtn.addEventListener("click", () => {
+        input.value = "";
+        input.type = "password";
+        rowState.dirty = true;
+        rowState.remove = true;
+        rowState.value = "";
+        rowState.displayValue = "";
+        hint.textContent = "This persona's copy will be removed on save. Root .env is not touched.";
+        updateSecretsSaveState();
+      });
+      actions.appendChild(removeBtn);
+    }
+
+    body.appendChild(row);
+  });
+  updateSecretsSaveState();
+}
+
+async function openSecretsModal() {
+  const persona = state.current?.name;
+  if (!persona || persona === "__base__") return;
+  const confirmed = await showConfirm(
+    "Edit API Keys",
+    "This can reveal sensitive values. Continue?",
+    "Open",
+    "secondary"
+  );
+  if (!confirmed) return;
+  const result = await api().get_secrets(persona);
+  if (!result.ok) {
+    setNotice(result.error || "Could not load secrets.", "warning");
+    return;
+  }
+  renderSecretsModal(result);
+  el("secretsDialog").classList.remove("hidden");
+  document.body.classList.add("modal-open");
+}
+
+function closeSecretsModal() {
+  el("secretsDialog").classList.add("hidden");
+  document.body.classList.remove("modal-open");
+  state.secretsRows = new Map();
+}
+
+async function saveSecrets() {
+  const persona = state.current?.name;
+  if (!persona || persona === "__base__") return;
+
+  const updates = {};
+  state.secretsRows.forEach((row) => {
+    if (!row.dirty) return;
+    updates[row.key] = row.remove ? null : row.value;
+  });
+  if (!Object.keys(updates).length) {
+    closeSecretsModal();
+    return;
+  }
+
+  const wasRunning = currentPersonaIsRunning();
+  const result = await api().save_secrets(persona, updates);
+  if (!result.ok) {
+    setNotice(result.error || "Could not save keys.", "warning");
+    return;
+  }
+  const status = await api().get_key_status(persona);
+  state.current.key_status = status;
+  renderSecrets(status);
+  closeSecretsModal();
+  if (result.changed && wasRunning) {
+    setNotice("Keys saved. Restart the persona for changes to take effect.", "warning", NOTICE_WARNING_MS);
+    setFooterNotice("Restart needed: saved keys take effect after restart.");
+  } else {
+    setNotice(result.changed ? "Keys saved." : "No key changes to save.", "info", NOTICE_INFO_MS);
+  }
 }
 
 function renderIdentity(data) {
@@ -1535,6 +1794,19 @@ function wireEvents() {
   el("saveBtn").addEventListener("click", async () => {
     await saveCurrentPersona();
   });
+  el("editSecretsBtn").addEventListener("click", openSecretsModal);
+  el("secretsSave").addEventListener("click", saveSecrets);
+  el("secretsCancel").addEventListener("click", closeSecretsModal);
+  el("secretsDialog").addEventListener("pointerdown", (event) => {
+    secretsBackdropPointerDown = event.target === el("secretsDialog");
+  });
+  el("secretsDialog").addEventListener("click", (event) => {
+    if (secretsBackdropPointerDown && event.target === el("secretsDialog")) closeSecretsModal();
+    secretsBackdropPointerDown = false;
+  });
+  el("confirmDialog").addEventListener("pointerdown", (event) => {
+    confirmBackdropPointerDown = event.target === el("confirmDialog");
+  });
   el("undoBtn").addEventListener("click", async () => {
     if (!state.current || state.current.name === "__base__") return;
     const ok = await showConfirm(
@@ -1807,6 +2079,10 @@ function showConfirm(title, body, okLabel = "Confirm", okStyle = "danger") {
     }
     el("confirmOk").addEventListener("click", () => cleanup(true), { once: true });
     el("confirmCancel").addEventListener("click", () => cleanup(false), { once: true });
+    el("confirmDialog").addEventListener("click", (event) => {
+      if (confirmBackdropPointerDown && event.target === el("confirmDialog")) cleanup(false);
+      confirmBackdropPointerDown = false;
+    }, { once: true });
   });
 }
 
@@ -1836,6 +2112,10 @@ function showChoice(title, body, { okLabel, okStyle = "secondary", secondaryLabe
     el("confirmOk").addEventListener("click", () => cleanup("ok"), { once: true });
     el("confirmSecondary").addEventListener("click", () => cleanup("secondary"), { once: true });
     el("confirmCancel").addEventListener("click", () => cleanup("cancel"), { once: true });
+    el("confirmDialog").addEventListener("click", (event) => {
+      if (confirmBackdropPointerDown && event.target === el("confirmDialog")) cleanup("cancel");
+      confirmBackdropPointerDown = false;
+    }, { once: true });
   });
 }
 

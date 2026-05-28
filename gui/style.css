@@ -955,6 +955,31 @@ textarea {
   color: var(--warning);
 }
 
+.secret-row strong.inherited {
+  color: #60a5fa;
+}
+
+.secrets-edit-btn {
+  width: fit-content;
+  padding: 7px 11px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text-secondary);
+  font: 700 11px/1 var(--body);
+  cursor: pointer;
+}
+
+.secrets-edit-btn:hover:not(:disabled) {
+  border-color: rgba(249, 115, 22, 0.45);
+  color: var(--accent);
+}
+
+.secrets-edit-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .provider-warnings {
   display: flex;
   flex-direction: column;
@@ -1311,6 +1336,103 @@ textarea {
   border-radius: 12px;
   padding: 28px;
   box-shadow: 0 24px 60px rgba(0, 0, 0, 0.6);
+}
+
+.secrets-card {
+  width: min(560px, calc(100vw - 48px));
+}
+
+.secrets-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin: 16px 0 4px;
+}
+
+.secret-edit-row {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.secret-edit-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.secret-edit-label {
+  color: var(--text-secondary);
+  font: 700 11px/1 var(--body);
+  text-transform: uppercase;
+}
+
+.secret-badge {
+  padding: 3px 7px;
+  border-radius: 999px;
+  font: 700 10px/1 var(--body);
+}
+
+.secret-badge-persona {
+  background: rgba(34, 197, 94, 0.12);
+  color: var(--success);
+}
+
+.secret-badge-inherited {
+  background: rgba(96, 165, 250, 0.12);
+  color: #60a5fa;
+}
+
+.secret-badge-missing {
+  background: rgba(245, 158, 11, 0.12);
+  color: var(--warning);
+}
+
+.secret-input-row {
+  display: flex;
+  gap: 8px;
+}
+
+.secret-input-row input {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--mono);
+}
+
+.secret-row-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+.secret-mini-btn {
+  padding: 6px 9px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text-secondary);
+  font: 700 11px/1 var(--body);
+  cursor: pointer;
+}
+
+.secret-mini-btn:hover {
+  border-color: rgba(249, 115, 22, 0.45);
+  color: var(--accent);
+}
+
+.secret-mini-btn.danger:hover {
+  border-color: rgba(239, 68, 68, 0.45);
+  color: var(--danger);
+}
+
+.secret-hint {
+  margin-top: 8px;
+  color: var(--text-tertiary);
+  font: 11px/1.4 var(--body);
 }
 
 .modal-card.diff-card {

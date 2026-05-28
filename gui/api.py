@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -32,6 +33,15 @@ PROVIDER_KEY_MAP = {
     "openai": "OPENAI_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",
 }
+
+PROVIDER_KEY_LABELS = {
+    "OPENROUTER_API_KEY": "OpenRouter API Key",
+    "OPENAI_API_KEY": "OpenAI API Key",
+    "ANTHROPIC_API_KEY": "Anthropic API Key",
+    "TELEGRAM_BOT_TOKEN": "Telegram Bot Token",
+}
+
+SECRET_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]{1,80}$")
 
 
 SKILL_ICONS = {
@@ -87,6 +97,52 @@ def _parse_env(path: Path) -> dict[str, str]:
         key, value = line.split("=", 1)
         values[key.strip()] = value.strip().strip('"').strip("'")
     return values
+
+
+def _mask_secret(value: str) -> str:
+    if not value:
+        return ""
+    if len(value) <= 4:
+        return "****"
+    return "********" + value[-4:]
+
+
+def _secret_label(key_name: str) -> str:
+    return PROVIDER_KEY_LABELS.get(key_name, key_name)
+
+
+def _env_line_key(line: str) -> str | None:
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#") or "=" not in stripped:
+        return None
+    key = stripped.split("=", 1)[0].strip()
+    return key if SECRET_KEY_RE.match(key) else None
+
+
+def _write_env_preserving(path: Path, updates: dict[str, str | None]) -> None:
+    """Apply env var updates while preserving comments, order, and unknown lines."""
+    existing_lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    remaining = dict(updates)
+    output: list[str] = []
+
+    for line in existing_lines:
+        key = _env_line_key(line)
+        if key and key in remaining:
+            value = remaining.pop(key)
+            if value:
+                output.append(f"{key}={value}")
+            continue
+        output.append(line)
+
+    for key, value in remaining.items():
+        if value:
+            output.append(f"{key}={value}")
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.tmp")
+    content = "\n".join(output)
+    tmp.write_text((content + "\n") if content else "", encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def _safe_rel(path: Path, root: Path) -> str:
@@ -330,10 +386,29 @@ class PulseAPI:
 
     # Secrets/status/logs
 
-    def get_key_status(self, persona: str) -> dict:
+    def _merged_config_for(self, persona: str) -> dict:
         config = _load_yaml(self.base_config_path)
         if persona and persona != "__base__":
             config = deep_merge(config, _load_yaml(self.personas_dir / persona / "config.yaml"))
+        return config
+
+    def _secret_keys_for(self, persona: str, config: dict | None = None) -> list[str]:
+        config = config or self._merged_config_for(persona)
+        provider = config.get("provider", {})
+        provider_type = provider.get("type", "local")
+        api_key_env = provider.get("api_key_env", "") or PROVIDER_KEY_MAP.get(provider_type, "")
+        keys = []
+        if provider_type != "local" and api_key_env:
+            keys.append(api_key_env)
+        keys.append("TELEGRAM_BOT_TOKEN")
+        unique = []
+        for key in keys:
+            if key and key not in unique:
+                unique.append(key)
+        return unique
+
+    def get_key_status(self, persona: str) -> dict:
+        config = self._merged_config_for(persona)
 
         root_env = _parse_env(self.root / ".env")
         persona_env = _parse_env(self.personas_dir / persona / ".env") if persona and persona != "__base__" else {}
@@ -348,6 +423,14 @@ class PulseAPI:
             key: bool(env.get(value))
             for key, value in PROVIDER_KEY_MAP.items()
         }
+        provider_key_sources = {
+            key: (
+                "persona" if persona_env.get(value)
+                else "inherited" if root_env.get(value)
+                else "missing"
+            )
+            for key, value in PROVIDER_KEY_MAP.items()
+        }
         channels = config.get("channels", {})
         telegram = channels.get("telegram", {})
         telegram_enabled = telegram.get("enabled", True) if isinstance(telegram, dict) else bool(telegram)
@@ -357,11 +440,111 @@ class PulseAPI:
             "api_key_env": api_key_env,
             "expected_api_key_env": expected_api_key_env,
             "api_key_set": bool(effective_api_key_env and env.get(effective_api_key_env)),
+            "api_key_source": (
+                "persona" if effective_api_key_env and persona_env.get(effective_api_key_env)
+                else "inherited" if effective_api_key_env and root_env.get(effective_api_key_env)
+                else "missing"
+            ),
             "provider_key_status": provider_key_status,
+            "provider_key_sources": provider_key_sources,
             "telegram_key": telegram_key,
             "telegram_set": bool(env.get(telegram_key)),
+            "telegram_source": (
+                "persona" if persona_env.get(telegram_key)
+                else "inherited" if root_env.get(telegram_key)
+                else "missing"
+            ),
             "telegram_enabled": telegram_enabled,
         }
+
+    def get_secrets(self, persona: str) -> dict:
+        if not persona or persona == "__base__":
+            return {"ok": False, "error": "Choose a persona first."}
+        persona_dir = self.personas_dir / persona
+        if not persona_dir.is_dir():
+            return {"ok": False, "error": f"Persona not found: {persona}"}
+
+        config = self._merged_config_for(persona)
+        root_env = _parse_env(self.root / ".env")
+        persona_env = _parse_env(persona_dir / ".env")
+        provider_type = config.get("provider", {}).get("type", "local")
+
+        secrets = []
+        for key_name in self._secret_keys_for(persona, config):
+            if not SECRET_KEY_RE.match(key_name):
+                continue
+            persona_value = persona_env.get(key_name, "")
+            root_value = root_env.get(key_name, "")
+            if persona_value:
+                source = "persona"
+                masked = _mask_secret(persona_value)
+            elif root_value:
+                source = "inherited"
+                masked = _mask_secret(root_value)
+            else:
+                source = "missing"
+                masked = ""
+            secrets.append({
+                "key": key_name,
+                "label": _secret_label(key_name),
+                "masked": masked,
+                "source": source,
+            })
+
+        return {"ok": True, "provider_type": provider_type, "secrets": secrets}
+
+    def reveal_secret(self, persona: str, key_name: str) -> dict:
+        if not persona or persona == "__base__":
+            return {"ok": False, "error": "Choose a persona first."}
+        persona_dir = self.personas_dir / persona
+        if not persona_dir.is_dir():
+            return {"ok": False, "error": f"Persona not found: {persona}"}
+        if key_name not in self._secret_keys_for(persona):
+            return {"ok": False, "error": "Secret key is not editable for this persona."}
+        if not SECRET_KEY_RE.match(key_name):
+            return {"ok": False, "error": "Invalid secret key name."}
+
+        root_env = _parse_env(self.root / ".env")
+        persona_env = _parse_env(persona_dir / ".env")
+        value = persona_env.get(key_name, "") or root_env.get(key_name, "")
+        return {"ok": True, "key": key_name, "value": value}
+
+    def save_secrets(self, persona: str, updates: dict) -> dict:
+        if not persona or persona == "__base__":
+            return {"ok": False, "error": "Cannot edit base secrets from the GUI."}
+        persona_dir = self.personas_dir / persona
+        if not persona_dir.is_dir():
+            return {"ok": False, "error": f"Persona not found: {persona}"}
+        if not isinstance(updates, dict):
+            return {"ok": False, "error": "Invalid secret update payload."}
+
+        allowed = set(self._secret_keys_for(persona))
+        clean_updates: dict[str, str | None] = {}
+        for key, value in updates.items():
+            key_name = str(key)
+            if key_name not in allowed or not SECRET_KEY_RE.match(key_name):
+                return {"ok": False, "error": f"Secret key is not editable: {key_name}"}
+            if value is None:
+                clean_updates[key_name] = None
+                continue
+            if not isinstance(value, str):
+                return {"ok": False, "error": f"Invalid value for {key_name}."}
+            cleaned = value.strip()
+            if "\x00" in cleaned or "\n" in cleaned or "\r" in cleaned:
+                return {"ok": False, "error": f"Invalid value for {key_name}."}
+            if len(cleaned) > 10000:
+                return {"ok": False, "error": f"Secret value is too long: {key_name}."}
+            clean_updates[key_name] = cleaned or None
+
+        if not clean_updates:
+            return {"ok": True, "changed": False}
+
+        self.backups.create_backup(persona, reason="pre-secret-edit")
+        env_path = persona_dir / ".env"
+        before = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
+        _write_env_preserving(env_path, clean_updates)
+        after = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
+        return {"ok": True, "changed": before != after}
 
     def get_status(self, persona: str | None = None) -> dict:
         self._cleanup_processes()

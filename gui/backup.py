@@ -11,6 +11,7 @@ from typing import Any
 
 
 IDENTITY_FILES = ("persona.yaml", "persona.yml", "persona.json")
+CONFIG_FILES = ("config.yaml", ".env", *IDENTITY_FILES)
 
 
 class BackupManager:
@@ -177,6 +178,8 @@ class BackupManager:
             dest = (self.root / source_path).resolve()
         elif filename == "config.yaml":
             dest = persona_dir / "config.yaml"
+        elif filename == ".env":
+            dest = persona_dir / ".env"
         elif filename in IDENTITY_FILES:
             dest = persona_dir / filename
         else:
@@ -188,7 +191,7 @@ class BackupManager:
             raise ValueError(f"Restore destination is outside persona folder: {filename}") from exc
         if dest.parent.resolve() != persona_dir.resolve():
             raise ValueError(f"Restore destination must be a top-level persona file: {filename}")
-        if dest.name != filename or dest.name not in ("config.yaml", *IDENTITY_FILES):
+        if dest.name != filename or dest.name not in CONFIG_FILES:
             raise ValueError(f"Cannot restore unsupported file: {filename}")
         return dest
 
@@ -203,6 +206,9 @@ class BackupManager:
         config_path = persona_dir / "config.yaml"
         if config_path.exists():
             files.append(config_path)
+        env_path = persona_dir / ".env"
+        if env_path.exists():
+            files.append(env_path)
         for filename in IDENTITY_FILES:
             path = persona_dir / filename
             if path.exists():

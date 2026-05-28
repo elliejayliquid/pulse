@@ -186,8 +186,71 @@ def test_gui_api_model_file_path_validation():
                 pass
 
 
+def test_gui_api_secrets_preserve_env_and_validate_keys():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        persona_dir = root / "personas" / "demo"
+        persona_dir.mkdir(parents=True)
+        (root / "logs").mkdir()
+
+        (root / "config.yaml").write_text(
+            """
+provider:
+  type: openrouter
+channels:
+  telegram:
+    enabled: true
+""",
+            encoding="utf-8",
+        )
+        (root / ".env").write_text(
+            "OPENROUTER_API_KEY=root-openrouter\nTELEGRAM_BOT_TOKEN=root-telegram\n",
+            encoding="utf-8",
+        )
+        (persona_dir / "config.yaml").write_text("", encoding="utf-8")
+        (persona_dir / "persona.yaml").write_text("name: Demo\n", encoding="utf-8")
+        (persona_dir / ".env").write_text(
+            "# demo secrets\nOTHER_KEY=keep-me\nTELEGRAM_BOT_TOKEN=persona-telegram\n",
+            encoding="utf-8",
+        )
+
+        api = PulseAPI(root)
+        secrets = api.get_secrets("demo")
+        by_key = {item["key"]: item for item in secrets["secrets"]}
+        assert by_key["OPENROUTER_API_KEY"]["source"] == "inherited"
+        assert by_key["OPENROUTER_API_KEY"]["masked"].endswith("uter")
+        assert by_key["TELEGRAM_BOT_TOKEN"]["source"] == "persona"
+        assert by_key["TELEGRAM_BOT_TOKEN"]["masked"].endswith("gram")
+        assert "root-openrouter" not in str(secrets)
+        assert api.reveal_secret("demo", "OPENROUTER_API_KEY")["value"] == "root-openrouter"
+
+        rejected = api.save_secrets("demo", {"NOT_ALLOWED": "nope"})
+        assert rejected["ok"] is False
+
+        saved = api.save_secrets("demo", {
+            "OPENROUTER_API_KEY": "persona-openrouter",
+            "TELEGRAM_BOT_TOKEN": None,
+        })
+        assert saved["ok"] is True
+        assert saved["changed"] is True
+
+        env_text = (persona_dir / ".env").read_text(encoding="utf-8")
+        assert "# demo secrets" in env_text
+        assert "OTHER_KEY=keep-me" in env_text
+        assert "OPENROUTER_API_KEY=persona-openrouter" in env_text
+        assert "TELEGRAM_BOT_TOKEN" not in env_text
+
+        status = api.get_key_status("demo")
+        assert status["api_key_source"] == "persona"
+        assert status["telegram_source"] == "inherited"
+
+        backup = api.list_backups("demo")["backups"][0]
+        assert ".env" in backup["files"]
+
+
 if __name__ == "__main__":
     test_gui_api_read_only_persona_loading()
     test_gui_api_standard_provider_env_fallback()
     test_gui_api_model_file_path_validation()
+    test_gui_api_secrets_preserve_env_and_validate_keys()
     print("[OK] GUI API")

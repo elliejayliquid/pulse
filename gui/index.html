@@ -104,6 +104,7 @@
               <span>TELEGRAM_BOT_TOKEN</span>
               <strong id="telegramStatus">Unknown</strong>
             </div>
+            <button id="editSecretsBtn" class="secrets-edit-btn" type="button" title="Edit persona API keys">Edit keys</button>
           </div>
           <div id="providerWarnings" class="provider-warnings hidden"></div>
         </div>
@@ -342,6 +343,18 @@
       <div id="backupList" class="backup-list"></div>
       <div class="modal-actions">
         <button id="backupCloseBtn" class="modal-btn ghost" type="button">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="secretsDialog" class="modal-overlay hidden">
+    <div class="modal-card secrets-card">
+      <h2 id="secretsTitle" class="modal-title">API Keys</h2>
+      <p class="modal-body">Values are masked by default. Root keys can be copied into this persona explicitly.</p>
+      <div id="secretsBody" class="secrets-body"></div>
+      <div class="modal-actions">
+        <button id="secretsSave" class="modal-btn secondary" type="button" disabled>Save</button>
+        <button id="secretsCancel" class="modal-btn ghost" type="button">Cancel</button>
       </div>
     </div>
   </div>

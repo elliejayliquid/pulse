@@ -10,7 +10,7 @@ from gui.api import PulseAPI
 from gui.backup import BackupManager
 
 
-def test_gui_backup_creates_config_only_backup():
+def test_gui_backup_creates_user_authored_backup():
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         persona_dir = root / "personas" / "demo"
@@ -32,15 +32,16 @@ def test_gui_backup_creates_config_only_backup():
         assert backup_dir.is_dir()
         assert (backup_dir / "config.yaml").exists()
         assert (backup_dir / "persona.yaml").exists()
-        assert not (backup_dir / ".env").exists()
+        assert (backup_dir / ".env").exists()
         assert not (backup_dir / "demo.db").exists()
         assert not (backup_dir / "status.json").exists()
 
         metadata = json.loads((backup_dir / "metadata.json").read_text(encoding="utf-8"))
         assert metadata["persona"] == "demo"
         assert metadata["reason"] == "pre-edit"
-        assert metadata["files"] == ["config.yaml", "persona.yaml"]
+        assert metadata["files"] == ["config.yaml", ".env", "persona.yaml"]
         assert metadata["source_paths"]["config.yaml"] == "personas/demo/config.yaml"
+        assert metadata["source_paths"][".env"] == "personas/demo/.env"
 
         listed = api.list_backups("demo")
         assert listed["ok"] is True
@@ -121,7 +122,7 @@ def test_gui_backup_restore_rejects_nested_destination_metadata():
 
 
 if __name__ == "__main__":
-    test_gui_backup_creates_config_only_backup()
+    test_gui_backup_creates_user_authored_backup()
     test_gui_backup_prunes_per_persona()
     test_gui_backup_restore_creates_safety_backup_and_restores_files()
     test_gui_backup_restore_rejects_path_traversal()
