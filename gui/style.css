@@ -1283,6 +1283,16 @@ textarea {
   flex-wrap: wrap;
 }
 
+.footer-notice {
+  max-width: 260px;
+  padding: 8px 10px;
+  border: 1px solid rgba(245, 158, 11, 0.28);
+  border-radius: 7px;
+  background: rgba(245, 158, 11, 0.08);
+  color: #f8c471;
+  font: 600 11px/1.25 var(--body);
+}
+
 .modal-overlay {
   position: fixed;
   inset: 0;

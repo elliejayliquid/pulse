@@ -184,6 +184,18 @@ function setNotice(message, kind = "info", autoHideMs = 0) {
   }
 }
 
+function setFooterNotice(message) {
+  const box = el("footerNotice");
+  if (!box) return;
+  if (!message) {
+    box.classList.add("hidden");
+    box.textContent = "";
+    return;
+  }
+  box.textContent = message;
+  box.classList.remove("hidden");
+}
+
 function setDirty(value) {
   state.dirty = Boolean(value);
   const isBase = state.current?.name === "__base__";
@@ -1150,6 +1162,7 @@ function currentPersonaIsRunning() {
 
 async function loadPersona(name) {
   setNotice("");
+  setFooterNotice("");
   const data = await api().load_persona(name);
   state.current = data;
   renderHero(data);
@@ -1248,9 +1261,12 @@ async function applyCurrentSave(changes, { notice = true } = {}) {
   setCanUndo(Boolean(result.changed));
   if (notice) {
     if (result.changed && wasRunning) {
+      const restartMessage = "Restart needed: saved changes take effect after restart.";
       setNotice("Saved. Restart the persona for changes to take effect.", "warning", NOTICE_WARNING_MS);
+      setFooterNotice(restartMessage);
     } else {
       setNotice(result.changed ? "Saved with backup." : "No changes to save.", "info", NOTICE_INFO_MS);
+      setFooterNotice("");
     }
   }
   return { ok: true, changed: Boolean(result.changed), personaName };
@@ -1356,6 +1372,7 @@ async function refreshCurrentStatus() {
   renderStatus(status);
   renderRuntime(status, state.current.summary || {});
   renderProcessButton(state.current);
+  if (!status.running) setFooterNotice("");
   await loadLogs();
 
   if (state.pendingTransition === "starting") {
@@ -1537,8 +1554,10 @@ function wireEvents() {
     setCanUndo(false);
     if (result.changed && wasRunning) {
       setNotice("Restored. Restart the persona for changes to take effect.", "warning", NOTICE_WARNING_MS);
+      setFooterNotice("Restart needed: restored changes take effect after restart.");
     } else {
       setNotice(result.changed ? "Restored latest backup." : "Nothing to restore.", "info", NOTICE_INFO_MS);
+      setFooterNotice("");
     }
   });
   el("pulseToggle").addEventListener("click", async () => {
@@ -1552,6 +1571,7 @@ function wireEvents() {
         if (!choice.ok) return;
       }
       setNotice("Requesting graceful shutdown...");
+      setFooterNotice("");
       state.pendingTransition = "stopping";
       const result = await api().stop_pulse(state.current.name);
       if (!result.ok) {
@@ -1566,6 +1586,7 @@ function wireEvents() {
         if (!choice.ok || choice.action === "saved") return;
       }
       setNotice("Starting Pulse...");
+      setFooterNotice("");
       state.pendingTransition = "starting";
       const result = await api().start_pulse(state.current.name);
       if (!result.ok) {
@@ -1644,8 +1665,10 @@ async function restoreBackup(path) {
   setCanUndo(Boolean(result.changed));
   if (result.changed && wasRunning) {
     setNotice("Restored. Restart the persona for changes to take effect.", "warning", NOTICE_WARNING_MS);
+    setFooterNotice("Restart needed: restored changes take effect after restart.");
   } else {
     setNotice(result.changed ? "Restored selected backup." : "Nothing to restore.", "info", NOTICE_INFO_MS);
+    setFooterNotice("");
   }
 }
 
