@@ -136,6 +136,8 @@ def _write_markdown_entry(path: Path, meta: dict, content: str):
 class JournalSkill(BaseSkill):
     name = "journal"
     description = "Write, search, and manage structured self-reflection and identity entries"
+    aliases = ["journal", "reflect", "reflection", "identity", "diary", "write thoughts", "inner state", "housekeeping"]
+    categories = ["reflection", "memory", "housekeeping"]
 
     def __init__(self, config: dict):
         super().__init__(config)

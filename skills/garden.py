@@ -53,6 +53,8 @@ ALL_BLOOMS = [
 class GardenSkill(BaseSkill):
     name = "garden"
     description = "Tend an emotional garden — plant, water, and grow memory flowers"
+    aliases = ["garden", "flowers", "plant", "water", "tend", "emotional garden", "housekeeping"]
+    categories = ["creative", "reflection", "housekeeping"]
 
     def __init__(self, config: dict):
         super().__init__(config)

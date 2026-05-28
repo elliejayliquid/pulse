@@ -24,6 +24,8 @@ class BaseSkill(ABC):
 
     name: str = ""
     description: str = ""          # one-line summary for search + prompt display
+    aliases: list[str] = []        # search_tools hints, e.g. "reach out", "creative"
+    categories: list[str] = []     # broad search groups, e.g. "social", "creative"
     always_loaded: bool = False    # True = all tools always in API calls
     always_tools: list[str] = []   # specific tool names always loaded even if skill is on-demand
     workflow: str = ""             # usage hints injected when skill is loaded via search_tools

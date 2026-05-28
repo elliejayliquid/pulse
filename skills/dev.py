@@ -76,6 +76,8 @@ class DevSkill(BaseSkill):
 
     name = "dev"
     description = "Read, write, search, and manage Pulse skill code for self-improvement"
+    aliases = ["code", "coding", "programming", "self improvement", "improve pulse", "read source"]
+    categories = ["development"]
     workflow = "list_skills → read_source → search_code → write_skill → dev_journal_write"
 
     def __init__(self, config: dict):

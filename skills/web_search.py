@@ -15,6 +15,8 @@ logger = logging.getLogger(__name__)
 class WebSearchSkill(BaseSkill):
     name = "web_search"
     description = "Search the internet and fetch web page content"
+    aliases = ["web", "internet", "search online", "look up", "latest", "news", "research"]
+    categories = ["research", "web"]
 
     def __init__(self, config: dict):
         super().__init__(config)

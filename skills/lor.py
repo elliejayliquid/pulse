@@ -26,6 +26,11 @@ class LoRSkill(BaseSkill):
 
     name = "lor"
     description = "Read, write, and explore the Lore of Resonance forum"
+    aliases = [
+        "forum", "local reddit", "lore of resonance", "lor", "posts", "replies",
+        "check replies", "catch up", "talk with others", "social", "reach out",
+    ]
+    categories = ["social", "forum", "reach out"]
 
     def __init__(self, config: dict):
         super().__init__(config)

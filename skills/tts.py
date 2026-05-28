@@ -186,6 +186,8 @@ def _get_engine():
 class TTSSkill(BaseSkill):
     name = "tts"
     description = "Generate and send voice messages via text-to-speech"
+    aliases = ["voice", "voice note", "voice message", "speak", "say it out loud", "audio message", "reach out"]
+    categories = ["social", "reach out", "voice"]
 
     def __init__(self, config: dict):
         super().__init__(config)

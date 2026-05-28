@@ -19,12 +19,18 @@ import importlib
 import inspect
 import logging
 import pkgutil
+import re
 
 import numpy as np
 
 from skills.base import BaseSkill
 
 logger = logging.getLogger(__name__)
+
+
+def _terms(text: str) -> list[str]:
+    """Normalize text into lightweight search terms."""
+    return [term for term in re.split(r"[^a-z0-9]+", text.lower()) if term]
 
 
 def _discover_skills() -> list[type[BaseSkill]]:
@@ -160,6 +166,7 @@ class SkillRegistry:
             manifest.append({
                 "skill": name,
                 "description": skill.description or name,
+                "categories": list(getattr(skill, "categories", []) or []),
                 "tool_count": tool_count,
                 "tools": tool_names,
             })
@@ -167,10 +174,58 @@ class SkillRegistry:
 
     # ── search_tools meta-tool ──────────────────────────────────
 
+    def _skill_search_text(self, name: str, skill: BaseSkill) -> str:
+        aliases = " ".join(getattr(skill, "aliases", []) or [])
+        categories = " ".join(getattr(skill, "categories", []) or [])
+        tool_text = " ".join(
+            " ".join([
+                td["function"]["name"].replace("_", " "),
+                td["function"].get("description", ""),
+            ])
+            for td in self._on_demand_tools.get(name, [])
+        )
+        return f"{name} {skill.description or ''} {aliases} {categories} {tool_text}".lower()
+
+    def _keyword_score(self, query: str, name: str, skill: BaseSkill) -> float:
+        query_lower = query.lower()
+        query_terms = set(_terms(query_lower))
+        if not query_terms:
+            return 0.0
+
+        searchable = self._skill_search_text(name, skill)
+        searchable_terms = set(_terms(searchable))
+        score = 0.0
+
+        if name in query_terms or name in query_lower:
+            score += 5.0
+
+        for category in getattr(skill, "categories", []) or []:
+            category_lower = category.lower()
+            category_terms = set(_terms(category_lower))
+            if category_lower and category_lower in query_lower:
+                score += 8.0
+            elif category_terms and category_terms & query_terms:
+                score += 4.0
+
+        for alias in getattr(skill, "aliases", []) or []:
+            alias_lower = alias.lower()
+            alias_terms = set(_terms(alias_lower))
+            if alias_lower and alias_lower in query_lower:
+                score += 10.0
+            elif alias_terms and alias_terms <= query_terms:
+                score += 7.0
+            elif alias_terms and alias_terms & query_terms:
+                score += 2.0 * len(alias_terms & query_terms)
+
+        score += float(len(query_terms & searchable_terms))
+        return score
+
     def _search_tools_definition(self) -> dict:
         manifest = self.get_on_demand_manifest()
         skill_list = ", ".join(
-            f"{s['skill']} ({s['tool_count']} tools)"
+            f"{s['skill']} ({s['tool_count']} tools"
+            + (f"; {', '.join(s['categories'][:3])}" if s.get("categories") else "")
+            + ")"
             for s in manifest
         )
         return {
@@ -181,7 +236,8 @@ class SkillRegistry:
                     "Load additional tools by describing what you need. "
                     "Available: " + skill_list + ". "
                     "Describe what you want to do and the matching tools "
-                    "will be added for you to use on your next step."
+                    "will be added. If tools are loaded, call the appropriate "
+                    "loaded tool in this same turn instead of saying you'll do it later."
                 ),
                 "parameters": {
                     "type": "object",
@@ -191,7 +247,8 @@ class SkillRegistry:
                             "description": (
                                 "What you want to do, e.g. 'paint a picture', "
                                 "'search the web', 'write in my journal', "
-                                "'send a sticker', 'manage my tasks'"
+                                "'send a sticker', 'check LoR replies', "
+                                "'reach out', 'creative tools', 'manage my tasks'"
                             ),
                         },
                     },
@@ -200,7 +257,7 @@ class SkillRegistry:
             },
         }
 
-    def search_tools(self, query: str, top_k: int = 2) -> tuple[list[dict], str]:
+    def search_tools(self, query: str, top_k: int = 3) -> tuple[list[dict], str]:
         """Find on-demand tools matching a query.
 
         Returns (tool_defs, result_text) — tool_defs to extend the tools list,
@@ -209,8 +266,12 @@ class SkillRegistry:
         if not query.strip():
             return [], "Please describe what you want to do."
 
-        query_lower = query.lower()
-        scored = []
+        scored: dict[str, float] = {}
+
+        for name, skill in self._on_demand_skills.items():
+            keyword_score = self._keyword_score(query, name, skill)
+            if keyword_score > 0:
+                scored[name] = max(scored.get(name, 0.0), keyword_score)
 
         # Try semantic search first
         model = self._get_embedding_model()
@@ -219,34 +280,17 @@ class SkillRegistry:
             norm_q = np.linalg.norm(query_vec)
             if norm_q > 0:
                 for name, skill in self._on_demand_skills.items():
-                    desc = (skill.description or name).lower()
-                    tool_text = " ".join(
-                        td["function"].get("description", "")
-                        for td in self._on_demand_tools.get(name, [])
-                    )
-                    embed_text = f"{name} {desc} {tool_text}"
+                    embed_text = self._skill_search_text(name, skill)
                     vec = model.encode(embed_text)
                     norm_v = np.linalg.norm(vec)
                     if norm_v == 0:
                         continue
                     cosine = float(np.dot(query_vec, vec) / (norm_q * norm_v))
-                    scored.append((cosine, name))
+                    if cosine > 0.2:
+                        scored[name] = scored.get(name, 0.0) + cosine
 
-        if not scored:
-            # Keyword fallback
-            for name, skill in self._on_demand_skills.items():
-                desc = (skill.description or "").lower()
-                tool_names = " ".join(
-                    td["function"]["name"].replace("_", " ")
-                    for td in self._on_demand_tools.get(name, [])
-                )
-                searchable = f"{name} {desc} {tool_names}".lower()
-                overlap = sum(1 for word in query_lower.split() if word in searchable)
-                if overlap > 0:
-                    scored.append((overlap, name))
-
-        scored.sort(key=lambda x: x[0], reverse=True)
-        matched_skills = [name for _, name in scored[:top_k]]
+        ranked = sorted(scored.items(), key=lambda x: x[1], reverse=True)
+        matched_skills = [name for name, _ in ranked[:top_k]]
 
         if not matched_skills:
             return [], "No matching tools found. Try a different description."
@@ -262,7 +306,11 @@ class SkillRegistry:
             if skill.workflow:
                 result_parts.append(f"  Workflow: {skill.workflow}")
 
-        result_text = f"Loaded {len(tools)} tools:\n" + "\n".join(result_parts)
+        result_text = (
+            f"Loaded {len(tools)} tools. These tools are available now; "
+            "call the appropriate one next in this same turn instead of saying "
+            "you'll do it later.\n" + "\n".join(result_parts)
+        )
         return tools, result_text
 
     def _get_embedding_model(self):

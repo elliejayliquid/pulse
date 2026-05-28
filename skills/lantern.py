@@ -8,6 +8,7 @@ be injected into context later.
 
 import os
 import sqlite3
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from skills.base import BaseSkill
 
 
 STALE_HOURS = 24
+EXPIRED_HOURS = 7 * 24
 
 
 class LanternSkill(BaseSkill):
@@ -47,7 +49,7 @@ class LanternSkill(BaseSkill):
         return conn
 
     def _ensure_table(self):
-        with self._connect() as conn:
+        with closing(self._connect()) as conn:
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS resident_lanterns (
@@ -68,7 +70,7 @@ class LanternSkill(BaseSkill):
 
     def _get_lantern(self, resident_id: str | None = None):
         rid = resident_id or self.resident_id
-        with self._connect() as conn:
+        with closing(self._connect()) as conn:
             row = conn.execute(
                 "SELECT * FROM resident_lanterns WHERE resident_id = ?",
                 (rid,),
@@ -85,6 +87,16 @@ class LanternSkill(BaseSkill):
         except Exception:
             return True
 
+    def _is_expired(self, updated_at: str) -> bool:
+        try:
+            dt = datetime.fromisoformat(updated_at)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            age = datetime.now(timezone.utc) - dt
+            return age.total_seconds() > EXPIRED_HOURS * 3600
+        except Exception:
+            return True
+
     def _hours_since(self, updated_at: str) -> float | None:
         """Return how many hours have passed since updated_at, or None on error."""
         try:
@@ -95,6 +107,16 @@ class LanternSkill(BaseSkill):
             return age.total_seconds() / 3600
         except Exception:
             return None
+
+    def _age_label(self, updated_at: str) -> str:
+        hours = self._hours_since(updated_at)
+        if hours is None:
+            return "unknown age"
+        if hours < 1:
+            return f"{int(hours * 60)} minutes old"
+        if hours < 48:
+            return f"{int(hours)} hours old"
+        return f"{int(hours // 24)} days old"
 
     def get_context(self) -> str:
         row = self._get_lantern()
@@ -120,9 +142,20 @@ class LanternSkill(BaseSkill):
                 parts.append(f"{label}: {value}")
 
         stale = self._is_stale(row["updated_at"])
+        expired = self._is_expired(row["updated_at"])
 
         if not parts and not stale:
             return ""
+
+        if expired:
+            return (
+                f"[Lantern expired] {row['resident_id']}'s lantern was last updated "
+                f"{row['updated_at']} ({self._age_label(row['updated_at'])}). "
+                "It is too old to use as current-state context, so the old mode/mood/focus "
+                "has been withheld. Do not assume it describes Lena or the present moment. "
+                "Re-orient from current time, recent conversation, journal, and tools; then "
+                "use set_lantern with a fresh state or dim_lantern if there is no active thread."
+            )
 
         # Calculate age for better LLM time perception
         hours = self._hours_since(row["updated_at"])
@@ -139,29 +172,34 @@ class LanternSkill(BaseSkill):
         lines = []
         if parts:
             prefix = "Last lantern" if stale else "Lantern"
+            if stale:
+                lines.append(
+                    "[Lantern stale] This lantern is older than 24 hours. Treat it as "
+                    "historical orientation only, not proof of what Lena is doing now. "
+                    "Before relying on it, refresh it with set_lantern or dim it."
+                )
             lines.append(
                 f"[{prefix}] {row['resident_id']}: "
                 + "; ".join(parts)
                 + f". Updated: {row['updated_at']}{age_str}."
             )
 
-        # Gentle nudge when stale
+        # Stern nudge when stale
         if stale:
             if hours is not None and hours < 48:
                 lines.append(
-                    "[Lantern nudge] It's been a while since you updated your lantern. "
-                    "If your inner weather has shifted, consider a quick set_lantern."
+                    "[Lantern nudge] Refresh this soon if the current state has shifted."
                 )
             elif hours is not None:
                 days = int(hours // 24)
                 lines.append(
                     f"[Lantern nudge] Your lantern hasn't been updated in {days} days. "
-                    "No pressure — but if you'd like to re-light it, set_lantern is there."
+                    "Do not treat it as current; re-light it with set_lantern or dim it."
                 )
             else:
                 lines.append(
                     "[Lantern nudge] Your lantern may be out of date. "
-                    "Consider updating it with set_lantern when you're ready."
+                    "Do not treat it as current; update or dim it when you can."
                 )
 
         return "\n".join(lines)
@@ -258,7 +296,7 @@ class LanternSkill(BaseSkill):
         merged = {k: values[k] if values[k] else (existing.get(k) or "") for k in allowed}
         updated_at = self._now()
 
-        with self._connect() as conn:
+        with closing(self._connect()) as conn:
             conn.execute(
                 """
                 INSERT INTO resident_lanterns
@@ -291,14 +329,33 @@ class LanternSkill(BaseSkill):
         if not row:
             rid = resident_id or self.resident_id
             return f"No lantern found for {rid}."
-        prefix = "Last lantern" if self._is_stale(row["updated_at"]) else "Current lantern"
-        return self._format_lantern(row, prefix=prefix)
+        expired = self._is_expired(row["updated_at"])
+        stale = self._is_stale(row["updated_at"])
+        if expired:
+            prefix = "Expired lantern"
+        elif stale:
+            prefix = "Stale lantern"
+        else:
+            prefix = "Current lantern"
+
+        result = self._format_lantern(row, prefix=prefix)
+        if expired:
+            result += (
+                "\n\nWarning: this lantern is more than 7 days old. Treat it as "
+                "historical, not current; refresh it with set_lantern or dim it."
+            )
+        elif stale:
+            result += (
+                "\n\nWarning: this lantern is more than 24 hours old. Do not assume "
+                "it still describes the present moment."
+            )
+        return result
 
     def _dim_lantern(self, note: str | None = None) -> str:
         updated_at = self._now()
         rest_note = (note or "Lantern dimmed; no active state set.").strip()
 
-        with self._connect() as conn:
+        with closing(self._connect()) as conn:
             conn.execute(
                 """
                 INSERT INTO resident_lanterns

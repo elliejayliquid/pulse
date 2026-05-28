@@ -961,7 +961,8 @@ You decide when to lift the timeout — not the human."""
             if on_demand_manifest:
                 od_lines = ["## More skills (call search_tools to load)"]
                 for s in on_demand_manifest:
-                    od_lines.append(f"  {s['skill']}: {s['description']} ({s['tool_count']} tools)")
+                    tags = f"; tags: {', '.join(s.get('categories', [])[:3])}" if s.get("categories") else ""
+                    od_lines.append(f"  {s['skill']}: {s['description']} ({s['tool_count']} tools{tags})")
                 skill_menu += "\n".join(od_lines) + "\n\n"
 
             your_turn += f"\n{skill_menu}"
@@ -972,6 +973,10 @@ You decide when to lift the timeout — not the human."""
             "Don't just describe what you'd like to do in your thinking. Call the tools, "
             "get results, THEN produce your final response. \"silent\" means \"don't message "
             "Lena\" — it does NOT mean \"don't do anything.\"\n\n"
+            "If the tool you need is not listed yet, call search_tools now with a plain-language "
+            "description of what you want, then call one of the loaded tools in this same turn. "
+            "Do not say you will check, post, speak, search, update, or make something later "
+            "when you can use the tool now.\n\n"
             "If you used the speak tool, the voice note itself is the message. "
             "Usually return action \"silent\" afterward; do not send a separate "
             "notification just to say the voice was sent.\n\n"
@@ -1032,7 +1037,8 @@ You decide when to lift the timeout — not the human."""
         if on_demand_manifest:
             od_lines = ["More skills (call search_tools to load):"]
             for s in on_demand_manifest:
-                od_lines.append(f"  {s['skill']}: {s['description']} ({s['tool_count']} tools)")
+                tags = f"; tags: {', '.join(s.get('categories', [])[:3])}" if s.get("categories") else ""
+                od_lines.append(f"  {s['skill']}: {s['description']} ({s['tool_count']} tools{tags})")
             skill_menu += "\n".join(od_lines) + "\n"
 
         conv_system += (
@@ -1046,6 +1052,9 @@ You decide when to lift the timeout — not the human."""
             "If you want to do something, USE the actual tool — don't just say "
             f"you did it. If you don't have a tool for something, be honest about that instead of "
             f"pretending. {self.user_name} can see when you use tools, so they'll know if you're bluffing.\n\n"
+            "If the tool you need is on-demand, call search_tools now, then use one of the "
+            "loaded tools in this same turn. Do not tell the user you will check, post, speak, "
+            "search, update, or make something later when you can do it now.\n\n"
             "IMPORTANT: Always respond to the user's MOST RECENT message below. "
             "Do not revisit or re-address topics from earlier in the conversation "
             "unless the user explicitly brings them up again, or it's somehow relevant or important."
