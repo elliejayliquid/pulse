@@ -624,6 +624,7 @@ class MemorySkill(BaseSkill):
         return f"{days} days old"
 
     def _format_memory_result(self, mem: dict, relevance: int | None = None) -> str:
+        mem_id = mem.get("id", "?")
         raw_date = mem.get("date") or mem.get("created_at") or ""
         date = str(raw_date)[:10] if raw_date else "unknown"
         age = self._memory_age_label(mem)
@@ -637,7 +638,7 @@ class MemorySkill(BaseSkill):
             stale_note = "; past memory - verify if time-sensitive"
 
         suffix = f" (relevance: {relevance}%)" if relevance is not None else ""
-        return f"[{date}; {age}{stale_note}] {mem['text']}{suffix}"
+        return f"#{mem_id} [{date}; {age}{stale_note}] {mem['text']}{suffix}"
 
     def _semantic_search(self, query: str, memories: list[dict], model) -> str:
         """Vector similarity search with boosting."""
