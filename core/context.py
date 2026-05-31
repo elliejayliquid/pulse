@@ -174,6 +174,29 @@ class ContextManager:
         except (ValueError, TypeError):
             return None
 
+    def _memory_age_label(self, value: str) -> str:
+        """Return a compact age label for a memory timestamp."""
+        if not value:
+            return "unknown age"
+        try:
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            now = datetime.now(dt.tzinfo) if dt.tzinfo else datetime.now()
+            days = max(0, (now - dt).days)
+        except (ValueError, TypeError):
+            return "unknown age"
+
+        if days == 0:
+            return "today"
+        if days == 1:
+            return "1 day old"
+        return f"{days} days old"
+
+    def _memory_date_prefix(self, mem: dict) -> str:
+        """Format memory date/age for prompt context."""
+        raw_date = mem.get("date") or mem.get("created_at") or ""
+        date = raw_date[:10] if raw_date else "unknown"
+        return f"[{date}; {self._memory_age_label(raw_date)}]"
+
     def _load_journal_context(self) -> str:
         """Load pinned identity entries + recent transient entries for context."""
         if not self._journal_skill:
@@ -451,11 +474,11 @@ You decide when to lift the timeout — not the human."""
                 lines.append(f"\nLast session ({latest.get('date', 'unknown')[:10]}):")
                 lines.append(latest.get("text", ""))
             if facts:
-                lines.append("\nStored facts:")
+                lines.append("\nStored facts (dated; old facts may be historical, not current):")
                 for fact in facts:
                     tags = fact.get("tags", [])
                     tag_str = f" [{', '.join(tags)}]" if tags else ""
-                    lines.append(f"- {fact.get('text', '')}{tag_str}")
+                    lines.append(f"- {self._memory_date_prefix(fact)} {fact.get('text', '')}{tag_str}")
 
             return "\n".join(lines) if len(lines) > 1 else ""
 
@@ -489,11 +512,11 @@ You decide when to lift the timeout — not the human."""
             lines.append(f"\nLast session ({latest.get('date', 'unknown')[:10]}):")
             lines.append(latest.get("text", ""))
         if facts:
-            lines.append("\nStored facts:")
+            lines.append("\nStored facts (dated; old facts may be historical, not current):")
             for fact in facts:
                 tags = fact.get("tags", [])
                 tag_str = f" [{', '.join(tags)}]" if tags else ""
-                lines.append(f"- {fact.get('text', '')}{tag_str}")
+                lines.append(f"- {self._memory_date_prefix(fact)} {fact.get('text', '')}{tag_str}")
 
         return "\n".join(lines)
 

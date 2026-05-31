@@ -601,6 +601,44 @@ class MemorySkill(BaseSkill):
         else:
             return self._keyword_search(query, memories)
 
+    def _memory_age_days(self, mem: dict) -> int | None:
+        """Return memory age in whole days, or None if the date is unknown."""
+        raw_date = mem.get("date") or mem.get("created_at") or ""
+        if not raw_date:
+            return None
+        try:
+            dt = datetime.fromisoformat(str(raw_date).replace("Z", "+00:00"))
+            now = datetime.now(dt.tzinfo) if dt.tzinfo else datetime.now()
+            return max(0, (now - dt).days)
+        except (ValueError, TypeError):
+            return None
+
+    def _memory_age_label(self, mem: dict) -> str:
+        days = self._memory_age_days(mem)
+        if days is None:
+            return "unknown age"
+        if days == 0:
+            return "today"
+        if days == 1:
+            return "1 day old"
+        return f"{days} days old"
+
+    def _format_memory_result(self, mem: dict, relevance: int | None = None) -> str:
+        raw_date = mem.get("date") or mem.get("created_at") or ""
+        date = str(raw_date)[:10] if raw_date else "unknown"
+        age = self._memory_age_label(mem)
+        days = self._memory_age_days(mem)
+        stale_note = ""
+        if days is None:
+            stale_note = "; date unknown - verify before treating as current"
+        elif days >= 14:
+            stale_note = "; old memory - verify before treating as current"
+        elif days >= 2:
+            stale_note = "; past memory - verify if time-sensitive"
+
+        suffix = f" (relevance: {relevance}%)" if relevance is not None else ""
+        return f"[{date}; {age}{stale_note}] {mem['text']}{suffix}"
+
     def _semantic_search(self, query: str, memories: list[dict], model) -> str:
         """Vector similarity search with boosting."""
         query_vec = model.encode(query)
@@ -645,7 +683,7 @@ class MemorySkill(BaseSkill):
         for final_score, base_score, mem in scored[:3]:
             if base_score > 0.25:
                 self._update_retrieval(mem)
-                line = f"[{mem['date'][:10]}] {mem['text']} (relevance: {int(final_score * 100)}%)"
+                line = self._format_memory_result(mem, int(final_score * 100))
                 if mem.get("type") == "journal" and mem.get("journal_file"):
                     jf = mem["journal_file"]
                     eid = jf.rsplit("/", 1)[-1].removesuffix(".md") if "/" in jf else jf
@@ -676,7 +714,7 @@ class MemorySkill(BaseSkill):
 
         results = []
         for hits, mem in scored[:5]:
-            line = f"[{mem['date'][:10]}] {mem['text']}"
+            line = self._format_memory_result(mem)
             if mem.get("type") == "journal" and mem.get("journal_file"):
                 jf = mem["journal_file"]
                 eid = jf.rsplit("/", 1)[-1].removesuffix(".md") if "/" in jf else jf
@@ -686,7 +724,7 @@ class MemorySkill(BaseSkill):
         if not results:
             by_date = sorted(memories, key=lambda m: m.get("date", ""), reverse=True)
             for mem in by_date[:3]:
-                results.append(f"[{mem['date'][:10]}] {mem['text']}")
+                results.append(self._format_memory_result(mem))
             if results:
                 return "No keyword matches. Here are your most recent memories:\n" + "\n".join(results)
             return "No memories found."
