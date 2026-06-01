@@ -1,4 +1,5 @@
 import os
+import sqlite3
 import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
@@ -157,6 +158,67 @@ channels:
         assert status["telegram_set"] is True
 
 
+def test_gui_api_get_lantern_read_only():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        persona_dir = root / "personas" / "demo"
+        data_dir = persona_dir / "data"
+        data_dir.mkdir(parents=True)
+        (root / "logs").mkdir()
+        (root / "config.yaml").write_text("", encoding="utf-8")
+        (root / "persona.yaml").write_text("name: Base\n", encoding="utf-8")
+        (persona_dir / "config.yaml").write_text("", encoding="utf-8")
+        (persona_dir / "persona.yaml").write_text("name: Demo\n", encoding="utf-8")
+
+        api = PulseAPI(root)
+        missing = api.get_lantern("demo")
+        assert missing["ok"] is True
+        assert missing["exists"] is False
+
+        db_path = data_dir / "demo.db"
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                """
+                CREATE TABLE resident_lanterns (
+                    resident_id TEXT PRIMARY KEY,
+                    mode TEXT,
+                    mood TEXT,
+                    focus TEXT,
+                    note TEXT,
+                    open_thread TEXT,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                "INSERT INTO resident_lanterns "
+                "(resident_id, mode, mood, focus, note, open_thread, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "demo",
+                    "quiet company",
+                    "settled",
+                    "continuity UI",
+                    "testing lantern",
+                    "wire read-only view",
+                    (datetime.now(timezone.utc) - timedelta(hours=30)).isoformat(),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        lantern = api.get_lantern("demo")
+        assert lantern["ok"] is True
+        assert lantern["exists"] is True
+        assert lantern["state"] == "stale"
+        assert lantern["stale"] is True
+        assert lantern["expired"] is False
+        assert lantern["fields"]["mode"] == "quiet company"
+        assert lantern["fields"]["open_thread"] == "wire read-only view"
+
+
 def test_gui_api_model_file_path_validation():
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -251,6 +313,7 @@ channels:
 if __name__ == "__main__":
     test_gui_api_read_only_persona_loading()
     test_gui_api_standard_provider_env_fallback()
+    test_gui_api_get_lantern_read_only()
     test_gui_api_model_file_path_validation()
     test_gui_api_secrets_preserve_env_and_validate_keys()
     print("[OK] GUI API")

@@ -12,8 +12,10 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,6 +28,8 @@ from gui.config_editor import ConfigEditor
 
 
 STATUS_STALE_AFTER_SECONDS = 120
+LANTERN_STALE_HOURS = 24
+LANTERN_EXPIRED_HOURS = 7 * 24
 
 
 PROVIDER_KEY_MAP = {
@@ -581,6 +585,53 @@ class PulseAPI:
         data = path.read_text(encoding="utf-8", errors="replace").splitlines()
         return "\n".join(data[-max(1, min(lines, 500)):])
 
+    def get_lantern(self, persona: str) -> dict:
+        if not persona or persona == "__base__":
+            return {"ok": False, "error": "Choose a persona first."}
+        persona_dir = self.personas_dir / persona
+        if not persona_dir.is_dir():
+            return {"ok": False, "error": f"Persona not found: {persona}"}
+
+        config = self._merged_config_for(persona)
+        self._apply_persona_defaults(config, persona)
+        db_path = Path(config.get("paths", {}).get("database") or (persona_dir / "data" / f"{persona}.db"))
+        if not db_path.is_absolute():
+            db_path = (self.root / db_path).resolve()
+
+        row = self._read_lantern_row(db_path, persona)
+        if not row:
+            return {
+                "ok": True,
+                "exists": False,
+                "persona": persona,
+                "db_path": _safe_rel(db_path, self.root),
+            }
+
+        age_hours = self._hours_since(row.get("updated_at", ""))
+        stale = age_hours is None or age_hours > LANTERN_STALE_HOURS
+        expired = age_hours is None or age_hours > LANTERN_EXPIRED_HOURS
+        state = "expired" if expired else "stale" if stale else "current"
+        fields = {
+            key: row.get(key) or ""
+            for key in ("mode", "mood", "focus", "note", "open_thread")
+        }
+        return {
+            "ok": True,
+            "exists": True,
+            "persona": persona,
+            "resident_id": row.get("resident_id") or persona,
+            "state": state,
+            "stale": stale,
+            "expired": expired,
+            "updated_at": row.get("updated_at", ""),
+            "updated_at_display": self._format_timestamp(row.get("updated_at", "")),
+            "age_label": self._age_label(age_hours),
+            "age_hours": age_hours,
+            "fields": fields,
+            "empty": not any(fields.values()),
+            "db_path": _safe_rel(db_path, self.root),
+        }
+
     def stop_pulse(self, persona: str) -> dict:
         if not persona or persona == "__base__":
             return {"ok": False, "error": "Choose a persona before stopping Pulse."}
@@ -730,6 +781,53 @@ class PulseAPI:
 
     def _persona_data_dir(self, persona: str) -> Path:
         return self.personas_dir / persona / "data"
+
+    def _read_lantern_row(self, db_path: Path, persona: str) -> dict | None:
+        if not db_path.exists():
+            return None
+        try:
+            with closing(sqlite3.connect(str(db_path))) as conn:
+                conn.row_factory = sqlite3.Row
+                row = conn.execute(
+                    "SELECT * FROM resident_lanterns WHERE resident_id = ?",
+                    (persona,),
+                ).fetchone()
+                return dict(row) if row else None
+        except sqlite3.Error:
+            return None
+
+    def _hours_since(self, value: str) -> float | None:
+        if not value:
+            return None
+        try:
+            dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return max(0.0, (datetime.now(timezone.utc) - dt).total_seconds() / 3600)
+        except (ValueError, TypeError):
+            return None
+
+    def _age_label(self, hours: float | None) -> str:
+        if hours is None:
+            return "unknown age"
+        if hours < 1:
+            minutes = max(0, int(hours * 60))
+            return f"{minutes} min old"
+        if hours < 48:
+            return f"{int(hours)} hours old"
+        return f"{int(hours // 24)} days old"
+
+    def _format_timestamp(self, value: str) -> str:
+        if not value:
+            return "Unknown"
+        try:
+            dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            local = dt.astimezone()
+            return local.strftime("%Y-%m-%d %H:%M")
+        except (ValueError, TypeError):
+            return str(value)
 
     def _base_persona_summary(self) -> dict:
         config = _load_yaml(self.base_config_path)

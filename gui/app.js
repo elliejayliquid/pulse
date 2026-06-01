@@ -154,6 +154,7 @@ const fallbackApi = {
   },
   async restore_backup() { return { ok: false, error: "Run through pywebview to restore backups." }; },
   async restore_last_backup() { return { ok: false, error: "Run through pywebview to undo." }; },
+  async get_lantern() { return { ok: false, error: "Run through pywebview to read lantern." }; },
   async pick_voice_sample() { return { ok: false, error: "Run through pywebview to pick files." }; },
   async pick_folder() { return { ok: false, error: "Run through pywebview to pick folders." }; },
   async pick_model_file() { return { ok: false, error: "Run through pywebview to pick model files." }; },
@@ -176,6 +177,7 @@ function el(id) {
 
 let noticeTimer = null;
 let secretsBackdropPointerDown = false;
+let lanternBackdropPointerDown = false;
 let confirmBackdropPointerDown = false;
 
 function setNotice(message, kind = "info", autoHideMs = 0) {
@@ -1420,8 +1422,11 @@ function currentPersonaIsRunning() {
 }
 
 function handleContinuityAction(action) {
+  if (action === "view-lantern") {
+    openLanternDialog();
+    return;
+  }
   const messages = {
-    "view-lantern": "Lantern view is the next read-only continuity endpoint to wire.",
     "dim-lantern": "Lantern dim/clear will be enabled after the safe write flow exists.",
     "update-lantern": "Lantern update will use preview and confirmation before writing.",
     "browse-memories": "Memory browsing will use the new continuity metadata once the backend endpoint is ready.",
@@ -1732,6 +1737,14 @@ function wireEvents() {
   el("backupsDialog").addEventListener("click", (e) => {
     if (e.target === el("backupsDialog")) hideBackupsDialog();
   });
+  el("lanternCloseBtn").addEventListener("click", hideLanternDialog);
+  el("lanternDialog").addEventListener("pointerdown", (event) => {
+    lanternBackdropPointerDown = event.target === el("lanternDialog");
+  });
+  el("lanternDialog").addEventListener("click", (e) => {
+    if (lanternBackdropPointerDown && e.target === el("lanternDialog")) hideLanternDialog();
+    lanternBackdropPointerDown = false;
+  });
   document.querySelectorAll(".section-header").forEach((header) => {
     header.addEventListener("click", () => header.parentElement.classList.toggle("open"));
   });
@@ -1934,6 +1947,79 @@ async function openBackupsDialog() {
 
 function hideBackupsDialog() {
   el("backupsDialog").classList.add("hidden");
+  document.body.classList.remove("modal-open");
+}
+
+async function openLanternDialog() {
+  if (!state.current || state.current.name === "__base__") {
+    setNotice("Choose a persona first.", "warning", NOTICE_WARNING_MS);
+    return;
+  }
+  el("lanternSubtitle").textContent = "Loading lantern...";
+  el("lanternStatePill").textContent = "Loading";
+  el("lanternStatePill").dataset.state = "loading";
+  el("lanternBody").innerHTML = `<div class="lantern-empty">Reading lantern...</div>`;
+  el("lanternDialog").classList.remove("hidden");
+  document.body.classList.add("modal-open");
+
+  const result = await api().get_lantern(state.current.name);
+  if (!result.ok) {
+    el("lanternSubtitle").textContent = "Could not read lantern.";
+    el("lanternStatePill").textContent = "Error";
+    el("lanternStatePill").dataset.state = "error";
+    el("lanternBody").innerHTML = `<div class="lantern-empty">${escapeHtml(result.error || "Lantern unavailable.")}</div>`;
+    return;
+  }
+  renderLantern(result);
+}
+
+function renderLantern(data) {
+  const persona = data.resident_id || data.persona || state.current?.display_name || "persona";
+  if (!data.exists) {
+    el("lanternSubtitle").textContent = `No lantern has been set for ${persona} yet.`;
+    el("lanternStatePill").textContent = "Not set";
+    el("lanternStatePill").dataset.state = "missing";
+    el("lanternBody").innerHTML = `
+      <div class="lantern-empty">
+        When this companion sets a lantern, current mode, mood, focus, note, and open thread will appear here.
+      </div>`;
+    return;
+  }
+
+  const stateLabel = data.state === "expired" ? "Expired" : data.state === "stale" ? "Stale" : "Current";
+  el("lanternSubtitle").textContent = `${persona} · ${data.age_label || "unknown age"} · updated ${data.updated_at_display || data.updated_at || "unknown"}`;
+  el("lanternStatePill").textContent = stateLabel;
+  el("lanternStatePill").dataset.state = data.state || "current";
+
+  const fields = [
+    ["Mode", data.fields?.mode],
+    ["Mood", data.fields?.mood],
+    ["Focus", data.fields?.focus],
+    ["Open thread", data.fields?.open_thread],
+    ["Note", data.fields?.note],
+  ];
+  const rows = fields
+    .filter(([, value]) => value)
+    .map(([label, value]) => `
+      <div class="lantern-field">
+        <span>${escapeHtml(label)}</span>
+        <strong>${escapeHtml(value)}</strong>
+      </div>`)
+    .join("");
+  const warning = data.expired
+    ? "This lantern is expired. Treat it as historical, not current-state context."
+    : data.stale
+      ? "This lantern is older than 24 hours. Verify before treating it as current."
+      : "";
+  el("lanternBody").innerHTML = `
+    ${warning ? `<div class="lantern-warning">${escapeHtml(warning)}</div>` : ""}
+    ${rows || `<div class="lantern-empty">Lantern is dimmed; no active mode, mood, focus, or open thread is set.</div>`}
+    <div class="lantern-meta">Source: ${escapeHtml(data.db_path || "persona database")}</div>
+  `;
+}
+
+function hideLanternDialog() {
+  el("lanternDialog").classList.add("hidden");
   document.body.classList.remove("modal-open");
 }
 
