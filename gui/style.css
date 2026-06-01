@@ -19,6 +19,37 @@
 
 * { box-sizing: border-box; }
 
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 4px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-tertiary);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
 body {
   margin: 0;
   min-height: 100vh;
@@ -512,11 +543,14 @@ label {
 input, textarea, select {
   width: 100%;
   margin-top: 6px;
-  padding: 9px 11px;
+  padding: 6px 11px;
   border: 1px solid var(--border);
   border-radius: 7px;
   background: var(--surface);
   color: var(--text-primary);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.5;
   text-transform: none;
   letter-spacing: 0;
 }
@@ -526,9 +560,12 @@ input, textarea {
 }
 
 select {
-  font: inherit;
   cursor: pointer;
   appearance: none;
+  padding-right: 30px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='7' fill='none'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%239a98a3' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
 }
 
 input:hover, textarea:hover, select:hover {
@@ -982,8 +1019,7 @@ input[type="number"]::-webkit-outer-spin-button {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 7px 0;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.025);
+  padding: 3px 0;
 }
 
 .ls-label {
@@ -994,12 +1030,6 @@ input[type="number"]::-webkit-outer-spin-button {
 
 .ls-input {
   width: 90px;
-  padding: 6px 10px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--bg);
-  color: var(--text-primary);
-  font: 500 12px/1 var(--mono);
   text-align: center;
   margin-top: 0;
 }
@@ -1324,9 +1354,6 @@ textarea {
   width: auto;
   min-width: 96px;
   margin-top: 0;
-  padding: 5px 8px;
-  border-radius: 6px;
-  font: 500 11px/1 var(--mono);
 }
 
 .tuning-inline-label {
@@ -1342,10 +1369,6 @@ textarea {
 .tuning-inline-input {
   width: 64px;
   margin-top: 0;
-  padding: 5px 8px;
-  border-radius: 6px;
-  background: var(--surface);
-  font: 500 12px/1 var(--mono);
   text-align: center;
 }
 
@@ -1878,6 +1901,283 @@ textarea {
   overflow-wrap: anywhere;
 }
 
+.memories-card {
+  width: min(780px, calc(100vw - 48px));
+  height: min(760px, calc(100vh - 48px));
+  display: flex;
+  flex-direction: column;
+}
+
+.memories-modal-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+.memories-modal-head .modal-title {
+  margin-bottom: 6px;
+}
+
+.memories-modal-head .modal-body {
+  margin-bottom: 0;
+}
+
+.memory-view-tabs {
+  display: inline-flex;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface-raised);
+}
+
+.memory-type-tabs {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin: 2px 0 14px;
+}
+
+.memory-view-tabs button,
+.memory-type-tabs button {
+  min-width: 82px;
+  padding: 7px 10px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-secondary);
+  font: 700 11px/1 var(--body);
+  cursor: pointer;
+}
+
+.memory-type-tabs button {
+  min-width: 0;
+  border-color: var(--border);
+  background: var(--surface-raised);
+}
+
+.memory-view-tabs button:hover,
+.memory-type-tabs button:hover {
+  color: var(--text-primary);
+  border-color: rgba(249, 115, 22, 0.28);
+  background: #222228;
+}
+
+.memory-view-tabs button.active,
+.memory-type-tabs button.active {
+  background: var(--accent-dim);
+  color: var(--accent-hover);
+  border-color: rgba(249, 115, 22, 0.28);
+}
+
+.memories-body,
+.memory-versions {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  margin-bottom: 14px;
+  padding: 2px 2px 0;
+}
+
+.memories-body,
+.memory-detail {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+.memory-versions {
+  overflow: visible;
+}
+
+.memory-card {
+  width: 100%;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-raised);
+  color: var(--text-primary);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 140ms ease, background 140ms ease, box-shadow 140ms ease;
+}
+
+.memory-card:hover {
+  border-color: rgba(249, 115, 22, 0.34);
+  background: #222228;
+  box-shadow: 0 0 0 1px rgba(249, 115, 22, 0.035);
+}
+
+.memory-card.archived {
+  opacity: 0.78;
+}
+
+.memory-card-head,
+.memory-version-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.memory-card-head strong,
+.memory-version-head strong {
+  color: var(--accent-hover);
+  font: 700 11px/1 var(--mono);
+}
+
+.memory-card-head span,
+.memory-version-head span {
+  color: var(--text-tertiary);
+  font: 11px/1 var(--body);
+}
+
+.memory-history-pill {
+  padding: 3px 7px;
+  border: 1px solid rgba(249, 115, 22, 0.22);
+  border-radius: 999px;
+  background: rgba(249, 115, 22, 0.07);
+  color: var(--accent-hover) !important;
+  font: 700 10px/1 var(--body) !important;
+}
+
+.memory-card p,
+.memory-version p {
+  margin: 0 0 10px;
+  color: var(--text-primary);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.memory-card-foot {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.memory-tags,
+.memory-badges {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.memory-tags span,
+.memory-badges span {
+  padding: 3px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text-tertiary);
+  font: 700 10px/1 var(--body);
+}
+
+.memory-badges span {
+  color: var(--text-secondary);
+}
+
+.memory-load-more,
+.memory-back-btn {
+  width: 100%;
+  min-height: 38px;
+  margin-bottom: 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-raised);
+  color: var(--text-secondary);
+  font: 700 12px/1 var(--body);
+  cursor: pointer;
+}
+
+.memory-load-more:hover,
+.memory-back-btn:hover {
+  border-color: var(--accent);
+  background: #222228;
+  color: var(--text-primary);
+}
+
+.memory-detail {
+  margin-bottom: 14px;
+}
+
+.memory-detail-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin: 0 0 12px;
+}
+
+.memory-detail-head h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.memory-detail-head span {
+  color: var(--text-tertiary);
+  font: 11px/1 var(--mono);
+}
+
+.memory-version {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-raised);
+}
+
+.memory-version.current {
+  border-color: var(--border);
+}
+
+.memory-source-note {
+  display: grid;
+  gap: 5px;
+  margin: 0 0 10px;
+  padding: 10px 12px;
+  border: 1px solid rgba(249, 115, 22, 0.18);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.memory-source-note strong {
+  color: var(--accent-hover);
+  font: 700 11px/1.2 var(--body);
+}
+
+.memory-source-note span {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.memory-empty {
+  min-height: 96px;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  gap: 8px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-raised);
+  color: var(--text-secondary);
+}
+
+.memory-empty strong {
+  color: var(--text-primary);
+}
+
+.memory-empty span {
+  color: var(--text-tertiary);
+  line-height: 1.45;
+}
+
 .modal-title {
   font-size: 16px;
   font-weight: 700;
@@ -2140,6 +2440,22 @@ textarea {
   .continuity-about {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .memories-modal-head,
+  .memory-card-foot,
+  .memory-detail-head {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .memory-view-tabs {
+    width: 100%;
+  }
+
+  .memory-view-tabs button,
+  .memory-type-tabs button {
+    flex: 1;
   }
 
   .slider-row {

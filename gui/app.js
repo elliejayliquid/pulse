@@ -30,6 +30,7 @@ const state = {
   originalEditable: null,
   currentTraits: [],
   secretsRows: new Map(),
+  memoryBrowse: { view: "active", kind: "fact", page: 0, pageSize: 25, total: 0, hasMore: false, items: [] },
 };
 
 const fallbackApi = {
@@ -155,6 +156,8 @@ const fallbackApi = {
   async restore_backup() { return { ok: false, error: "Run through pywebview to restore backups." }; },
   async restore_last_backup() { return { ok: false, error: "Run through pywebview to undo." }; },
   async get_lantern() { return { ok: false, error: "Run through pywebview to read lantern." }; },
+  async list_memories() { return { ok: false, error: "Run through pywebview to browse memories." }; },
+  async get_memory_detail() { return { ok: false, error: "Run through pywebview to inspect memories." }; },
   async pick_voice_sample() { return { ok: false, error: "Run through pywebview to pick files." }; },
   async pick_folder() { return { ok: false, error: "Run through pywebview to pick folders." }; },
   async pick_model_file() { return { ok: false, error: "Run through pywebview to pick model files." }; },
@@ -178,6 +181,7 @@ function el(id) {
 let noticeTimer = null;
 let secretsBackdropPointerDown = false;
 let lanternBackdropPointerDown = false;
+let memoriesBackdropPointerDown = false;
 let confirmBackdropPointerDown = false;
 
 function setNotice(message, kind = "info", autoHideMs = 0) {
@@ -1426,10 +1430,13 @@ function handleContinuityAction(action) {
     openLanternDialog();
     return;
   }
+  if (action === "browse-memories") {
+    openMemoriesDialog();
+    return;
+  }
   const messages = {
     "dim-lantern": "Lantern dim/clear will be enabled after the safe write flow exists.",
     "update-lantern": "Lantern update will use preview and confirmation before writing.",
-    "browse-memories": "Memory browsing will use the new continuity metadata once the backend endpoint is ready.",
     "add-memory": "Adding memories will come after the memory browser and preview flow.",
     "edit-memory": "Memory edit/supersede will prefer safe supersede, with direct edit marked as advanced.",
     "delete-memory": "Memory delete will require a stern confirmation and a small before-image safety record.",
@@ -1745,6 +1752,21 @@ function wireEvents() {
     if (lanternBackdropPointerDown && e.target === el("lanternDialog")) hideLanternDialog();
     lanternBackdropPointerDown = false;
   });
+  el("memoriesCloseBtn").addEventListener("click", hideMemoriesDialog);
+  el("memoriesDialog").addEventListener("pointerdown", (event) => {
+    memoriesBackdropPointerDown = event.target === el("memoriesDialog");
+  });
+  el("memoriesDialog").addEventListener("click", (event) => {
+    if (memoriesBackdropPointerDown && event.target === el("memoriesDialog")) hideMemoriesDialog();
+    memoriesBackdropPointerDown = false;
+  });
+  el("memoryLoadMoreBtn").addEventListener("click", () => loadMemoryPage(state.memoryBrowse.page + 1));
+  el("memoryViewTabs").querySelectorAll("[data-memory-view]").forEach((button) => {
+    button.addEventListener("click", () => setMemoryView(button.dataset.memoryView));
+  });
+  el("memoryTypeTabs").querySelectorAll("[data-memory-kind]").forEach((button) => {
+    button.addEventListener("click", () => setMemoryKind(button.dataset.memoryKind));
+  });
   document.querySelectorAll(".section-header").forEach((header) => {
     header.addEventListener("click", () => header.parentElement.classList.toggle("open"));
   });
@@ -2021,6 +2043,228 @@ function renderLantern(data) {
 function hideLanternDialog() {
   el("lanternDialog").classList.add("hidden");
   document.body.classList.remove("modal-open");
+}
+
+async function openMemoriesDialog() {
+  if (!state.current || state.current.name === "__base__") {
+    setNotice("Choose a persona first.", "warning", NOTICE_WARNING_MS);
+    return;
+  }
+  state.memoryBrowse = { view: "active", kind: "fact", page: 0, pageSize: 25, total: 0, hasMore: false, items: [] };
+  el("memoriesDialog").classList.remove("hidden");
+  document.body.classList.add("modal-open");
+  syncMemoryTabs();
+  syncMemoryTypeTabs();
+  showMemoryList();
+  await loadMemoryPage(1);
+}
+
+function hideMemoriesDialog() {
+  el("memoriesDialog").classList.add("hidden");
+  document.body.classList.remove("modal-open");
+}
+
+async function setMemoryView(view) {
+  if (!view || view === state.memoryBrowse.view) return;
+  state.memoryBrowse = { ...state.memoryBrowse, view, page: 0, total: 0, hasMore: false, items: [] };
+  syncMemoryTabs();
+  showMemoryList();
+  await loadMemoryPage(1);
+}
+
+async function setMemoryKind(kind) {
+  if (!kind || kind === state.memoryBrowse.kind) return;
+  state.memoryBrowse = { ...state.memoryBrowse, kind, page: 0, total: 0, hasMore: false, items: [] };
+  syncMemoryTypeTabs();
+  showMemoryList();
+  await loadMemoryPage(1);
+}
+
+function syncMemoryTabs() {
+  el("memoryViewTabs").querySelectorAll("[data-memory-view]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.memoryView === state.memoryBrowse.view);
+  });
+}
+
+function syncMemoryTypeTabs() {
+  el("memoryTypeTabs").querySelectorAll("[data-memory-kind]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.memoryKind === state.memoryBrowse.kind);
+  });
+}
+
+function showMemoryList() {
+  el("memoryDetail").classList.add("hidden");
+  el("memoryDetail").innerHTML = "";
+  el("memoriesBody").classList.remove("hidden");
+  renderMemoryList();
+}
+
+async function loadMemoryPage(page) {
+  if (!state.current || state.current.name === "__base__") return;
+  if (page === 1) {
+    el("memoriesBody").innerHTML = `<div class="memory-empty">Loading memories...</div>`;
+    el("memoryLoadMoreBtn").classList.add("hidden");
+  }
+  const result = await api().list_memories(
+    state.current.name,
+    state.memoryBrowse.view,
+    state.memoryBrowse.kind,
+    page,
+    state.memoryBrowse.pageSize
+  );
+  if (!result.ok) {
+    el("memoriesSubtitle").textContent = "Could not read memories.";
+    el("memoriesBody").innerHTML = `<div class="memory-empty">${escapeHtml(result.error || "Memory browse unavailable.")}</div>`;
+    return;
+  }
+  state.memoryBrowse.page = result.page || page;
+  state.memoryBrowse.total = result.total || 0;
+  state.memoryBrowse.hasMore = Boolean(result.has_more);
+  state.memoryBrowse.items = page === 1
+    ? (result.items || [])
+    : state.memoryBrowse.items.concat(result.items || []);
+  renderMemoryList(result.db_path || "");
+}
+
+function renderMemoryList(dbPath = "") {
+  const browse = state.memoryBrowse;
+  const viewLabel = browse.view === "archived" ? "Archived" : "Active";
+  const kindLabel = humanizeMemoryKind(browse.kind);
+  el("memoriesSubtitle").textContent = `${viewLabel} ${kindLabel.toLowerCase()} / showing ${browse.items.length} of ${browse.total}`;
+  if (!browse.items.length) {
+    el("memoriesBody").innerHTML = `
+      <div class="memory-empty">
+        <strong>No ${browse.view} ${kindLabel.toLowerCase()} found.</strong>
+        <span>${escapeHtml(emptyMemoryHint(browse.view, browse.kind))}</span>
+      </div>`;
+    el("memoryLoadMoreBtn").classList.add("hidden");
+    return;
+  }
+  el("memoriesBody").innerHTML = browse.items.map(renderMemoryCard).join("");
+  el("memoriesBody").querySelectorAll(".memory-card").forEach((card) => {
+    card.addEventListener("click", () => openMemoryDetail(card.dataset.memoryId));
+  });
+  const loadMore = el("memoryLoadMoreBtn");
+  loadMore.classList.toggle("hidden", !browse.hasMore);
+  loadMore.textContent = `Load More (${browse.items.length}/${browse.total})`;
+  loadMore.dataset.dbPath = dbPath;
+}
+
+function renderMemoryCard(memory) {
+  const status = memory.status || "legacy";
+  const tags = (memory.tags || []).slice(0, 4).map((tag) => `<span>${escapeHtml(tag)}</span>`).join("");
+  const history = memory.has_history
+    ? `<span class="memory-history-pill">${escapeHtml(memory.version_count)} versions</span>`
+    : "";
+  const badges = [
+    memory.type,
+    status,
+    memory.confidence,
+    memory.source,
+    memory.time_sensitive ? "time-sensitive" : "",
+  ].filter(Boolean);
+  return `
+    <button class="memory-card ${status === "archived" ? "archived" : ""}" type="button" data-memory-id="${escapeHtml(memory.id)}">
+      <div class="memory-card-head">
+        <strong>#${escapeHtml(memory.id)}</strong>
+        <span>${escapeHtml(memory.date_display || "unknown")} / ${escapeHtml(memory.age_label || "unknown age")}</span>
+        ${history}
+      </div>
+      <p>${escapeHtml(memory.preview || memory.text || "")}</p>
+      <div class="memory-card-foot">
+        <div class="memory-tags">${tags || "<span>untagged</span>"}</div>
+        <div class="memory-badges">${badges.map((badge) => `<span>${escapeHtml(humanizeMemoryBadge(badge))}</span>`).join("")}</div>
+      </div>
+    </button>`;
+}
+
+async function openMemoryDetail(memoryId) {
+  if (!state.current || !memoryId) return;
+  el("memoryDetail").classList.remove("hidden");
+  el("memoriesBody").classList.add("hidden");
+  el("memoryLoadMoreBtn").classList.add("hidden");
+  el("memoryDetail").innerHTML = `<div class="memory-empty">Loading memory #${escapeHtml(memoryId)}...</div>`;
+
+  const result = await api().get_memory_detail(state.current.name, memoryId);
+  if (!result.ok) {
+    el("memoryDetail").innerHTML = `<div class="memory-empty">${escapeHtml(result.error || "Memory unavailable.")}</div>`;
+    return;
+  }
+  const versions = result.versions || [];
+  el("memoryDetail").innerHTML = `
+    <button class="memory-back-btn" type="button">&larr; Back to memories</button>
+    <div class="memory-detail-head">
+      <h3>Memory #${escapeHtml(result.current_id || memoryId)}</h3>
+      <span>${versions.length} ${versions.length === 1 ? "version" : "versions"}</span>
+    </div>
+    <div class="memory-versions">
+      ${versions.map((memory, index) => renderMemoryVersion(memory, index === 0)).join("")}
+    </div>`;
+  el("memoryDetail").querySelector(".memory-back-btn").addEventListener("click", showMemoryList);
+}
+
+function renderMemoryVersion(memory, current) {
+  const tags = (memory.tags || []).map((tag) => `<span>${escapeHtml(tag)}</span>`).join("");
+  const sourceNote = renderMemoryDetailSourceNote(memory);
+  return `
+    <article class="memory-version ${current ? "current" : ""}">
+      <div class="memory-version-head">
+        <strong>#${escapeHtml(memory.id)}${current ? " / Current" : ""}</strong>
+        <span>${escapeHtml(memory.date_display || "unknown")} / ${escapeHtml(memory.age_label || "unknown age")}</span>
+      </div>
+      ${sourceNote}
+      <p>${escapeHtml(memory.text || "")}</p>
+      <div class="memory-tags">${tags || "<span>untagged</span>"}</div>
+    </article>`;
+}
+
+function renderMemoryDetailSourceNote(memory) {
+  if (memory.detail_source === "journal_entry") {
+    return `
+      <div class="memory-source-note">
+        <strong>Journal index memory</strong>
+        <span>You clicked memory #${escapeHtml(memory.id)}, which points to ${escapeHtml(memory.journal_file || "a journal entry")}. Showing the linked journal entry content below.</span>
+      </div>`;
+  }
+  if (memory.type === "journal") {
+    return `
+      <div class="memory-source-note">
+        <strong>Journal index memory</strong>
+        <span>This memory is a searchable pointer to ${escapeHtml(memory.journal_file || "a journal entry")}. The linked journal entry was not found, so this is the stored memory preview.</span>
+      </div>`;
+  }
+  if (memory.type === "session_log") {
+    return `
+      <div class="memory-source-note">
+        <strong>Chat summary</strong>
+        <span>This is a historical conversation summary used for orientation. It is not a raw chat log.</span>
+      </div>`;
+  }
+  return "";
+}
+
+function humanizeMemoryBadge(value) {
+  return text(value)
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (ch) => ch.toUpperCase());
+}
+
+function humanizeMemoryKind(kind) {
+  return {
+    all: "Memories",
+    fact: "Facts",
+    journal: "Journal index",
+    session_log: "Chat summaries",
+  }[kind] || "Memories";
+}
+
+function emptyMemoryHint(view, kind) {
+  if (view === "archived") {
+    return "Archived memories are kept separate so old or retired context does not mingle with current continuity.";
+  }
+  if (kind === "journal") return "Journal index memories appear when journal entries create companion-searchable summaries.";
+  if (kind === "session_log") return "Chat summaries are historical orientation memories. They are useful, but should be handled carefully.";
+  return "Try another filter if you expected to see journal index memories or chat summaries.";
 }
 
 async function restoreBackup(path) {

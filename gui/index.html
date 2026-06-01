@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Pulse Engine</title>
-  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="style.css?v=20260602f">
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
   <meta http-equiv="Pragma" content="no-cache">
   <meta http-equiv="Expires" content="0">
@@ -513,6 +513,33 @@
       <div id="lanternBody" class="lantern-body"></div>
       <div class="modal-actions">
         <button id="lanternCloseBtn" class="modal-btn ghost" type="button">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="memoriesDialog" class="modal-overlay hidden">
+    <div class="modal-card memories-card">
+      <div class="memories-modal-head">
+        <div>
+          <h2 class="modal-title">Memories</h2>
+          <p id="memoriesSubtitle" class="modal-body">Browse continuity memories.</p>
+        </div>
+        <div id="memoryViewTabs" class="memory-view-tabs" role="tablist" aria-label="Memory view">
+          <button class="active" type="button" data-memory-view="active">Active</button>
+          <button type="button" data-memory-view="archived">Archived</button>
+        </div>
+      </div>
+      <div id="memoryTypeTabs" class="memory-type-tabs" role="tablist" aria-label="Memory type">
+        <button class="active" type="button" data-memory-kind="fact">Facts</button>
+        <button type="button" data-memory-kind="journal">Journal Index</button>
+        <button type="button" data-memory-kind="session_log">Chat Summaries</button>
+        <button type="button" data-memory-kind="all">All</button>
+      </div>
+      <div id="memoryDetail" class="memory-detail hidden"></div>
+      <div id="memoriesBody" class="memories-body"></div>
+      <button id="memoryLoadMoreBtn" class="memory-load-more hidden" type="button">Load More</button>
+      <div class="modal-actions">
+        <button id="memoriesCloseBtn" class="modal-btn ghost" type="button">Close</button>
       </div>
     </div>
   </div>

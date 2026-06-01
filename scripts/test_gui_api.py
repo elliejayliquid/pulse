@@ -1,4 +1,5 @@
 import os
+import json
 import sqlite3
 import sys
 import tempfile
@@ -219,6 +220,153 @@ def test_gui_api_get_lantern_read_only():
         assert lantern["fields"]["open_thread"] == "wire read-only view"
 
 
+def test_gui_api_list_memories_read_only_with_history_views():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        persona_dir = root / "personas" / "demo"
+        data_dir = persona_dir / "data"
+        data_dir.mkdir(parents=True)
+        (root / "logs").mkdir()
+        (root / "config.yaml").write_text("", encoding="utf-8")
+        (root / "persona.yaml").write_text("name: Base\n", encoding="utf-8")
+        (persona_dir / "config.yaml").write_text("", encoding="utf-8")
+        (persona_dir / "persona.yaml").write_text("name: Demo\n", encoding="utf-8")
+
+        db_path = data_dir / "demo.db"
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                """
+                CREATE TABLE memories (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    text TEXT NOT NULL,
+                    tags TEXT NOT NULL DEFAULT '[]',
+                    type TEXT NOT NULL DEFAULT 'fact',
+                    importance INTEGER NOT NULL DEFAULT 5,
+                    retrieval_count INTEGER NOT NULL DEFAULT 0,
+                    last_accessed TEXT,
+                    supersedes INTEGER,
+                    journal_file TEXT,
+                    date TEXT NOT NULL,
+                    status TEXT,
+                    confidence TEXT,
+                    source TEXT,
+                    last_confirmed TEXT,
+                    time_sensitive INTEGER,
+                    valid_until TEXT,
+                    embedding BLOB
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE journal_entries (
+                    id TEXT PRIMARY KEY,
+                    author TEXT NOT NULL DEFAULT 'Pulse',
+                    title TEXT,
+                    entry_type TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    why_it_mattered TEXT,
+                    tags TEXT NOT NULL DEFAULT '[]',
+                    importance INTEGER NOT NULL DEFAULT 5,
+                    pinned INTEGER NOT NULL DEFAULT 0,
+                    resolved INTEGER,
+                    date TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                "INSERT INTO memories "
+                "(id, text, tags, type, importance, date, status, confidence, source) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (1, "Lena likes blue", json.dumps(["preference"]), "fact", 5,
+                 "2026-01-01T00:00:00+00:00", "superseded", "medium", "model_extracted"),
+            )
+            conn.execute(
+                "INSERT INTO memories "
+                "(id, text, tags, type, importance, date, status, confidence, source, supersedes) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (2, "Lena likes purple", json.dumps(["preference"]), "fact", 6,
+                 "2026-02-01T00:00:00+00:00", "current", "high", "user_defined", 1),
+            )
+            conn.execute(
+                "INSERT INTO memories "
+                "(id, text, tags, type, importance, date, status) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (3, "Old archived memory", "[]", "fact", 1,
+                 "2026-03-01T00:00:00+00:00", "archived"),
+            )
+            conn.execute(
+                "INSERT INTO memories "
+                "(id, text, tags, type, importance, date, status, journal_file) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (4, "Journal preview", json.dumps(["journal"]), "journal", 5,
+                 "2026-04-01T00:00:00+00:00", "current", "entries/001.md"),
+            )
+            conn.execute(
+                "INSERT INTO journal_entries "
+                "(id, title, entry_type, content, why_it_mattered, tags, date) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "001",
+                    "Full journal entry",
+                    "reflection",
+                    "This is the full journal entry, not the companion memory preview.",
+                    "It gives the detail view the whole entry.",
+                    "[]",
+                    "2026-04-01T00:00:00+00:00",
+                ),
+            )
+            conn.execute(
+                "INSERT INTO memories "
+                "(id, text, tags, type, importance, date, status, source) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (5, "Session summary", "[]", "session_log", 4,
+                 "2026-05-01T00:00:00+00:00", "historical", "system"),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        api = PulseAPI(root)
+        active = api.list_memories("demo", "active", page=1, page_size=25)
+        assert active["ok"] is True
+        assert active["total"] == 1
+        assert active["items"][0]["id"] == 2
+        assert active["items"][0]["has_history"] is True
+        assert active["items"][0]["version_count"] == 2
+
+        all_active = api.list_memories("demo", "active", "all", page=1, page_size=25)
+        assert all_active["ok"] is True
+        assert all_active["total"] == 3
+
+        journal = api.list_memories("demo", "active", "journal", page=1, page_size=25)
+        assert journal["ok"] is True
+        assert journal["total"] == 1
+        assert journal["items"][0]["id"] == 4
+
+        journal_detail = api.get_memory_detail("demo", 4)
+        assert journal_detail["ok"] is True
+        assert "Full journal entry" in journal_detail["versions"][0]["text"]
+        assert "not the companion memory preview" in journal_detail["versions"][0]["text"]
+        assert journal_detail["versions"][0]["detail_source"] == "journal_entry"
+
+        session_logs = api.list_memories("demo", "active", "session_log", page=1, page_size=25)
+        assert session_logs["ok"] is True
+        assert session_logs["total"] == 1
+        assert session_logs["items"][0]["id"] == 5
+
+        archived = api.list_memories("demo", "archived", page=1, page_size=25)
+        assert archived["ok"] is True
+        assert archived["total"] == 1
+        assert archived["items"][0]["id"] == 3
+
+        detail = api.get_memory_detail("demo", 1)
+        assert detail["ok"] is True
+        assert detail["current_id"] == 2
+        assert [item["id"] for item in detail["versions"]] == [2, 1]
+
+
 def test_gui_api_model_file_path_validation():
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -314,6 +462,7 @@ if __name__ == "__main__":
     test_gui_api_read_only_persona_loading()
     test_gui_api_standard_provider_env_fallback()
     test_gui_api_get_lantern_read_only()
+    test_gui_api_list_memories_read_only_with_history_views()
     test_gui_api_model_file_path_validation()
     test_gui_api_secrets_preserve_env_and_validate_keys()
     print("[OK] GUI API")

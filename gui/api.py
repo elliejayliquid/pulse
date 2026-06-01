@@ -632,6 +632,131 @@ class PulseAPI:
             "db_path": _safe_rel(db_path, self.root),
         }
 
+    def list_memories(self, persona: str, view: str = "active",
+                      kind: str = "fact", page: int = 1,
+                      page_size: int = 25) -> dict:
+        if not persona or persona == "__base__":
+            return {"ok": False, "error": "Choose a persona first."}
+        persona_dir = self.personas_dir / persona
+        if not persona_dir.is_dir():
+            return {"ok": False, "error": f"Persona not found: {persona}"}
+        if view not in ("active", "archived"):
+            return {"ok": False, "error": "Memory view must be active or archived."}
+        if isinstance(kind, int):
+            page_size = page
+            page = kind
+            kind = "fact"
+        if kind not in ("all", "fact", "journal", "session_log"):
+            return {"ok": False, "error": "Memory type must be all, fact, journal, or session_log."}
+
+        db_path = self._persona_database_path(persona)
+        page = max(1, int(page or 1))
+        page_size = max(5, min(int(page_size or 25), 100))
+        if not db_path.exists():
+            return self._empty_memory_page(persona, view, kind, page, page_size, db_path)
+
+        try:
+            with closing(sqlite3.connect(str(db_path))) as conn:
+                conn.row_factory = sqlite3.Row
+                columns = self._table_columns(conn, "memories")
+                if not columns:
+                    return self._empty_memory_page(persona, view, kind, page, page_size, db_path)
+
+                select_sql = self._memory_select_sql(columns)
+                where = self._memory_view_where(view, kind, columns)
+                total = conn.execute(f"SELECT COUNT(*) FROM memories {where}").fetchone()[0]
+                offset = (page - 1) * page_size
+                rows = conn.execute(
+                    f"SELECT {select_sql} FROM memories {where} "
+                    "ORDER BY date DESC, id DESC LIMIT ? OFFSET ?",
+                    (page_size, offset),
+                ).fetchall()
+                all_rows = conn.execute(
+                    f"SELECT {select_sql} FROM memories ORDER BY date DESC, id DESC"
+                ).fetchall()
+        except (sqlite3.Error, OSError) as e:
+            return {"ok": False, "error": f"Could not read memories: {e}"}
+
+        history = self._memory_history_index([dict(row) for row in all_rows])
+        items = [self._format_memory_item(dict(row), history) for row in rows]
+        return {
+            "ok": True,
+            "persona": persona,
+            "view": view,
+            "kind": kind,
+            "page": page,
+            "page_size": page_size,
+            "total": total,
+            "has_more": offset + len(items) < total,
+            "items": items,
+            "db_path": _safe_rel(db_path, self.root),
+        }
+
+    def get_memory_detail(self, persona: str, memory_id: int) -> dict:
+        if not persona or persona == "__base__":
+            return {"ok": False, "error": "Choose a persona first."}
+        persona_dir = self.personas_dir / persona
+        if not persona_dir.is_dir():
+            return {"ok": False, "error": f"Persona not found: {persona}"}
+        try:
+            memory_id = int(memory_id)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "Invalid memory ID."}
+
+        db_path = self._persona_database_path(persona)
+        if not db_path.exists():
+            return {"ok": False, "error": "Memory database not found."}
+
+        try:
+            with closing(sqlite3.connect(str(db_path))) as conn:
+                conn.row_factory = sqlite3.Row
+                columns = self._table_columns(conn, "memories")
+                if not columns:
+                    return {"ok": False, "error": "Memory table not found."}
+                select_sql = self._memory_select_sql(columns)
+                rows = [
+                    dict(row)
+                    for row in conn.execute(
+                        f"SELECT {select_sql} FROM memories ORDER BY date DESC, id DESC"
+                    ).fetchall()
+                ]
+        except (sqlite3.Error, OSError) as e:
+            return {"ok": False, "error": f"Could not read memory: {e}"}
+
+        by_id = {row["id"]: row for row in rows}
+        if memory_id not in by_id:
+            return {"ok": False, "error": f"Memory #{memory_id} not found."}
+
+        superseded_by = {
+            row["supersedes"]: row["id"]
+            for row in rows
+            if row.get("supersedes")
+        }
+        current_id = memory_id
+        seen = set()
+        while superseded_by.get(current_id) and current_id not in seen:
+            seen.add(current_id)
+            current_id = superseded_by[current_id]
+
+        chain = []
+        cursor = current_id
+        seen.clear()
+        while cursor and cursor in by_id and cursor not in seen:
+            seen.add(cursor)
+            chain.append(by_id[cursor])
+            cursor = by_id[cursor].get("supersedes")
+
+        chain = self._hydrate_memory_detail_rows(db_path, chain)
+        history = self._memory_history_index(rows)
+        return {
+            "ok": True,
+            "persona": persona,
+            "memory_id": memory_id,
+            "current_id": current_id,
+            "versions": [self._format_memory_item(row, history) for row in chain],
+            "db_path": _safe_rel(db_path, self.root),
+        }
+
     def stop_pulse(self, persona: str) -> dict:
         if not persona or persona == "__base__":
             return {"ok": False, "error": "Choose a persona before stopping Pulse."}
@@ -781,6 +906,189 @@ class PulseAPI:
 
     def _persona_data_dir(self, persona: str) -> Path:
         return self.personas_dir / persona / "data"
+
+    def _persona_database_path(self, persona: str) -> Path:
+        config = self._merged_config_for(persona)
+        self._apply_persona_defaults(config, persona)
+        db_path = Path(config.get("paths", {}).get("database") or self._persona_data_dir(persona) / f"{persona}.db")
+        if not db_path.is_absolute():
+            db_path = (self.root / db_path).resolve()
+        return db_path
+
+    def _empty_memory_page(self, persona: str, view: str, kind: str, page: int,
+                           page_size: int, db_path: Path) -> dict:
+        return {
+            "ok": True,
+            "persona": persona,
+            "view": view,
+            "kind": kind,
+            "page": page,
+            "page_size": page_size,
+            "total": 0,
+            "has_more": False,
+            "items": [],
+            "db_path": _safe_rel(db_path, self.root),
+        }
+
+    def _table_columns(self, conn: sqlite3.Connection, table: str) -> set[str]:
+        try:
+            rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+        except sqlite3.Error:
+            return set()
+        return {row[1] for row in rows}
+
+    def _memory_select_sql(self, columns: set[str]) -> str:
+        required = [
+            "id", "text", "tags", "type", "importance", "retrieval_count",
+            "last_accessed", "supersedes", "journal_file", "date",
+        ]
+        optional = ["status", "confidence", "source", "last_confirmed", "time_sensitive", "valid_until"]
+        parts = [name if name in columns else f"NULL AS {name}" for name in required + optional]
+        return ", ".join(parts)
+
+    def _memory_view_where(self, view: str, kind: str, columns: set[str]) -> str:
+        filters = []
+        if view == "archived":
+            if "status" not in columns:
+                return "WHERE 0"
+            filters.append("status = 'archived'")
+        elif "status" in columns:
+            filters.append("(status IS NULL OR status != 'archived')")
+
+        if kind != "all":
+            if "type" not in columns:
+                return "WHERE 0"
+            filters.append(f"type = '{kind}'")
+
+        if "supersedes" in columns:
+            filters.append(
+                "id NOT IN "
+                "(SELECT supersedes FROM memories WHERE supersedes IS NOT NULL)"
+            )
+        return f"WHERE {' AND '.join(filters)}" if filters else ""
+
+    def _decode_tags(self, value: Any) -> list[str]:
+        if not value:
+            return []
+        if isinstance(value, list):
+            return [str(item) for item in value if str(item)]
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError):
+            return []
+        if isinstance(parsed, list):
+            return [str(item) for item in parsed if str(item)]
+        return []
+
+    def _memory_history_index(self, rows: list[dict]) -> dict[int, dict]:
+        by_id = {row["id"]: row for row in rows}
+        superseded_by = {
+            row["supersedes"]: row["id"]
+            for row in rows
+            if row.get("supersedes")
+        }
+        index = {}
+        for row in rows:
+            count = 1
+            cursor = row.get("supersedes")
+            seen = {row["id"]}
+            while cursor and cursor in by_id and cursor not in seen:
+                seen.add(cursor)
+                count += 1
+                cursor = by_id[cursor].get("supersedes")
+            index[row["id"]] = {
+                "version_count": count,
+                "supersedes": row.get("supersedes"),
+                "replaced_by": superseded_by.get(row["id"]),
+            }
+        return index
+
+    def _hydrate_memory_detail_rows(self, db_path: Path, rows: list[dict]) -> list[dict]:
+        journal_ids = {
+            self._journal_entry_id(row.get("journal_file"))
+            for row in rows
+            if row.get("type") == "journal" and row.get("journal_file")
+        }
+        journal_ids.discard(None)
+        if not journal_ids:
+            return rows
+
+        try:
+            with closing(sqlite3.connect(str(db_path))) as conn:
+                conn.row_factory = sqlite3.Row
+                if not self._table_columns(conn, "journal_entries"):
+                    return rows
+                placeholders = ", ".join("?" for _ in journal_ids)
+                entries = {
+                    row["id"]: dict(row)
+                    for row in conn.execute(
+                        f"SELECT * FROM journal_entries WHERE id IN ({placeholders})",
+                        tuple(journal_ids),
+                    ).fetchall()
+                }
+        except (sqlite3.Error, OSError):
+            return rows
+
+        hydrated = []
+        for row in rows:
+            copy = dict(row)
+            entry_id = self._journal_entry_id(copy.get("journal_file"))
+            entry = entries.get(entry_id)
+            if entry and entry.get("content"):
+                copy["text"] = self._format_journal_memory_detail(entry)
+                copy["detail_source"] = "journal_entry"
+            hydrated.append(copy)
+        return hydrated
+
+    def _journal_entry_id(self, journal_file: str | None) -> str | None:
+        if not journal_file:
+            return None
+        return Path(str(journal_file)).stem or None
+
+    def _format_journal_memory_detail(self, entry: dict) -> str:
+        parts = []
+        title = entry.get("title")
+        if title:
+            parts.append(str(title).strip())
+        content = entry.get("content")
+        if content:
+            parts.append(str(content).strip())
+        why = entry.get("why_it_mattered")
+        if why:
+            parts.append(f"Why it mattered: {str(why).strip()}")
+        return "\n\n".join(part for part in parts if part)
+
+    def _format_memory_item(self, row: dict, history: dict[int, dict]) -> dict:
+        tags = self._decode_tags(row.get("tags"))
+        text = row.get("text") or ""
+        date = row.get("date") or ""
+        age_hours = self._hours_since(date)
+        hist = history.get(row.get("id"), {})
+        return {
+            "id": row.get("id"),
+            "text": text,
+            "preview": text[:240] + ("..." if len(text) > 240 else ""),
+            "tags": tags,
+            "type": row.get("type") or "fact",
+            "importance": row.get("importance"),
+            "date": date,
+            "date_display": str(date)[:10] if date else "unknown",
+            "age_label": self._age_label(age_hours),
+            "status": row.get("status") or "legacy",
+            "confidence": row.get("confidence") or "",
+            "source": row.get("source") or "",
+            "journal_file": row.get("journal_file") or "",
+            "detail_source": row.get("detail_source") or "",
+            "retrieval_count": row.get("retrieval_count"),
+            "last_accessed": row.get("last_accessed") or "",
+            "last_confirmed": row.get("last_confirmed") or "",
+            "time_sensitive": bool(row.get("time_sensitive")) if row.get("time_sensitive") is not None else False,
+            "valid_until": row.get("valid_until") or "",
+            "supersedes": hist.get("supersedes"),
+            "replaced_by": hist.get("replaced_by"),
+            "version_count": hist.get("version_count", 1),
+            "has_history": hist.get("version_count", 1) > 1,
+        }
 
     def _read_lantern_row(self, db_path: Path, persona: str) -> dict | None:
         if not db_path.exists():
