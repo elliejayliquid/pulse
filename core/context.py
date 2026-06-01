@@ -195,7 +195,55 @@ class ContextManager:
         """Format memory date/age for prompt context."""
         raw_date = mem.get("date") or mem.get("created_at") or ""
         date = raw_date[:10] if raw_date else "unknown"
-        return f"[{date}; {self._memory_age_label(raw_date)}]"
+        metadata = self._memory_metadata_label(mem)
+        metadata_part = f"; {metadata}" if metadata else ""
+        return f"[{date}; {self._memory_age_label(raw_date)}{metadata_part}]"
+
+    def _memory_metadata_label(self, mem: dict) -> str:
+        """Return compact continuity metadata for model-facing memory context."""
+        labels = []
+        status = mem.get("status")
+        confidence = mem.get("confidence")
+        source = mem.get("source")
+
+        if not status:
+            labels.append("legacy/unclassified")
+        elif status != "current":
+            labels.append(status)
+
+        if confidence == "low":
+            labels.append("low confidence")
+        elif confidence == "high":
+            labels.append("confirmed")
+
+        if source == "imported":
+            labels.append("imported")
+        elif source == "user_defined":
+            labels.append("user-defined")
+
+        if mem.get("time_sensitive"):
+            labels.append("time-sensitive")
+
+        valid_until = mem.get("valid_until")
+        if valid_until:
+            date = str(valid_until)[:10]
+            labels.append(f"valid until {date}")
+            if self._memory_is_expired(mem):
+                labels.append("expired")
+
+        return "; ".join(labels)
+
+    def _memory_is_expired(self, mem: dict) -> bool:
+        """Return True if a memory's valid_until timestamp/date is in the past."""
+        raw_date = mem.get("valid_until")
+        if not raw_date:
+            return False
+        try:
+            dt = datetime.fromisoformat(str(raw_date).replace("Z", "+00:00"))
+            now = datetime.now(dt.tzinfo) if dt.tzinfo else datetime.now()
+            return dt < now
+        except (ValueError, TypeError):
+            return False
 
     def _load_journal_context(self) -> str:
         """Load pinned identity entries + recent transient entries for context."""
@@ -467,15 +515,29 @@ You decide when to lift the timeout — not the human."""
                 reverse=True
             )
             facts = [m for m in memories if m.get("type") == "fact"]
+            current_facts = [
+                m for m in facts
+                if m.get("status") != "historical" and not self._memory_is_expired(m)
+            ]
+            historical_facts = [
+                m for m in facts
+                if m.get("status") == "historical" or self._memory_is_expired(m)
+            ]
 
             lines = ["## Recent Memories"]
             if session_logs:
                 latest = session_logs[0]
                 lines.append(f"\nLast session ({latest.get('date', 'unknown')[:10]}):")
                 lines.append(latest.get("text", ""))
-            if facts:
+            if current_facts:
                 lines.append("\nStored facts (dated; old facts may be historical, not current):")
-                for fact in facts:
+                for fact in current_facts:
+                    tags = fact.get("tags", [])
+                    tag_str = f" [{', '.join(tags)}]" if tags else ""
+                    lines.append(f"- {self._memory_date_prefix(fact)} {fact.get('text', '')}{tag_str}")
+            if historical_facts:
+                lines.append("\nHistorical/expired facts (use as background, not current truth):")
+                for fact in historical_facts:
                     tags = fact.get("tags", [])
                     tag_str = f" [{', '.join(tags)}]" if tags else ""
                     lines.append(f"- {self._memory_date_prefix(fact)} {fact.get('text', '')}{tag_str}")
@@ -505,15 +567,29 @@ You decide when to lift the timeout — not the human."""
             reverse=True
         )
         facts = [m for m in memories if m.get("type") == "fact"]
+        current_facts = [
+            m for m in facts
+            if m.get("status") != "historical" and not self._memory_is_expired(m)
+        ]
+        historical_facts = [
+            m for m in facts
+            if m.get("status") == "historical" or self._memory_is_expired(m)
+        ]
 
         lines = ["## Recent Memories"]
         if session_logs:
             latest = session_logs[0]
             lines.append(f"\nLast session ({latest.get('date', 'unknown')[:10]}):")
             lines.append(latest.get("text", ""))
-        if facts:
+        if current_facts:
             lines.append("\nStored facts (dated; old facts may be historical, not current):")
-            for fact in facts:
+            for fact in current_facts:
+                tags = fact.get("tags", [])
+                tag_str = f" [{', '.join(tags)}]" if tags else ""
+                lines.append(f"- {self._memory_date_prefix(fact)} {fact.get('text', '')}{tag_str}")
+        if historical_facts:
+            lines.append("\nHistorical/expired facts (use as background, not current truth):")
+            for fact in historical_facts:
                 tags = fact.get("tags", [])
                 tag_str = f" [{', '.join(tags)}]" if tags else ""
                 lines.append(f"- {self._memory_date_prefix(fact)} {fact.get('text', '')}{tag_str}")
@@ -751,7 +827,8 @@ You decide when to lift the timeout — not the human."""
                 embedding_bytes = struct.pack(f"{len(embedding_vec)}f", *embedding_vec)
             mem_id = db.save_memory(
                 text=summary, tags=tag_list, type="session_log",
-                importance=10, embedding=embedding_bytes
+                importance=10, embedding=embedding_bytes,
+                status="historical", source="system"
             )
             logger.info(f"Conversation summary saved to DB memory (ID: {mem_id})")
             return True

@@ -14,6 +14,10 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+MEMORY_STATUSES = {"current", "historical", "superseded", "archived"}
+MEMORY_CONFIDENCES = {"high", "medium", "low"}
+MEMORY_SOURCES = {"user_defined", "model_extracted", "imported", "system"}
+
 
 class PulseDatabase:
     """SQLite database for a single Pulse persona."""
@@ -36,12 +40,22 @@ class PulseDatabase:
             "ALTER TABLE messages ADD COLUMN channel_message_id INTEGER",
             "ALTER TABLE sessions ADD COLUMN summary_first_msg_id INTEGER",
             "ALTER TABLE sessions ADD COLUMN summary_last_msg_id INTEGER",
+            "ALTER TABLE memories ADD COLUMN status TEXT",
+            "ALTER TABLE memories ADD COLUMN confidence TEXT",
+            "ALTER TABLE memories ADD COLUMN source TEXT",
+            "ALTER TABLE memories ADD COLUMN last_confirmed TEXT",
+            "ALTER TABLE memories ADD COLUMN time_sensitive INTEGER",
+            "ALTER TABLE memories ADD COLUMN valid_until TEXT",
         ]:
             try:
                 self.conn.execute(stmt)
             except sqlite3.OperationalError:
                 pass  # Column already exists
-                
+
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_memories_status "
+            "ON memories(status, date DESC)"
+        )
         self.conn.commit()
 
     def close(self):
@@ -186,27 +200,66 @@ class PulseDatabase:
 
     # ── Memories ─────────────────────────────────────────────
 
+    def _row_to_memory(self, row: sqlite3.Row) -> dict:
+        """Convert a memory row to a dict with decoded tags and bool metadata."""
+        d = dict(row)
+        d["tags"] = json.loads(d["tags"])
+        if d.get("time_sensitive") is not None:
+            d["time_sensitive"] = bool(d["time_sensitive"])
+        return d
+
+    def _clean_memory_metadata(self, status: Optional[str],
+                               confidence: Optional[str],
+                               source: Optional[str],
+                               time_sensitive: Optional[bool]) -> tuple:
+        """Validate optional memory metadata before writing."""
+        if status is not None and status not in MEMORY_STATUSES:
+            raise ValueError(f"Invalid memory status: {status}")
+        if confidence is not None and confidence not in MEMORY_CONFIDENCES:
+            raise ValueError(f"Invalid memory confidence: {confidence}")
+        if source is not None and source not in MEMORY_SOURCES:
+            raise ValueError(f"Invalid memory source: {source}")
+        time_sensitive_int = None
+        if time_sensitive is not None:
+            time_sensitive_int = int(bool(time_sensitive))
+        return status, confidence, source, time_sensitive_int
+
     def save_memory(self, text: str, tags: list[str] | None = None,
                     type: str = "fact", importance: int = 5,
                     embedding: Optional[bytes] = None,
                     supersedes: Optional[int] = None,
                     journal_file: Optional[str] = None,
-                    date: Optional[str] = None) -> int:
+                    date: Optional[str] = None,
+                    status: Optional[str] = "current",
+                    confidence: Optional[str] = "medium",
+                    source: Optional[str] = "model_extracted",
+                    last_confirmed: Optional[str] = None,
+                    time_sensitive: Optional[bool] = None,
+                    valid_until: Optional[str] = None) -> int:
         """Insert a memory and return its row id."""
         tags_json = json.dumps(tags or [])
+        status, confidence, source, time_sensitive_int = self._clean_memory_metadata(
+            status, confidence, source, time_sensitive
+        )
         if date:
             cur = self.conn.execute(
                 "INSERT INTO memories (text, tags, type, importance, embedding, "
-                "supersedes, journal_file, date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "supersedes, journal_file, date, status, confidence, source, "
+                "last_confirmed, time_sensitive, valid_until) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (text, tags_json, type, importance, embedding,
-                 supersedes, journal_file, date)
+                 supersedes, journal_file, date, status, confidence, source,
+                 last_confirmed, time_sensitive_int, valid_until)
             )
         else:
             cur = self.conn.execute(
                 "INSERT INTO memories (text, tags, type, importance, embedding, "
-                "supersedes, journal_file) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "supersedes, journal_file, status, confidence, source, "
+                "last_confirmed, time_sensitive, valid_until) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (text, tags_json, type, importance, embedding,
-                 supersedes, journal_file)
+                 supersedes, journal_file, status, confidence, source,
+                 last_confirmed, time_sensitive_int, valid_until)
             )
         self.conn.commit()
         return cur.lastrowid
@@ -217,27 +270,57 @@ class PulseDatabase:
             "SELECT * FROM memories WHERE id = ?", (memory_id,)
         ).fetchone()
         if row:
-            d = dict(row)
-            d["tags"] = json.loads(d["tags"])
-            return d
+            return self._row_to_memory(row)
         return None
 
-    def get_all_memories(self, include_superseded: bool = False) -> list[dict]:
-        """Get all memories, optionally including superseded ones."""
-        if include_superseded:
-            sql = "SELECT * FROM memories ORDER BY importance DESC, date DESC"
-            rows = self.conn.execute(sql).fetchall()
-        else:
-            sql = ("SELECT * FROM memories WHERE id NOT IN "
-                   "(SELECT supersedes FROM memories WHERE supersedes IS NOT NULL) "
-                   "ORDER BY importance DESC, date DESC")
-            rows = self.conn.execute(sql).fetchall()
-        result = []
-        for row in rows:
-            d = dict(row)
-            d["tags"] = json.loads(d["tags"])
-            result.append(d)
-        return result
+    def get_all_memories(self, include_superseded: bool = False,
+                         include_archived: bool = False) -> list[dict]:
+        """Get all memories, optionally including superseded/archived ones."""
+        filters = []
+        if not include_archived:
+            filters.append("(status IS NULL OR status != 'archived')")
+        if not include_superseded:
+            filters.append(
+                "id NOT IN "
+                "(SELECT supersedes FROM memories WHERE supersedes IS NOT NULL)"
+            )
+        where = f" WHERE {' AND '.join(filters)}" if filters else ""
+        rows = self.conn.execute(
+            f"SELECT * FROM memories{where} ORDER BY importance DESC, date DESC"
+        ).fetchall()
+        return [self._row_to_memory(row) for row in rows]
+
+    def update_memory_metadata(self, memory_id: int, *,
+                               status: Optional[str] = None,
+                               confidence: Optional[str] = None,
+                               source: Optional[str] = None,
+                               last_confirmed: Optional[str] = None,
+                               time_sensitive: Optional[bool] = None,
+                               valid_until: Optional[str] = None) -> bool:
+        """Update metadata on a memory row. Returns True if a row was updated."""
+        status, confidence, source, time_sensitive_int = self._clean_memory_metadata(
+            status, confidence, source, time_sensitive
+        )
+        fields = {
+            "status": status,
+            "confidence": confidence,
+            "source": source,
+            "last_confirmed": last_confirmed,
+            "time_sensitive": time_sensitive_int,
+            "valid_until": valid_until,
+        }
+        updates = {key: value for key, value in fields.items() if value is not None}
+        if not updates:
+            return False
+
+        set_clause = ", ".join(f"{key} = ?" for key in updates)
+        values = list(updates.values()) + [memory_id]
+        cur = self.conn.execute(
+            f"UPDATE memories SET {set_clause} WHERE id = ?",
+            values
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
 
     def update_retrieval(self, memory_id: int) -> None:
         """Bump retrieval count and last_accessed timestamp."""
@@ -249,19 +332,17 @@ class PulseDatabase:
         self.conn.commit()
 
     def search_memories_by_text(self, query: str,
-                                limit: int = 20) -> list[dict]:
+                                limit: int = 20,
+                                include_archived: bool = False) -> list[dict]:
         """Keyword search across memory text."""
+        status_filter = "" if include_archived else "AND (status IS NULL OR status != 'archived') "
         rows = self.conn.execute(
             "SELECT * FROM memories WHERE text LIKE ? "
+            f"{status_filter}"
             "ORDER BY importance DESC, date DESC LIMIT ?",
             (f"%{query}%", limit)
         ).fetchall()
-        result = []
-        for row in rows:
-            d = dict(row)
-            d["tags"] = json.loads(d["tags"])
-            result.append(d)
-        return result
+        return [self._row_to_memory(row) for row in rows]
 
     def delete_memory(self, memory_id: int) -> bool:
         """Delete a memory by id. Returns True if a row was deleted."""
@@ -766,6 +847,12 @@ CREATE TABLE IF NOT EXISTS memories (
     supersedes      INTEGER,
     journal_file    TEXT,
     date            TEXT NOT NULL DEFAULT (datetime('now')),
+    status          TEXT,
+    confidence      TEXT,
+    source          TEXT,
+    last_confirmed  TEXT,
+    time_sensitive  INTEGER,
+    valid_until     TEXT,
     embedding       BLOB
 );
 CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(type, date DESC);

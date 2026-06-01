@@ -475,7 +475,9 @@ class MemorySkill(BaseSkill):
                 importance=old_mem.get("importance", 5),
                 embedding=embedding_blob,
                 supersedes=parsed_id,
+                confidence=old_mem.get("confidence") or "medium",
             )
+            self._db.update_memory_metadata(parsed_id, status="superseded")
             logger.info(f"Memory updated: #{old_id} -> #{new_id} — {text[:50]}...")
             return f"Memory updated: #{old_id} superseded by #{new_id}: '{text}'"
 
@@ -637,8 +639,53 @@ class MemorySkill(BaseSkill):
         elif days >= 2:
             stale_note = "; past memory - verify if time-sensitive"
 
+        metadata = self._memory_metadata_label(mem)
+        metadata_note = f"; {metadata}" if metadata else ""
         suffix = f" (relevance: {relevance}%)" if relevance is not None else ""
-        return f"#{mem_id} [{date}; {age}{stale_note}] {mem['text']}{suffix}"
+        return f"#{mem_id} [{date}; {age}{stale_note}{metadata_note}] {mem['text']}{suffix}"
+
+    def _memory_metadata_label(self, mem: dict) -> str:
+        """Return compact memory metadata for tool output."""
+        labels = []
+        status = mem.get("status")
+        confidence = mem.get("confidence")
+        source = mem.get("source")
+
+        if not status:
+            labels.append("legacy/unclassified")
+        elif status != "current":
+            labels.append(status)
+
+        if confidence == "low":
+            labels.append("low confidence")
+        elif confidence == "high":
+            labels.append("confirmed")
+
+        if source == "imported":
+            labels.append("imported")
+        elif source == "user_defined":
+            labels.append("user-defined")
+
+        if mem.get("time_sensitive"):
+            labels.append("time-sensitive")
+        if mem.get("valid_until"):
+            labels.append(f"valid until {str(mem['valid_until'])[:10]}")
+            if self._memory_is_expired(mem):
+                labels.append("expired")
+
+        return "; ".join(labels)
+
+    def _memory_is_expired(self, mem: dict) -> bool:
+        """Return True if a memory's valid_until timestamp/date is in the past."""
+        raw_date = mem.get("valid_until")
+        if not raw_date:
+            return False
+        try:
+            dt = datetime.fromisoformat(str(raw_date).replace("Z", "+00:00"))
+            now = datetime.now(dt.tzinfo) if dt.tzinfo else datetime.now()
+            return dt < now
+        except (ValueError, TypeError):
+            return False
 
     def _semantic_search(self, query: str, memories: list[dict], model) -> str:
         """Vector similarity search with boosting."""
@@ -808,7 +855,7 @@ class MemorySkill(BaseSkill):
         for mem in memories[:limit]:
             tags = ", ".join(mem.get("tags", []))
             tag_str = f" [{tags}]" if tags else ""
-            results.append(f"#{mem['id']} [{mem['date'][:10]}]{tag_str} {mem['text']}")
+            results.append(f"{self._format_memory_result(mem)}{tag_str}")
 
         header = f"Showing {len(results)} of {len(memories)} memories (newest first):"
         return header + "\n" + "\n".join(results)
@@ -835,7 +882,7 @@ class MemorySkill(BaseSkill):
         for mem in page_memories:
             tags = ", ".join(mem.get("tags", []))
             tag_str = f" [{tags}]" if tags else ""
-            results.append(f"#{mem['id']} [{mem['date'][:10]}]{tag_str} {mem['text']}")
+            results.append(f"{self._format_memory_result(mem)}{tag_str}")
 
         header = f"Page {page}/{total_pages} ({len(memories)} memories total, oldest first):"
         return header + "\n" + "\n".join(results)
