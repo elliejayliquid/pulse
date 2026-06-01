@@ -1419,6 +1419,27 @@ function currentPersonaIsRunning() {
   return Boolean(state.current?.status?.running) && !state.current?.status?.stale;
 }
 
+function handleContinuityAction(action) {
+  const messages = {
+    "view-lantern": "Lantern view is the next read-only continuity endpoint to wire.",
+    "dim-lantern": "Lantern dim/clear will be enabled after the safe write flow exists.",
+    "update-lantern": "Lantern update will use preview and confirmation before writing.",
+    "browse-memories": "Memory browsing will use the new continuity metadata once the backend endpoint is ready.",
+    "add-memory": "Adding memories will come after the memory browser and preview flow.",
+    "edit-memory": "Memory edit/supersede will prefer safe supersede, with direct edit marked as advanced.",
+    "delete-memory": "Memory delete will require a stern confirmation and a small before-image safety record.",
+    "browse-journal": "Journal browsing is planned as a read-only continuity slice.",
+    "resolve-journal": "Journal resolve will be the safe first action for stale or completed entries.",
+    "edit-journal": "Journal edit/delete will come after browse and resolve are stable.",
+    "core-self": "Core self anchors will edit the pinned _self journal entry.",
+    "core-user": "Core user anchors will edit the pinned _user journal entry.",
+    "core-relationship": "Core relationship anchors will edit the pinned _relationship journal entry.",
+    "import-content": "Continuity import will start with pasted companion-written notes and preview before writing.",
+    "learn-more": "Continuity planning lives in designs/continuity_section.md.",
+  };
+  setNotice(messages[action] || "Continuity action coming soon.", "info", NOTICE_INFO_MS);
+}
+
 async function loadPersona(name) {
   setNotice("");
   setFooterNotice("");
@@ -1713,6 +1734,9 @@ function wireEvents() {
   });
   document.querySelectorAll(".section-header").forEach((header) => {
     header.addEventListener("click", () => header.parentElement.classList.toggle("open"));
+  });
+  document.querySelectorAll("[data-continuity-action]").forEach((button) => {
+    button.addEventListener("click", () => handleContinuityAction(button.dataset.continuityAction));
   });
   [
     "identityName",

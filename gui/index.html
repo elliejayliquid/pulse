@@ -73,9 +73,163 @@
         </div>
       </section>
 
+      <section class="section" id="continuitySection">
+        <button class="section-header" type="button">
+          <span><em>02</em> Continuity <small class="section-badge">New</small></span>
+          <b class="section-chevron" aria-hidden="true"></b>
+        </button>
+        <div class="section-body continuity-body">
+          <p class="section-intro">Manage context, memories, and evolving understanding.</p>
+
+          <div class="continuity-list">
+            <article class="continuity-row">
+              <div class="continuity-icon" data-icon="lantern" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M9 21h6"></path><path d="M10 17h4"></path><path d="M8 17h8l-1-9a3 3 0 0 0-6 0z"></path><path d="M9 10h6"></path><path d="M12 2v3"></path></svg>
+              </div>
+              <div class="continuity-copy">
+                <div class="continuity-title-row">
+                  <h3>Lantern</h3>
+                  <span class="continuity-pill active">Active</span>
+                </div>
+                <p>Current state and open threads</p>
+                <small>View, dim, clear, or update lantern context.</small>
+              </div>
+              <div class="continuity-actions">
+                <button class="continuity-btn" type="button" data-continuity-action="view-lantern" title="View lantern state">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+                  <span>View</span>
+                </button>
+                <button class="continuity-btn" type="button" data-continuity-action="dim-lantern" title="Dim or clear stale lantern state">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3l18 18"></path><path d="M8 17h8l-.8-7.4"></path><path d="M9.6 5.5A3 3 0 0 1 15 8l.2 1.8"></path><path d="M9 21h6"></path><path d="M10 17h4"></path></svg>
+                  <span>Dim / Clear</span>
+                </button>
+                <button class="continuity-btn" type="button" data-continuity-action="update-lantern" title="Update lantern state">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9"></path><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"></path></svg>
+                  <span>Update</span>
+                </button>
+              </div>
+            </article>
+
+            <article class="continuity-row">
+              <div class="continuity-icon" data-icon="brain" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M9 4a4 4 0 0 0-4 4v8a4 4 0 0 0 4 4"></path><path d="M15 4a4 4 0 0 1 4 4v8a4 4 0 0 1-4 4"></path><path d="M9 4v16"></path><path d="M15 4v16"></path><path d="M9 8H6"></path><path d="M18 12h-3"></path><path d="M9 16H6"></path></svg>
+              </div>
+              <div class="continuity-copy">
+                <h3>Memories</h3>
+                <p>Long-term facts, moments, and corrections</p>
+                <small>Browse, add, edit, supersede, or delete memories.</small>
+              </div>
+              <div class="continuity-actions">
+                <button class="continuity-btn" type="button" data-continuity-action="browse-memories" title="Browse memories">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="M20 20l-3.5-3.5"></path></svg>
+                  <span>Browse</span>
+                </button>
+                <button class="continuity-btn" type="button" data-continuity-action="add-memory" title="Add a memory">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14"></path><path d="M5 12h14"></path></svg>
+                  <span>Add</span>
+                </button>
+                <button class="continuity-btn" type="button" data-continuity-action="edit-memory" title="Edit or supersede a memory">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9"></path><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"></path></svg>
+                  <span>Edit / Supersede</span>
+                </button>
+                <button class="continuity-btn danger" type="button" data-continuity-action="delete-memory" title="Delete a memory">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18"></path><path d="M8 6V4h8v2"></path><path d="M19 6l-1 14H6L5 6"></path><path d="M10 11v5"></path><path d="M14 11v5"></path></svg>
+                  <span>Delete</span>
+                </button>
+              </div>
+            </article>
+
+            <article class="continuity-row">
+              <div class="continuity-icon" data-icon="journal" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M5 4h12a2 2 0 0 1 2 2v14H7a2 2 0 0 1-2-2z"></path><path d="M7 4v14a2 2 0 0 0 2 2"></path><path d="M9 8h6"></path><path d="M9 12h5"></path></svg>
+              </div>
+              <div class="continuity-copy">
+                <h3>Journal</h3>
+                <p>Reflections, open threads, and follow-ups</p>
+                <small>Browse, resolve, edit, or delete journal entries.</small>
+              </div>
+              <div class="continuity-actions">
+                <button class="continuity-btn" type="button" data-continuity-action="browse-journal" title="Browse journal entries">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="M20 20l-3.5-3.5"></path></svg>
+                  <span>Browse</span>
+                </button>
+                <button class="continuity-btn" type="button" data-continuity-action="resolve-journal" title="Resolve stale or completed journal entries">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6L9 17l-5-5"></path></svg>
+                  <span>Resolve</span>
+                </button>
+                <button class="continuity-btn" type="button" data-continuity-action="edit-journal" title="Edit or delete journal entries">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9"></path><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"></path></svg>
+                  <span>Edit / Delete</span>
+                </button>
+              </div>
+            </article>
+
+            <article class="continuity-row">
+              <div class="continuity-icon" data-icon="person" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"></circle><path d="M5 21a7 7 0 0 1 14 0"></path></svg>
+              </div>
+              <div class="continuity-copy">
+                <h3>Core</h3>
+                <p>Pinned identity anchors</p>
+                <small>Edit self, user, and relationship journal anchors.</small>
+              </div>
+              <div class="continuity-actions">
+                <button class="continuity-btn compact" type="button" data-continuity-action="core-self" title="Edit companion core anchor">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"></circle><path d="M5 21a7 7 0 0 1 14 0"></path></svg>
+                  <span>Self</span>
+                </button>
+                <button class="continuity-btn compact" type="button" data-continuity-action="core-user" title="Edit human core anchor">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"></circle><path d="M5 21a7 7 0 0 1 14 0"></path></svg>
+                  <span>User</span>
+                </button>
+                <button class="continuity-btn compact" type="button" data-continuity-action="core-relationship" title="Edit relationship core anchor">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="9" r="3"></circle><circle cx="16" cy="9" r="3"></circle><path d="M3 21a5 5 0 0 1 10 0"></path><path d="M11 21a5 5 0 0 1 10 0"></path></svg>
+                  <span>Relationship</span>
+                </button>
+              </div>
+            </article>
+
+            <article class="continuity-row">
+              <div class="continuity-icon" data-icon="import" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M12 3v12"></path><path d="M7 10l5 5 5-5"></path><path d="M5 21h14"></path><path d="M5 17v4"></path><path d="M19 17v4"></path></svg>
+              </div>
+              <div class="continuity-copy">
+                <div class="continuity-title-row">
+                  <h3>Import</h3>
+                  <span class="continuity-pill">New</span>
+                </div>
+                <p>Bring companion-written context into Pulse</p>
+                <small>Paste memories, identity notes, or continuity context.</small>
+              </div>
+              <div class="continuity-actions import-actions">
+                <div class="continuity-dropzone">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 3h6l3 3v12a3 3 0 0 1-3 3H9a3 3 0 0 1-3-3V6a3 3 0 0 1 3-3z"></path><path d="M15 3v4h4"></path><path d="M12 11v6"></path><path d="M9 14l3 3 3-3"></path></svg>
+                  <span>Paste content here...</span>
+                </div>
+                <button class="continuity-btn wide" type="button" data-continuity-action="import-content" title="Import companion-written continuity content">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12"></path><path d="M7 10l5 5 5-5"></path><path d="M5 21h14"></path></svg>
+                  <span>Import Content</span>
+                </button>
+              </div>
+            </article>
+          </div>
+
+          <div class="continuity-about">
+            <div>
+              <strong>About Continuity</strong>
+              <p>Continuity tools keep memories, journal anchors, and current context reviewable as a companion grows.</p>
+            </div>
+            <button class="continuity-btn" type="button" data-continuity-action="learn-more" title="Open continuity notes">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 17L17 7"></path><path d="M8 7h9v9"></path></svg>
+              <span>Learn More</span>
+            </button>
+          </div>
+        </div>
+      </section>
+
       <section class="section open">
         <button class="section-header" type="button">
-          <span><em>02</em> Provider</span>
+          <span><em>03</em> Provider</span>
           <b class="section-chevron" aria-hidden="true"></b>
         </button>
         <div class="section-body">
@@ -112,7 +266,7 @@
 
       <section id="localServerSection" class="section hidden">
         <button class="section-header" type="button">
-          <span><em>03</em> Local Server</span>
+          <span><em>04</em> Local Server</span>
           <b class="section-chevron" aria-hidden="true"></b>
         </button>
         <div class="section-body ls-body">
@@ -187,7 +341,7 @@
 
       <section class="section">
         <button class="section-header" type="button">
-          <span><em>04</em> Model Tuning</span>
+          <span><em>05</em> Model Tuning</span>
           <b class="section-chevron" aria-hidden="true"></b>
         </button>
         <div class="section-body">
@@ -197,7 +351,7 @@
 
       <section class="section">
         <button class="section-header" type="button">
-          <span><em>05</em> Heartbeat</span>
+          <span><em>06</em> Heartbeat</span>
           <b class="section-chevron" aria-hidden="true"></b>
         </button>
         <div class="section-body hb-body">
@@ -245,7 +399,7 @@
 
       <section class="section">
         <button class="section-header" type="button">
-          <span><em>06</em> TTS Voice</span>
+          <span><em>07</em> TTS Voice</span>
           <b class="section-chevron" aria-hidden="true"></b>
         </button>
         <div class="section-body">
@@ -274,7 +428,7 @@
 
       <section class="section open">
         <button class="section-header" type="button">
-          <span><em>07</em> Skills</span>
+          <span><em>08</em> Skills</span>
           <b class="section-chevron" aria-hidden="true"></b>
         </button>
         <div class="section-body">
@@ -284,7 +438,7 @@
 
       <section class="section">
         <button class="section-header" type="button">
-          <span><em>08</em> Channels</span>
+          <span><em>09</em> Channels</span>
           <b class="section-chevron" aria-hidden="true"></b>
         </button>
         <div class="section-body">
@@ -294,7 +448,7 @@
 
       <section class="section">
         <button class="section-header" type="button">
-          <span><em>09</em> Runtime</span>
+          <span><em>10</em> Runtime</span>
           <b class="section-chevron" aria-hidden="true"></b>
         </button>
         <div class="section-body">
@@ -304,7 +458,7 @@
 
       <section class="section">
         <button class="section-header" type="button">
-          <span><em>10</em> Logs</span>
+          <span><em>11</em> Logs</span>
           <b class="section-chevron" aria-hidden="true"></b>
         </button>
         <div class="section-body">
