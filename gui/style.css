@@ -2307,6 +2307,51 @@ textarea {
   color: var(--text-tertiary);
 }
 
+.core-notice {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px solid rgba(245, 158, 11, 0.25);
+  border-radius: 8px;
+  background: rgba(245, 158, 11, 0.08);
+  color: #f8c471;
+  line-height: 1.4;
+}
+
+.core-editor-sections {
+  display: grid;
+  gap: 10px;
+}
+
+.core-editor-section {
+  display: grid;
+  gap: 7px;
+}
+
+.core-editor-section span {
+  color: var(--text-tertiary);
+  font: 700 10px/1.2 var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.core-editor-section textarea {
+  width: 100%;
+  min-height: 118px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-raised);
+  color: var(--text-primary);
+  font: 500 13px/1.45 var(--body);
+  padding: 10px 11px;
+  resize: vertical;
+}
+
+.core-editor-section textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px rgba(249, 115, 22, 0.16);
+}
+
 .memory-empty {
   min-height: 96px;
   display: flex;

@@ -31,6 +31,7 @@ const state = {
   currentTraits: [],
   secretsRows: new Map(),
   currentLantern: null,
+  currentCoreAnchor: null,
   memoryBrowse: { view: "active", kind: "fact", page: 0, pageSize: 25, total: 0, hasMore: false, items: [] },
   journalBrowse: { view: "active", type: "all", page: 0, pageSize: 25, total: 0, hasMore: false, items: [] },
 };
@@ -165,6 +166,7 @@ const fallbackApi = {
   async list_journal_entries() { return { ok: false, error: "Run through pywebview to browse journal entries." }; },
   async get_journal_entry() { return { ok: false, error: "Run through pywebview to inspect journal entries." }; },
   async get_core_anchor() { return { ok: false, error: "Run through pywebview to inspect core anchors." }; },
+  async set_core_anchor() { return { ok: false, error: "Run through pywebview to edit core anchors." }; },
   async pick_voice_sample() { return { ok: false, error: "Run through pywebview to pick files." }; },
   async pick_folder() { return { ok: false, error: "Run through pywebview to pick folders." }; },
   async pick_model_file() { return { ok: false, error: "Run through pywebview to pick model files." }; },
@@ -1830,6 +1832,12 @@ function wireEvents() {
     button.addEventListener("click", () => setJournalType(button.dataset.journalType));
   });
   el("coreCloseBtn").addEventListener("click", hideCoreDialog);
+  el("coreEditBtn").addEventListener("click", openCoreEditor);
+  el("coreSaveBtn").addEventListener("click", saveCoreAnchor);
+  el("coreCancelEditBtn").addEventListener("click", () => {
+    if (state.currentCoreAnchor) renderCoreAnchor(state.currentCoreAnchor);
+    else hideCoreDialog();
+  });
   el("coreDialog").addEventListener("pointerdown", (event) => {
     coreBackdropPointerDown = event.target === el("coreDialog");
   });
@@ -2671,6 +2679,9 @@ async function openCoreDialog(anchorId) {
     setNotice("Choose a persona first.", "warning", NOTICE_WARNING_MS);
     return;
   }
+  setCoreMode("view");
+  setCoreNotice("");
+  state.currentCoreAnchor = null;
   el("coreDialog").classList.remove("hidden");
   document.body.classList.add("modal-open");
   el("coreTitle").textContent = coreAnchorLabel(anchorId);
@@ -2688,10 +2699,22 @@ async function openCoreDialog(anchorId) {
 
 function hideCoreDialog() {
   el("coreDialog").classList.add("hidden");
+  setCoreNotice("");
   document.body.classList.remove("modal-open");
 }
 
-function renderCoreAnchor(anchor) {
+function setCoreMode(mode) {
+  const editing = mode === "edit";
+  el("coreEditBtn").classList.toggle("hidden", editing);
+  el("coreSaveBtn").classList.toggle("hidden", !editing);
+  el("coreCancelEditBtn").classList.toggle("hidden", !editing);
+  el("coreCloseBtn").classList.toggle("hidden", editing);
+}
+
+function renderCoreAnchor(anchor, notice = "") {
+  state.currentCoreAnchor = anchor;
+  setCoreMode("view");
+  setCoreNotice(notice);
   el("coreTitle").textContent = anchor.title || coreAnchorLabel(anchor.id);
   el("coreSubtitle").textContent = `${escapeHtml(anchor.id || "anchor")} / journal identity anchor / updated ${anchor.last_updated_display || "unknown"}`;
   const sections = anchor.sections || [];
@@ -2706,7 +2729,7 @@ function renderCoreAnchor(anchor) {
   el("coreBody").innerHTML = `
     <div class="core-meta">
       <span>${escapeHtml(anchor.age_label || "unknown age")}</span>
-      ${anchor.empty ? "<span>Empty anchor</span>" : "<span>Read-only</span>"}
+      ${anchor.empty ? "<span>Empty anchor</span>" : "<span>Editable</span>"}
     </div>
     <div class="core-sections">
       ${sections.map(renderCoreSection).join("")}
@@ -2720,6 +2743,104 @@ function renderCoreSection(section) {
       <strong>${escapeHtml(section.label || section.key || "Section")}</strong>
       <p>${escapeHtml(value || "No notes yet.")}</p>
     </article>`;
+}
+
+function openCoreEditor() {
+  const anchor = state.currentCoreAnchor;
+  if (!anchor) return;
+  setCoreMode("edit");
+  el("coreTitle").textContent = anchor.title || coreAnchorLabel(anchor.id);
+  el("coreSubtitle").textContent = `${escapeHtml(anchor.id || "anchor")} / edit journal identity anchor`;
+  setCoreNotice("Edit pinned identity context, then save. Existing model calls will not change mid-turn.");
+  const sections = coreEditableSections(anchor);
+  el("coreBody").innerHTML = `
+    <div class="core-editor-sections">
+      ${sections.map(renderCoreEditorSection).join("")}
+    </div>`;
+}
+
+function renderCoreEditorSection(section) {
+  return `
+    <label class="core-editor-section">
+      <span>${escapeHtml(section.label || section.key || "Section")}</span>
+      <textarea data-core-section="${escapeHtml(section.key)}" rows="5">${escapeHtml(section.value || "")}</textarea>
+    </label>`;
+}
+
+async function saveCoreAnchor() {
+  const anchor = state.currentCoreAnchor;
+  if (!anchor || !state.current) return;
+  const sections = {};
+  el("coreBody").querySelectorAll("[data-core-section]").forEach((input) => {
+    sections[input.dataset.coreSection] = input.value;
+  });
+  const result = await api().set_core_anchor(state.current.name, anchor.id, sections);
+  if (!result.ok) {
+    setCoreLocalNotice(result.error || "Could not update core anchor.");
+    return;
+  }
+  if (!result.changed) {
+    setCoreLocalNotice("No core anchor changes to save.");
+    return;
+  }
+  const updatedAnchor = result.anchor || anchor;
+  const message = result.running
+    ? "Core anchor updated. Running persona may pick it up on the next turn or heartbeat."
+    : "Core anchor updated.";
+  renderCoreAnchor(updatedAnchor, message);
+  setCoreAnchorIndicator(updatedAnchor.id, !updatedAnchor.empty);
+}
+
+function setCoreLocalNotice(message) {
+  setCoreNotice(message);
+}
+
+function setCoreNotice(message) {
+  const notice = el("coreNotice");
+  if (!notice) return;
+  notice.textContent = message || "";
+  notice.classList.toggle("hidden", !message);
+}
+
+function coreEditableSections(anchor) {
+  const sections = Array.isArray(anchor.sections) ? anchor.sections : [];
+  return sections.length ? sections : defaultCoreSections(anchor.id);
+}
+
+function defaultCoreSections(anchorId) {
+  const keys = {
+    _self: ["who_i_am", "what_im_like", "my_preferences", "how_i_present_myself", "what_im_working_on", "extra_notes"],
+    _user: ["who_they_are", "what_theyre_like", "their_preferences", "how_they_communicate", "extra_notes"],
+    _relationship: ["how_we_relate", "our_dynamic", "shared_context", "boundaries_or_norms", "extra_notes"],
+  }[anchorId] || ["extra_notes"];
+  return keys.map((key) => ({ key, label: coreSectionLabel(key), value: "" }));
+}
+
+function coreSectionLabel(key) {
+  return {
+    what_theyre_like: "What They're Like",
+    how_they_communicate: "How They Communicate",
+    their_preferences: "Their Preferences",
+    who_they_are: "Who They Are",
+    what_im_like: "What I'm Like",
+    what_im_working_on: "What I'm Working On",
+    who_i_am: "Who I Am",
+    my_preferences: "My Preferences",
+    how_i_present_myself: "How I Present Myself",
+    how_we_relate: "How We Relate",
+    our_dynamic: "Our Dynamic",
+    shared_context: "Shared Context",
+    boundaries_or_norms: "Boundaries Or Norms",
+    extra_notes: "Extra Notes",
+  }[key] || key.replaceAll("_", " ").replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function setCoreAnchorIndicator(anchorId, hasContent) {
+  const button = Array.from(document.querySelectorAll("[data-core-anchor]"))
+    .find((candidate) => candidate.dataset.coreAnchor === anchorId);
+  if (!button) return;
+  button.classList.toggle("has-content", hasContent);
+  button.classList.toggle("is-empty", !hasContent);
 }
 
 function coreAnchorLabel(anchorId) {

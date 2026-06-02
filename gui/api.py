@@ -31,6 +31,39 @@ STATUS_STALE_AFTER_SECONDS = 120
 LANTERN_STALE_HOURS = 24
 LANTERN_EXPIRED_HOURS = 7 * 24
 LANTERN_FIELDS = ("mode", "mood", "focus", "note", "open_thread")
+CORE_ANCHOR_TEMPLATES = {
+    "_self": {
+        "title": "Who I Am",
+        "sections": (
+            "who_i_am",
+            "what_im_like",
+            "my_preferences",
+            "how_i_present_myself",
+            "what_im_working_on",
+            "extra_notes",
+        ),
+    },
+    "_user": {
+        "title": "About My Human",
+        "sections": (
+            "who_they_are",
+            "what_theyre_like",
+            "their_preferences",
+            "how_they_communicate",
+            "extra_notes",
+        ),
+    },
+    "_relationship": {
+        "title": "Our Relationship",
+        "sections": (
+            "how_we_relate",
+            "our_dynamic",
+            "shared_context",
+            "boundaries_or_norms",
+            "extra_notes",
+        ),
+    },
+}
 
 
 PROVIDER_KEY_MAP = {
@@ -929,7 +962,7 @@ class PulseAPI:
         persona_dir = self.personas_dir / persona
         if not persona_dir.is_dir():
             return {"ok": False, "error": f"Persona not found: {persona}"}
-        if anchor_id not in ("_self", "_user", "_relationship"):
+        if anchor_id not in CORE_ANCHOR_TEMPLATES:
             return {"ok": False, "error": "Core anchor must be _self, _user, or _relationship."}
 
         db_path = self._persona_database_path(persona)
@@ -969,6 +1002,65 @@ class PulseAPI:
             "persona": persona,
             "anchor": anchor,
             "db_path": _safe_rel(db_path, self.root),
+        }
+
+    def set_core_anchor(self, persona: str, anchor_id: str, sections: dict) -> dict:
+        if not persona or persona == "__base__":
+            return {"ok": False, "error": "Choose a persona first."}
+        persona_dir = self.personas_dir / persona
+        if not persona_dir.is_dir():
+            return {"ok": False, "error": f"Persona not found: {persona}"}
+        if anchor_id not in CORE_ANCHOR_TEMPLATES:
+            return {"ok": False, "error": "Core anchor must be _self, _user, or _relationship."}
+
+        db_path = self._persona_database_path(persona)
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            before = self._read_core_anchor_row(db_path, anchor_id)
+            cleaned = self._clean_core_anchor_sections(anchor_id, sections or {}, before)
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+        except (sqlite3.Error, OSError) as e:
+            return {"ok": False, "error": f"Could not read core anchor: {e}"}
+
+        if before is None and not any(value.strip() for value in cleaned.values()):
+            return {
+                "ok": True,
+                "changed": False,
+                "anchor": self._empty_core_anchor(anchor_id),
+                "running": self._persona_is_running(persona),
+            }
+
+        before_sections = self._core_sections_from_row(before)
+        if before is not None and before_sections == cleaned:
+            current = self.get_core_anchor(persona, anchor_id)
+            return {
+                "ok": True,
+                "changed": False,
+                "anchor": current.get("anchor") or self._empty_core_anchor(anchor_id),
+                "running": self._persona_is_running(persona),
+            }
+
+        template = CORE_ANCHOR_TEMPLATES[anchor_id]
+        updated_at = datetime.now(timezone.utc).isoformat()
+        try:
+            self._write_db_before_image(persona, f"core-{anchor_id}", "identity", before)
+            self._upsert_core_anchor(
+                db_path,
+                anchor_id,
+                template["title"],
+                cleaned,
+                updated_at,
+            )
+        except (sqlite3.Error, OSError) as e:
+            return {"ok": False, "error": f"Could not update core anchor: {e}"}
+
+        current = self.get_core_anchor(persona, anchor_id)
+        return {
+            "ok": True,
+            "changed": True,
+            "anchor": current.get("anchor") or self._empty_core_anchor(anchor_id),
+            "running": self._persona_is_running(persona),
         }
 
     def _core_anchor_statuses(self, persona: str) -> dict:
@@ -1203,6 +1295,51 @@ class PulseAPI:
             return False
         return all((row.get(key) or "") == (fields.get(key) or "") for key in LANTERN_FIELDS)
 
+    def _core_sections_from_row(self, row: dict | None) -> dict[str, str]:
+        if not row:
+            return {}
+        raw = row.get("sections") or "{}"
+        try:
+            sections = json.loads(raw) if isinstance(raw, str) else raw
+        except (TypeError, ValueError):
+            sections = {}
+        if not isinstance(sections, dict):
+            return {}
+        return {str(key): str(value or "") for key, value in sections.items()}
+
+    def _clean_core_anchor_sections(self, anchor_id: str, sections: dict,
+                                    before: dict | None) -> dict[str, str]:
+        if not isinstance(sections, dict):
+            raise ValueError("Core sections must be an object.")
+        template_keys = list(CORE_ANCHOR_TEMPLATES[anchor_id]["sections"])
+        before_sections = self._core_sections_from_row(before)
+        allowed = set(template_keys) | set(before_sections)
+        for key in sections:
+            if key not in allowed:
+                raise ValueError(f"Unknown core section: {key}")
+
+        ordered_keys = list(before_sections) if before_sections else template_keys[:]
+        for key in sections:
+            if key not in ordered_keys:
+                ordered_keys.append(key)
+
+        cleaned = {}
+        total_length = 0
+        for key in ordered_keys:
+            value = sections.get(key, before_sections.get(key, ""))
+            if not isinstance(value, str):
+                raise ValueError(f"Core section {key} must be text.")
+            value = value.replace("\r\n", "\n").replace("\r", "\n")
+            if "\x00" in value:
+                raise ValueError(f"Core section {key} contains an invalid character.")
+            if len(value) > 12000:
+                raise ValueError(f"Core section {key} is too long.")
+            total_length += len(value)
+            cleaned[key] = value
+        if total_length > 50000:
+            raise ValueError("Core anchor is too long.")
+        return cleaned
+
     def _ensure_lantern_table(self, conn: sqlite3.Connection) -> None:
         conn.execute(
             """
@@ -1244,6 +1381,42 @@ class PulseAPI:
                         fields["focus"],
                         fields["note"],
                         fields["open_thread"],
+                        updated_at,
+                    ),
+                )
+
+    def _ensure_identity_table(self, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS identity (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                sections TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                last_updated TEXT
+            )
+            """
+        )
+
+    def _upsert_core_anchor(self, db_path: Path, anchor_id: str, title: str,
+                            sections: dict[str, str], updated_at: str) -> None:
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        with closing(sqlite3.connect(str(db_path))) as conn:
+            self._ensure_identity_table(conn)
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO identity (id, title, sections, last_updated)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        title = excluded.title,
+                        sections = excluded.sections,
+                        last_updated = excluded.last_updated
+                    """,
+                    (
+                        anchor_id,
+                        title,
+                        json.dumps(sections, ensure_ascii=False),
                         updated_at,
                     ),
                 )
@@ -1588,6 +1761,21 @@ class PulseAPI:
             "version_count": hist.get("version_count", 1),
             "has_history": hist.get("version_count", 1) > 1,
         }
+
+    def _read_core_anchor_row(self, db_path: Path, anchor_id: str) -> dict | None:
+        if not db_path.exists():
+            return None
+        with closing(sqlite3.connect(str(db_path))) as conn:
+            conn.row_factory = sqlite3.Row
+            columns = self._table_columns(conn, "identity")
+            if not columns:
+                return None
+            select_sql = self._core_anchor_select_sql(columns)
+            row = conn.execute(
+                f"SELECT {select_sql} FROM identity WHERE id = ?",
+                (anchor_id,),
+            ).fetchone()
+            return dict(row) if row else None
 
     def _read_lantern_row(self, db_path: Path, persona: str) -> dict | None:
         if not db_path.exists():

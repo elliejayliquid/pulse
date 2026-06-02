@@ -527,7 +527,7 @@ def test_gui_api_list_journal_entries_read_only_views():
         assert detail["entry"]["tags"] == ["weather", "stale"]
 
 
-def test_gui_api_get_core_anchor_read_only():
+def test_gui_api_core_anchor_read_and_write():
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         persona_dir = root / "personas" / "demo"
@@ -592,6 +592,53 @@ def test_gui_api_get_core_anchor_read_only():
 
         rejected = api.get_core_anchor("demo", "persona_yaml")
         assert rejected["ok"] is False
+
+        updated = api.set_core_anchor(
+            "demo",
+            "_user",
+            {
+                "who_they_are": "Lena is building Pulse.",
+                "what_theyre_like": "Curious, careful, and stubborn in a useful way.",
+                "extra_notes": "Piper is a girl.",
+            },
+        )
+        assert updated["ok"] is True
+        assert updated["changed"] is True
+        assert updated["anchor"]["sections"][1]["value"].startswith("Curious, careful")
+        backups = list((root / "gui_data" / "db_backups" / "demo").glob("*/*.json"))
+        assert len(backups) == 1
+        payload = json.loads(backups[0].read_text(encoding="utf-8"))
+        assert payload["table"] == "identity"
+        assert payload["before"]["id"] == "_user"
+
+        no_change = api.set_core_anchor(
+            "demo",
+            "_user",
+            {
+                "who_they_are": "Lena is building Pulse.",
+                "what_theyre_like": "Curious, careful, and stubborn in a useful way.",
+                "extra_notes": "Piper is a girl.",
+            },
+        )
+        assert no_change["ok"] is True
+        assert no_change["changed"] is False
+        assert len(list((root / "gui_data" / "db_backups" / "demo").glob("*/*.json"))) == 1
+
+        created = api.set_core_anchor(
+            "demo",
+            "_self",
+            {
+                "who_i_am": "I am Demo.",
+                "extra_notes": "Freshly created from the GUI.",
+            },
+        )
+        assert created["ok"] is True
+        assert created["changed"] is True
+        assert created["anchor"]["title"] == "Who I Am"
+        assert created["anchor"]["empty"] is False
+
+        invalid = api.set_core_anchor("demo", "_self", {"system_prompt": "nope"})
+        assert invalid["ok"] is False
 
 
 def test_gui_api_model_file_path_validation():
@@ -692,7 +739,7 @@ if __name__ == "__main__":
     test_gui_api_lantern_update_and_dim_write_safely()
     test_gui_api_list_memories_read_only_with_history_views()
     test_gui_api_list_journal_entries_read_only_views()
-    test_gui_api_get_core_anchor_read_only()
+    test_gui_api_core_anchor_read_and_write()
     test_gui_api_model_file_path_validation()
     test_gui_api_secrets_preserve_env_and_validate_keys()
     print("[OK] GUI API")
