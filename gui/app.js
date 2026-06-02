@@ -30,6 +30,7 @@ const state = {
   originalEditable: null,
   currentTraits: [],
   secretsRows: new Map(),
+  currentLantern: null,
   memoryBrowse: { view: "active", kind: "fact", page: 0, pageSize: 25, total: 0, hasMore: false, items: [] },
   journalBrowse: { view: "active", type: "all", page: 0, pageSize: 25, total: 0, hasMore: false, items: [] },
 };
@@ -157,6 +158,8 @@ const fallbackApi = {
   async restore_backup() { return { ok: false, error: "Run through pywebview to restore backups." }; },
   async restore_last_backup() { return { ok: false, error: "Run through pywebview to undo." }; },
   async get_lantern() { return { ok: false, error: "Run through pywebview to read lantern." }; },
+  async set_lantern() { return { ok: false, error: "Run through pywebview to update lantern." }; },
+  async dim_lantern() { return { ok: false, error: "Run through pywebview to dim lantern." }; },
   async list_memories() { return { ok: false, error: "Run through pywebview to browse memories." }; },
   async get_memory_detail() { return { ok: false, error: "Run through pywebview to inspect memories." }; },
   async list_journal_entries() { return { ok: false, error: "Run through pywebview to browse journal entries." }; },
@@ -1453,6 +1456,14 @@ function handleContinuityAction(action) {
     openLanternDialog();
     return;
   }
+  if (action === "update-lantern") {
+    openLanternEditor();
+    return;
+  }
+  if (action === "dim-lantern") {
+    openLanternDimmer();
+    return;
+  }
   if (action === "browse-memories") {
     openMemoriesDialog();
     return;
@@ -1474,8 +1485,6 @@ function handleContinuityAction(action) {
     return;
   }
   const messages = {
-    "dim-lantern": "Lantern dim/clear will be enabled after the safe write flow exists.",
-    "update-lantern": "Lantern update will use preview and confirmation before writing.",
     "add-memory": "Adding memories will come after the memory browser and preview flow.",
     "edit-memory": "Memory edit/supersede will prefer safe supersede, with direct edit marked as advanced.",
     "delete-memory": "Memory delete will require a stern confirmation and a small before-image safety record.",
@@ -1781,6 +1790,8 @@ function wireEvents() {
     if (e.target === el("backupsDialog")) hideBackupsDialog();
   });
   el("lanternCloseBtn").addEventListener("click", hideLanternDialog);
+  el("lanternEditBtn").addEventListener("click", openLanternEditor);
+  el("lanternDimBtn").addEventListener("click", openLanternDimmer);
   el("lanternDialog").addEventListener("pointerdown", (event) => {
     lanternBackdropPointerDown = event.target === el("lanternDialog");
   });
@@ -2036,6 +2047,7 @@ async function openLanternDialog() {
     setNotice("Choose a persona first.", "warning", NOTICE_WARNING_MS);
     return;
   }
+  el("lanternSubtitle").classList.remove("hidden");
   el("lanternSubtitle").textContent = "Loading lantern...";
   el("lanternStatePill").textContent = "Loading";
   el("lanternStatePill").dataset.state = "loading";
@@ -2055,6 +2067,9 @@ async function openLanternDialog() {
 }
 
 function renderLantern(data) {
+  state.currentLantern = data;
+  setLanternActionButtons("view");
+  el("lanternSubtitle").classList.remove("hidden");
   const persona = data.resident_id || data.persona || state.current?.display_name || "persona";
   if (!data.exists) {
     el("lanternSubtitle").textContent = `No lantern has been set for ${persona} yet.`;
@@ -2102,6 +2117,143 @@ function renderLantern(data) {
 function hideLanternDialog() {
   el("lanternDialog").classList.add("hidden");
   document.body.classList.remove("modal-open");
+}
+
+function setLanternActionButtons(mode) {
+  const viewMode = mode === "view";
+  el("lanternDimBtn").classList.toggle("hidden", !viewMode);
+  el("lanternEditBtn").classList.toggle("hidden", !viewMode);
+}
+
+async function openLanternEditor() {
+  if (!state.current || state.current.name === "__base__") {
+    setNotice("Choose a persona first.", "warning", NOTICE_WARNING_MS);
+    return;
+  }
+  el("lanternDialog").classList.remove("hidden");
+  document.body.classList.add("modal-open");
+  setLanternActionButtons("edit");
+  el("lanternStatePill").textContent = "Edit";
+  el("lanternStatePill").dataset.state = "current";
+  el("lanternSubtitle").classList.add("hidden");
+  el("lanternBody").innerHTML = `<div class="lantern-empty">Loading lantern fields...</div>`;
+
+  const result = await api().get_lantern(state.current.name);
+  if (!result.ok) {
+    el("lanternBody").innerHTML = `<div class="lantern-empty">${escapeHtml(result.error || "Lantern unavailable.")}</div>`;
+    return;
+  }
+  state.currentLantern = result;
+  const fields = result.fields || {};
+  el("lanternBody").innerHTML = `
+    <div id="lanternLocalNotice" class="lantern-warning">Update any current-state fields, then save.</div>
+    <div class="lantern-edit-grid">
+      ${lanternInput("mode", "Mode", fields.mode)}
+      ${lanternInput("mood", "Mood", fields.mood)}
+      ${lanternInput("focus", "Focus", fields.focus)}
+      ${lanternInput("open_thread", "Open Thread", fields.open_thread)}
+      ${lanternInput("note", "Note", fields.note, true)}
+    </div>
+    <div class="lantern-edit-actions">
+      <button class="modal-btn secondary" type="button" id="lanternSaveBtn">Save Lantern</button>
+      <button class="modal-btn ghost" type="button" id="lanternCancelEditBtn">Cancel</button>
+    </div>`;
+  el("lanternSaveBtn").addEventListener("click", saveLanternEditor);
+  el("lanternCancelEditBtn").addEventListener("click", () => {
+    if (state.currentLantern) renderLantern(state.currentLantern);
+    else hideLanternDialog();
+  });
+}
+
+function lanternInput(name, label, value, multiline = false) {
+  const tag = multiline
+    ? `<textarea id="lanternField-${escapeHtml(name)}" rows="4">${escapeHtml(value || "")}</textarea>`
+    : `<input id="lanternField-${escapeHtml(name)}" type="text" value="${escapeHtml(value || "")}">`;
+  return `
+    <label class="lantern-edit-field">
+      <span>${escapeHtml(label)}</span>
+      ${tag}
+    </label>`;
+}
+
+async function saveLanternEditor() {
+  const fields = {};
+  ["mode", "mood", "focus", "note", "open_thread"].forEach((key) => {
+    fields[key] = el(`lanternField-${key}`).value;
+  });
+  const result = await api().set_lantern(state.current.name, fields);
+  if (!result.ok) {
+    setLanternLocalNotice(result.error || "Could not update lantern.", "warning");
+    return;
+  }
+  if (!result.changed) {
+    setLanternLocalNotice("No lantern changes to save.");
+    return;
+  }
+  renderLantern(result.lantern || await api().get_lantern(state.current.name));
+  setNotice(
+    result.running
+      ? "Lantern updated. Running persona may pick it up on the next turn or heartbeat."
+      : "Lantern updated.",
+    result.running ? "warning" : "info",
+    NOTICE_WARNING_MS
+  );
+}
+
+async function openLanternDimmer() {
+  if (!state.current || state.current.name === "__base__") {
+    setNotice("Choose a persona first.", "warning", NOTICE_WARNING_MS);
+    return;
+  }
+  el("lanternDialog").classList.remove("hidden");
+  document.body.classList.add("modal-open");
+  setLanternActionButtons("dim");
+  el("lanternStatePill").textContent = "Dim";
+  el("lanternStatePill").dataset.state = "stale";
+  el("lanternSubtitle").classList.add("hidden");
+  el("lanternBody").innerHTML = `
+    <div id="lanternLocalNotice" class="lantern-warning">This leaves a resting note, but clears active current-state fields.</div>
+    <label class="lantern-edit-field">
+      <span>Resting Note</span>
+      <textarea id="lanternDimNote" rows="4">Lantern dimmed; no active state set.</textarea>
+    </label>
+    <div class="lantern-edit-actions">
+      <button class="modal-btn secondary" type="button" id="lanternDimSaveBtn">Dim Lantern</button>
+      <button class="modal-btn ghost" type="button" id="lanternDimCancelBtn">Cancel</button>
+    </div>`;
+  el("lanternDimSaveBtn").addEventListener("click", saveLanternDimmer);
+  el("lanternDimCancelBtn").addEventListener("click", () => {
+    if (state.currentLantern) renderLantern(state.currentLantern);
+    else hideLanternDialog();
+  });
+}
+
+async function saveLanternDimmer() {
+  const result = await api().dim_lantern(state.current.name, el("lanternDimNote").value);
+  if (!result.ok) {
+    setLanternLocalNotice(result.error || "Could not dim lantern.", "warning");
+    return;
+  }
+  if (!result.changed) {
+    setLanternLocalNotice("Lantern is already dimmed with that note.", "warning");
+    return;
+  }
+  renderLantern(result.lantern || await api().get_lantern(state.current.name));
+  setNotice(
+    result.running
+      ? "Lantern dimmed. Running persona may pick it up on the next turn or heartbeat."
+      : "Lantern dimmed.",
+    result.running ? "warning" : "info",
+    NOTICE_WARNING_MS
+  );
+}
+
+function setLanternLocalNotice(message, kind = "info") {
+  const node = el("lanternLocalNotice");
+  if (!node) return;
+  node.textContent = message;
+  node.dataset.kind = kind;
+  node.classList.toggle("hidden", !message);
 }
 
 async function openMemoriesDialog() {

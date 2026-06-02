@@ -220,6 +220,69 @@ def test_gui_api_get_lantern_read_only():
         assert lantern["fields"]["open_thread"] == "wire read-only view"
 
 
+def test_gui_api_lantern_update_and_dim_write_safely():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        persona_dir = root / "personas" / "demo"
+        data_dir = persona_dir / "data"
+        data_dir.mkdir(parents=True)
+        (root / "logs").mkdir()
+        (root / "config.yaml").write_text("", encoding="utf-8")
+        (root / "persona.yaml").write_text("name: Base\n", encoding="utf-8")
+        (persona_dir / "config.yaml").write_text("", encoding="utf-8")
+        (persona_dir / "persona.yaml").write_text("name: Demo\n", encoding="utf-8")
+
+        api = PulseAPI(root)
+        updated = api.set_lantern("demo", {
+            "mode": "focused",
+            "mood": "curious",
+            "focus": "safe GUI writes",
+            "open_thread": "lantern update",
+            "note": "first GUI write",
+        })
+        assert updated["ok"] is True
+        lantern = api.get_lantern("demo")
+        assert lantern["exists"] is True
+        assert lantern["fields"]["mode"] == "focused"
+        assert lantern["fields"]["note"] == "first GUI write"
+
+        dimmed = api.dim_lantern("demo", "Resting after validation.")
+        assert dimmed["ok"] is True
+        lantern = api.get_lantern("demo")
+        assert lantern["fields"]["mode"] == ""
+        assert lantern["fields"]["focus"] == ""
+        assert lantern["fields"]["open_thread"] == ""
+        assert lantern["fields"]["note"] == "Resting after validation."
+
+        backups = list((root / "gui_data" / "db_backups" / "demo").glob("*/*.json"))
+        assert len(backups) == 2
+        payloads = [json.loads(path.read_text(encoding="utf-8")) for path in backups]
+        assert {payload["action"] for payload in payloads} == {"lantern-update", "lantern-dim"}
+        dim_backup = next(payload for payload in payloads if payload["action"] == "lantern-dim")
+        assert dim_backup["before"]["mode"] == "focused"
+
+        unchanged_dim = api.dim_lantern("demo", "Resting after validation.")
+        assert unchanged_dim["ok"] is True
+        assert unchanged_dim["changed"] is False
+        backups_after_noop_dim = list((root / "gui_data" / "db_backups" / "demo").glob("*/*.json"))
+        assert len(backups_after_noop_dim) == 2
+
+        unchanged_update = api.set_lantern("demo", {
+            "mode": "",
+            "mood": "",
+            "focus": "",
+            "open_thread": "",
+            "note": "Resting after validation.",
+        })
+        assert unchanged_update["ok"] is True
+        assert unchanged_update["changed"] is False
+        backups_after_noop_update = list((root / "gui_data" / "db_backups" / "demo").glob("*/*.json"))
+        assert len(backups_after_noop_update) == 2
+
+        rejected = api.set_lantern("demo", {"mode": "\x00"})
+        assert rejected["ok"] is False
+
+
 def test_gui_api_list_memories_read_only_with_history_views():
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -626,6 +689,7 @@ if __name__ == "__main__":
     test_gui_api_read_only_persona_loading()
     test_gui_api_standard_provider_env_fallback()
     test_gui_api_get_lantern_read_only()
+    test_gui_api_lantern_update_and_dim_write_safely()
     test_gui_api_list_memories_read_only_with_history_views()
     test_gui_api_list_journal_entries_read_only_views()
     test_gui_api_get_core_anchor_read_only()

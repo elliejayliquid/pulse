@@ -30,6 +30,7 @@ from gui.config_editor import ConfigEditor
 STATUS_STALE_AFTER_SECONDS = 120
 LANTERN_STALE_HOURS = 24
 LANTERN_EXPIRED_HOURS = 7 * 24
+LANTERN_FIELDS = ("mode", "mood", "focus", "note", "open_thread")
 
 
 PROVIDER_KEY_MAP = {
@@ -633,6 +634,78 @@ class PulseAPI:
             "db_path": _safe_rel(db_path, self.root),
         }
 
+    def set_lantern(self, persona: str, fields: dict) -> dict:
+        valid = self._validate_persona_for_db_write(persona)
+        if not valid["ok"]:
+            return valid
+        try:
+            cleaned = self._clean_lantern_fields(fields or {})
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+        if not any(cleaned.values()):
+            return {"ok": False, "error": "Lantern needs at least one field. Use Dim/Clear to leave a resting note."}
+
+        db_path = self._persona_database_path(persona)
+        before = self._read_lantern_row(db_path, persona)
+        if self._lantern_fields_match(before, cleaned):
+            return {
+                "ok": True,
+                "changed": False,
+                "lantern": self.get_lantern(persona),
+                "running": self._persona_is_running(persona),
+            }
+        updated_at = datetime.now(timezone.utc).isoformat()
+        try:
+            self._write_db_before_image(persona, "lantern-update", "resident_lanterns", before)
+            self._upsert_lantern(db_path, persona, cleaned, updated_at)
+        except (sqlite3.Error, OSError, ValueError) as e:
+            return {"ok": False, "error": f"Could not update lantern: {e}"}
+
+        return {
+            "ok": True,
+            "changed": True,
+            "lantern": self.get_lantern(persona),
+            "running": self._persona_is_running(persona),
+        }
+
+    def dim_lantern(self, persona: str, note: str | None = None) -> dict:
+        valid = self._validate_persona_for_db_write(persona)
+        if not valid["ok"]:
+            return valid
+        try:
+            cleaned_note = self._clean_lantern_text(note or "Lantern dimmed; no active state set.", "note")
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+        fields = {
+            "mode": "",
+            "mood": "",
+            "focus": "",
+            "note": cleaned_note,
+            "open_thread": "",
+        }
+        db_path = self._persona_database_path(persona)
+        before = self._read_lantern_row(db_path, persona)
+        if self._lantern_fields_match(before, fields):
+            return {
+                "ok": True,
+                "changed": False,
+                "lantern": self.get_lantern(persona),
+                "running": self._persona_is_running(persona),
+            }
+        updated_at = datetime.now(timezone.utc).isoformat()
+        try:
+            self._write_db_before_image(persona, "lantern-dim", "resident_lanterns", before)
+            self._upsert_lantern(db_path, persona, fields, updated_at)
+        except (sqlite3.Error, OSError, ValueError) as e:
+            return {"ok": False, "error": f"Could not dim lantern: {e}"}
+
+        return {
+            "ok": True,
+            "changed": True,
+            "lantern": self.get_lantern(persona),
+            "running": self._persona_is_running(persona),
+        }
+
     def list_memories(self, persona: str, view: str = "active",
                       kind: str = "fact", page: int = 1,
                       page_size: int = 25) -> dict:
@@ -1091,6 +1164,107 @@ class PulseAPI:
         if not db_path.is_absolute():
             db_path = (self.root / db_path).resolve()
         return db_path
+
+    def _validate_persona_for_db_write(self, persona: str) -> dict:
+        if not persona or persona == "__base__":
+            return {"ok": False, "error": "Choose a persona first."}
+        persona_dir = self.personas_dir / persona
+        if not persona_dir.is_dir():
+            return {"ok": False, "error": f"Persona not found: {persona}"}
+        return {"ok": True}
+
+    def _persona_is_running(self, persona: str) -> bool:
+        status = self.get_status(persona)
+        return bool(status.get("running")) and not bool(status.get("stale"))
+
+    def _clean_lantern_fields(self, fields: dict) -> dict[str, str]:
+        unknown = set(fields) - set(LANTERN_FIELDS)
+        if unknown:
+            raise ValueError(f"Unknown lantern field: {sorted(unknown)[0]}")
+        return {
+            key: self._clean_lantern_text(fields.get(key, ""), key)
+            for key in LANTERN_FIELDS
+        }
+
+    def _clean_lantern_text(self, value: Any, field: str) -> str:
+        if value is None:
+            return ""
+        if not isinstance(value, str):
+            raise ValueError(f"Lantern field {field} must be text.")
+        if "\x00" in value:
+            raise ValueError(f"Lantern field {field} contains an invalid character.")
+        value = value.replace("\r\n", "\n").replace("\r", "\n").strip()
+        if len(value) > 2000:
+            raise ValueError(f"Lantern field {field} is too long.")
+        return value
+
+    def _lantern_fields_match(self, row: dict | None, fields: dict[str, str]) -> bool:
+        if not row:
+            return False
+        return all((row.get(key) or "") == (fields.get(key) or "") for key in LANTERN_FIELDS)
+
+    def _ensure_lantern_table(self, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS resident_lanterns (
+                resident_id TEXT PRIMARY KEY,
+                mode TEXT,
+                mood TEXT,
+                focus TEXT,
+                note TEXT,
+                open_thread TEXT,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+
+    def _upsert_lantern(self, db_path: Path, persona: str,
+                        fields: dict[str, str], updated_at: str) -> None:
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        with closing(sqlite3.connect(str(db_path))) as conn:
+            self._ensure_lantern_table(conn)
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO resident_lanterns
+                        (resident_id, mode, mood, focus, note, open_thread, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(resident_id) DO UPDATE SET
+                        mode = excluded.mode,
+                        mood = excluded.mood,
+                        focus = excluded.focus,
+                        note = excluded.note,
+                        open_thread = excluded.open_thread,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        persona,
+                        fields["mode"],
+                        fields["mood"],
+                        fields["focus"],
+                        fields["note"],
+                        fields["open_thread"],
+                        updated_at,
+                    ),
+                )
+
+    def _write_db_before_image(self, persona: str, action: str,
+                               table: str, before: dict | None) -> None:
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        safe_action = re.sub(r"[^a-zA-Z0-9_-]+", "-", action).strip("-") or "db-edit"
+        out_dir = self.root / "gui_data" / "db_backups" / persona / stamp
+        out_dir.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "persona": persona,
+            "action": action,
+            "table": table,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "before": before,
+        }
+        (out_dir / f"{safe_action}.json").write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
 
     def _empty_memory_page(self, persona: str, view: str, kind: str, page: int,
                            page_size: int, db_path: Path) -> dict:

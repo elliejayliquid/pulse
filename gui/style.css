@@ -1921,6 +1921,49 @@ textarea {
   overflow-wrap: anywhere;
 }
 
+.lantern-edit-grid {
+  display: grid;
+  gap: 10px;
+}
+
+.lantern-edit-field {
+  display: grid;
+  gap: 7px;
+}
+
+.lantern-edit-field span {
+  color: var(--text-tertiary);
+  font: 700 10px/1.2 var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.lantern-edit-field input,
+.lantern-edit-field textarea {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-raised);
+  color: var(--text-primary);
+  font: 500 13px/1.45 var(--body);
+  padding: 10px 11px;
+  resize: vertical;
+}
+
+.lantern-edit-field input:focus,
+.lantern-edit-field textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px rgba(249, 115, 22, 0.16);
+}
+
+.lantern-edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
 .memories-card {
   width: min(780px, calc(100vw - 48px));
   height: min(760px, calc(100vh - 48px));
