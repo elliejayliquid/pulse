@@ -31,7 +31,9 @@ const state = {
   currentTraits: [],
   secretsRows: new Map(),
   currentLantern: null,
+  lanternBaseline: null,
   currentCoreAnchor: null,
+  coreBaseline: {},
   memoryBrowse: { view: "active", kind: "fact", page: 0, pageSize: 25, total: 0, hasMore: false, items: [] },
   journalBrowse: { view: "active", type: "all", page: 0, pageSize: 25, total: 0, hasMore: false, items: [] },
 };
@@ -1459,11 +1461,7 @@ function handleContinuityAction(action) {
     return;
   }
   if (action === "update-lantern") {
-    openLanternEditor();
-    return;
-  }
-  if (action === "dim-lantern") {
-    openLanternDimmer();
+    openLanternDialog();
     return;
   }
   if (action === "browse-memories") {
@@ -1791,14 +1789,14 @@ function wireEvents() {
   el("backupsDialog").addEventListener("click", (e) => {
     if (e.target === el("backupsDialog")) hideBackupsDialog();
   });
-  el("lanternCloseBtn").addEventListener("click", hideLanternDialog);
-  el("lanternEditBtn").addEventListener("click", openLanternEditor);
-  el("lanternDimBtn").addEventListener("click", openLanternDimmer);
+  el("lanternCloseBtn").addEventListener("click", closeLanternDialog);
+  el("lanternSaveBtn").addEventListener("click", saveLanternEditor);
+  el("lanternDimBtn").addEventListener("click", clearLanternState);
   el("lanternDialog").addEventListener("pointerdown", (event) => {
     lanternBackdropPointerDown = event.target === el("lanternDialog");
   });
   el("lanternDialog").addEventListener("click", (e) => {
-    if (lanternBackdropPointerDown && e.target === el("lanternDialog")) hideLanternDialog();
+    if (lanternBackdropPointerDown && e.target === el("lanternDialog")) closeLanternDialog();
     lanternBackdropPointerDown = false;
   });
   el("memoriesCloseBtn").addEventListener("click", hideMemoriesDialog);
@@ -1831,18 +1829,13 @@ function wireEvents() {
   el("journalTypeTabs").querySelectorAll("[data-journal-type]").forEach((button) => {
     button.addEventListener("click", () => setJournalType(button.dataset.journalType));
   });
-  el("coreCloseBtn").addEventListener("click", hideCoreDialog);
-  el("coreEditBtn").addEventListener("click", openCoreEditor);
+  el("coreCloseBtn").addEventListener("click", closeCoreDialog);
   el("coreSaveBtn").addEventListener("click", saveCoreAnchor);
-  el("coreCancelEditBtn").addEventListener("click", () => {
-    if (state.currentCoreAnchor) renderCoreAnchor(state.currentCoreAnchor);
-    else hideCoreDialog();
-  });
   el("coreDialog").addEventListener("pointerdown", (event) => {
     coreBackdropPointerDown = event.target === el("coreDialog");
   });
   el("coreDialog").addEventListener("click", (event) => {
-    if (coreBackdropPointerDown && event.target === el("coreDialog")) hideCoreDialog();
+    if (coreBackdropPointerDown && event.target === el("coreDialog")) closeCoreDialog();
     coreBackdropPointerDown = false;
   });
   document.querySelectorAll(".section-header").forEach((header) => {
@@ -2062,6 +2055,7 @@ async function openLanternDialog() {
   el("lanternBody").innerHTML = `<div class="lantern-empty">Reading lantern...</div>`;
   el("lanternDialog").classList.remove("hidden");
   document.body.classList.add("modal-open");
+  setLanternActionButtons("edit");
 
   const result = await api().get_lantern(state.current.name);
   if (!result.ok) {
@@ -2071,106 +2065,95 @@ async function openLanternDialog() {
     el("lanternBody").innerHTML = `<div class="lantern-empty">${escapeHtml(result.error || "Lantern unavailable.")}</div>`;
     return;
   }
-  renderLantern(result);
+  renderLanternEditor(result);
 }
 
-function renderLantern(data) {
+function renderLanternEditor(data) {
   state.currentLantern = data;
-  setLanternActionButtons("view");
+  setLanternActionButtons("edit");
   el("lanternSubtitle").classList.remove("hidden");
   const persona = data.resident_id || data.persona || state.current?.display_name || "persona";
   if (!data.exists) {
-    el("lanternSubtitle").textContent = `No lantern has been set for ${persona} yet.`;
+    el("lanternSubtitle").textContent = `No lantern set for ${persona} yet — set the current-state fields below.`;
     el("lanternStatePill").textContent = "Not set";
     el("lanternStatePill").dataset.state = "missing";
-    el("lanternBody").innerHTML = `
-      <div class="lantern-empty">
-        When this companion sets a lantern, current mode, mood, focus, note, and open thread will appear here.
-      </div>`;
-    return;
+  } else {
+    const stateLabel = data.state === "expired" ? "Expired" : data.state === "stale" ? "Stale" : "Current";
+    el("lanternSubtitle").textContent = `${persona} · ${data.age_label || "unknown age"} · updated ${data.updated_at_display || data.updated_at || "unknown"}`;
+    el("lanternStatePill").textContent = stateLabel;
+    el("lanternStatePill").dataset.state = data.state || "current";
   }
 
-  const stateLabel = data.state === "expired" ? "Expired" : data.state === "stale" ? "Stale" : "Current";
-  el("lanternSubtitle").textContent = `${persona} · ${data.age_label || "unknown age"} · updated ${data.updated_at_display || data.updated_at || "unknown"}`;
-  el("lanternStatePill").textContent = stateLabel;
-  el("lanternStatePill").dataset.state = data.state || "current";
-
-  const fields = [
-    ["Mode", data.fields?.mode],
-    ["Mood", data.fields?.mood],
-    ["Focus", data.fields?.focus],
-    ["Open thread", data.fields?.open_thread],
-    ["Note", data.fields?.note],
-  ];
-  const rows = fields
-    .filter(([, value]) => value)
-    .map(([label, value]) => `
-      <div class="lantern-field">
-        <span>${escapeHtml(label)}</span>
-        <strong>${escapeHtml(value)}</strong>
-      </div>`)
-    .join("");
-  const warning = data.expired
-    ? "This lantern is expired. Treat it as historical, not current-state context."
-    : data.stale
-      ? "This lantern is older than 24 hours. Verify before treating it as current."
-      : "";
+  const fields = data.fields || {};
+  state.lanternBaseline = {
+    mode: fields.mode || "",
+    mood: fields.mood || "",
+    focus: fields.focus || "",
+    open_thread: fields.open_thread || "",
+    note: fields.note || "",
+  };
   el("lanternBody").innerHTML = `
-    ${warning ? `<div class="lantern-warning">${escapeHtml(warning)}</div>` : ""}
-    ${rows || `<div class="lantern-empty">Lantern is dimmed; no active mode, mood, focus, or open thread is set.</div>`}
-    <div class="lantern-meta">Source: ${escapeHtml(data.db_path || "persona database")}</div>
-  `;
-}
-
-function hideLanternDialog() {
-  el("lanternDialog").classList.add("hidden");
-  document.body.classList.remove("modal-open");
-}
-
-function setLanternActionButtons(mode) {
-  const viewMode = mode === "view";
-  el("lanternDimBtn").classList.toggle("hidden", !viewMode);
-  el("lanternEditBtn").classList.toggle("hidden", !viewMode);
-}
-
-async function openLanternEditor() {
-  if (!state.current || state.current.name === "__base__") {
-    setNotice("Choose a persona first.", "warning", NOTICE_WARNING_MS);
-    return;
-  }
-  el("lanternDialog").classList.remove("hidden");
-  document.body.classList.add("modal-open");
-  setLanternActionButtons("edit");
-  el("lanternStatePill").textContent = "Edit";
-  el("lanternStatePill").dataset.state = "current";
-  el("lanternSubtitle").classList.add("hidden");
-  el("lanternBody").innerHTML = `<div class="lantern-empty">Loading lantern fields...</div>`;
-
-  const result = await api().get_lantern(state.current.name);
-  if (!result.ok) {
-    el("lanternBody").innerHTML = `<div class="lantern-empty">${escapeHtml(result.error || "Lantern unavailable.")}</div>`;
-    return;
-  }
-  state.currentLantern = result;
-  const fields = result.fields || {};
-  el("lanternBody").innerHTML = `
-    <div id="lanternLocalNotice" class="lantern-warning">Update any current-state fields, then save.</div>
+    <div id="lanternLocalNotice" class="notice-pill"></div>
     <div class="lantern-edit-grid">
       ${lanternInput("mode", "Mode", fields.mode)}
       ${lanternInput("mood", "Mood", fields.mood)}
       ${lanternInput("focus", "Focus", fields.focus)}
       ${lanternInput("open_thread", "Open Thread", fields.open_thread)}
       ${lanternInput("note", "Note", fields.note, true)}
-    </div>
-    <div class="lantern-edit-actions">
-      <button class="modal-btn secondary" type="button" id="lanternSaveBtn">Save Lantern</button>
-      <button class="modal-btn ghost" type="button" id="lanternCancelEditBtn">Cancel</button>
     </div>`;
-  el("lanternSaveBtn").addEventListener("click", saveLanternEditor);
-  el("lanternCancelEditBtn").addEventListener("click", () => {
-    if (state.currentLantern) renderLantern(state.currentLantern);
-    else hideLanternDialog();
+  // The notice is always present from open so dimming/saving only swaps its
+  // text — the modal never changes height (matches the Core editor).
+  if (data.expired) {
+    setLanternLocalNotice("This lantern is expired. Treat it as historical, not current-state context.");
+  } else if (data.stale) {
+    setLanternLocalNotice("This lantern is older than 24 hours. Verify before treating it as current.");
+  } else {
+    setLanternLocalNotice("Edit any current-state field, then save.");
+  }
+}
+
+function hideLanternDialog() {
+  el("lanternDialog").classList.add("hidden");
+  state.currentLantern = null;
+  state.lanternBaseline = null;
+  document.body.classList.remove("modal-open");
+}
+
+async function closeLanternDialog() {
+  if (lanternIsDirty()) {
+    const ok = await showConfirm(
+      "Discard unsaved lantern edits?",
+      "You have unsaved changes to this lantern. Closing now will discard them.",
+      "Discard",
+      "secondary"
+    );
+    if (!ok) return;
+  }
+  hideLanternDialog();
+}
+
+function setLanternActionButtons(mode) {
+  const editing = mode === "edit";
+  el("lanternDimBtn").classList.toggle("hidden", !editing);
+  el("lanternSaveBtn").classList.toggle("hidden", !editing);
+}
+
+function lanternCurrentValues() {
+  const values = {};
+  ["mode", "mood", "focus", "open_thread", "note"].forEach((key) => {
+    const node = el(`lanternField-${key}`);
+    if (node) values[key] = node.value;
   });
+  return values;
+}
+
+function lanternIsDirty() {
+  if (!state.lanternBaseline || !el("lanternField-mode")) return false;
+  const baseline = state.lanternBaseline;
+  const current = lanternCurrentValues();
+  return ["mode", "mood", "focus", "open_thread", "note"].some(
+    (key) => (baseline[key] || "") !== (current[key] || "")
+  );
 }
 
 function lanternInput(name, label, value, multiline = false) {
@@ -2185,20 +2168,18 @@ function lanternInput(name, label, value, multiline = false) {
 }
 
 async function saveLanternEditor() {
-  const fields = {};
-  ["mode", "mood", "focus", "note", "open_thread"].forEach((key) => {
-    fields[key] = el(`lanternField-${key}`).value;
-  });
+  if (!el("lanternField-mode")) return;
+  const fields = lanternCurrentValues();
   const result = await api().set_lantern(state.current.name, fields);
   if (!result.ok) {
-    setLanternLocalNotice(result.error || "Could not update lantern.", "warning");
+    setLanternLocalNotice(result.error || "Could not update lantern.");
     return;
   }
   if (!result.changed) {
     setLanternLocalNotice("No lantern changes to save.");
     return;
   }
-  renderLantern(result.lantern || await api().get_lantern(state.current.name));
+  renderLanternEditor(result.lantern || await api().get_lantern(state.current.name));
   setNotice(
     result.running
       ? "Lantern updated. Running persona may pick it up on the next turn or heartbeat."
@@ -2208,59 +2189,37 @@ async function saveLanternEditor() {
   );
 }
 
-async function openLanternDimmer() {
-  if (!state.current || state.current.name === "__base__") {
-    setNotice("Choose a persona first.", "warning", NOTICE_WARNING_MS);
+// Dim / Clear: empties the active-state fields in place, keeping only the note.
+// No view swap and no resize — the user reviews and then Saves like any edit.
+function clearLanternState() {
+  if (!el("lanternField-mode")) return;
+  const activeKeys = ["mode", "mood", "focus", "open_thread"];
+  const current = lanternCurrentValues();
+  if (!activeKeys.some((key) => (current[key] || "").trim())) {
+    setLanternLocalNotice("Lantern is already dimmed — no active state to clear.");
     return;
   }
-  el("lanternDialog").classList.remove("hidden");
-  document.body.classList.add("modal-open");
-  setLanternActionButtons("dim");
-  el("lanternStatePill").textContent = "Dim";
-  el("lanternStatePill").dataset.state = "stale";
-  el("lanternSubtitle").classList.add("hidden");
-  el("lanternBody").innerHTML = `
-    <div id="lanternLocalNotice" class="lantern-warning">This leaves a resting note, but clears active current-state fields.</div>
-    <label class="lantern-edit-field">
-      <span>Resting Note</span>
-      <textarea id="lanternDimNote" rows="4">Lantern dimmed; no active state set.</textarea>
-    </label>
-    <div class="lantern-edit-actions">
-      <button class="modal-btn secondary" type="button" id="lanternDimSaveBtn">Dim Lantern</button>
-      <button class="modal-btn ghost" type="button" id="lanternDimCancelBtn">Cancel</button>
-    </div>`;
-  el("lanternDimSaveBtn").addEventListener("click", saveLanternDimmer);
-  el("lanternDimCancelBtn").addEventListener("click", () => {
-    if (state.currentLantern) renderLantern(state.currentLantern);
-    else hideLanternDialog();
+  activeKeys.forEach((key) => {
+    const node = el(`lanternField-${key}`);
+    if (node) node.value = "";
   });
-}
-
-async function saveLanternDimmer() {
-  const result = await api().dim_lantern(state.current.name, el("lanternDimNote").value);
-  if (!result.ok) {
-    setLanternLocalNotice(result.error || "Could not dim lantern.", "warning");
-    return;
+  const note = el("lanternField-note");
+  if (note && !note.value.trim()) {
+    note.value = "Lantern dimmed; no active state set.";
   }
-  if (!result.changed) {
-    setLanternLocalNotice("Lantern is already dimmed with that note.", "warning");
-    return;
-  }
-  renderLantern(result.lantern || await api().get_lantern(state.current.name));
-  setNotice(
-    result.running
-      ? "Lantern dimmed. Running persona may pick it up on the next turn or heartbeat."
-      : "Lantern dimmed.",
-    result.running ? "warning" : "info",
-    NOTICE_WARNING_MS
+  setLanternLocalNotice(
+    "Cleared mode, mood, focus, and open thread — your note is kept. Save to dim the lantern."
   );
+  if (note) {
+    note.focus();
+    note.setSelectionRange(note.value.length, note.value.length);
+  }
 }
 
-function setLanternLocalNotice(message, kind = "info") {
+function setLanternLocalNotice(message) {
   const node = el("lanternLocalNotice");
   if (!node) return;
   node.textContent = message;
-  node.dataset.kind = kind;
   node.classList.toggle("hidden", !message);
 }
 
@@ -2679,9 +2638,9 @@ async function openCoreDialog(anchorId) {
     setNotice("Choose a persona first.", "warning", NOTICE_WARNING_MS);
     return;
   }
-  setCoreMode("view");
   setCoreNotice("");
   state.currentCoreAnchor = null;
+  state.coreBaseline = {};
   el("coreDialog").classList.remove("hidden");
   document.body.classList.add("modal-open");
   el("coreTitle").textContent = coreAnchorLabel(anchorId);
@@ -2694,69 +2653,63 @@ async function openCoreDialog(anchorId) {
     el("coreBody").innerHTML = `<div class="memory-empty">${escapeHtml(result.error || "Core anchor unavailable.")}</div>`;
     return;
   }
-  renderCoreAnchor(result.anchor || {});
+  renderCoreAnchor(result.anchor || {}, "Edit pinned identity context, then save. Changes apply on the persona's next turn or heartbeat.");
 }
 
 function hideCoreDialog() {
   el("coreDialog").classList.add("hidden");
   setCoreNotice("");
+  state.currentCoreAnchor = null;
+  state.coreBaseline = {};
   document.body.classList.remove("modal-open");
 }
 
-function setCoreMode(mode) {
-  const editing = mode === "edit";
-  el("coreEditBtn").classList.toggle("hidden", editing);
-  el("coreSaveBtn").classList.toggle("hidden", !editing);
-  el("coreCancelEditBtn").classList.toggle("hidden", !editing);
-  el("coreCloseBtn").classList.toggle("hidden", editing);
+async function closeCoreDialog() {
+  if (coreIsDirty()) {
+    const ok = await showConfirm(
+      "Discard unsaved core edits?",
+      "You have unsaved changes to this core anchor. Closing now will discard them.",
+      "Discard",
+      "secondary"
+    );
+    if (!ok) return;
+  }
+  hideCoreDialog();
 }
 
 function renderCoreAnchor(anchor, notice = "") {
   state.currentCoreAnchor = anchor;
-  setCoreMode("view");
   setCoreNotice(notice);
   el("coreTitle").textContent = anchor.title || coreAnchorLabel(anchor.id);
-  el("coreSubtitle").textContent = `${escapeHtml(anchor.id || "anchor")} / journal identity anchor / updated ${anchor.last_updated_display || "unknown"}`;
-  const sections = anchor.sections || [];
-  if (!sections.length) {
-    el("coreBody").innerHTML = `
-      <div class="memory-empty">
-        <strong>No sections found.</strong>
-        <span>This anchor has not been created yet, or the identity table is unavailable for this persona.</span>
-      </div>`;
-    return;
-  }
-  el("coreBody").innerHTML = `
-    <div class="core-meta">
-      <span>${escapeHtml(anchor.age_label || "unknown age")}</span>
-      ${anchor.empty ? "<span>Empty anchor</span>" : "<span>Editable</span>"}
-    </div>
-    <div class="core-sections">
-      ${sections.map(renderCoreSection).join("")}
-    </div>`;
-}
-
-function renderCoreSection(section) {
-  const value = text(section.value).trim();
-  return `
-    <article class="core-section ${value ? "" : "empty"}">
-      <strong>${escapeHtml(section.label || section.key || "Section")}</strong>
-      <p>${escapeHtml(value || "No notes yet.")}</p>
-    </article>`;
-}
-
-function openCoreEditor() {
-  const anchor = state.currentCoreAnchor;
-  if (!anchor) return;
-  setCoreMode("edit");
-  el("coreTitle").textContent = anchor.title || coreAnchorLabel(anchor.id);
-  el("coreSubtitle").textContent = `${escapeHtml(anchor.id || "anchor")} / edit journal identity anchor`;
-  setCoreNotice("Edit pinned identity context, then save. Existing model calls will not change mid-turn.");
+  el("coreSubtitle").textContent = `${anchor.id || "anchor"} / journal identity anchor / updated ${anchor.last_updated_display || "unknown"}`;
   const sections = coreEditableSections(anchor);
+  state.coreBaseline = {};
+  sections.forEach((section) => {
+    state.coreBaseline[section.key] = section.value || "";
+  });
   el("coreBody").innerHTML = `
     <div class="core-editor-sections">
       ${sections.map(renderCoreEditorSection).join("")}
     </div>`;
+}
+
+function coreCurrentValues() {
+  const values = {};
+  el("coreBody").querySelectorAll("[data-core-section]").forEach((input) => {
+    values[input.dataset.coreSection] = input.value;
+  });
+  return values;
+}
+
+function coreIsDirty() {
+  if (!state.currentCoreAnchor) return false;
+  const baseline = state.coreBaseline || {};
+  const current = coreCurrentValues();
+  const keys = new Set([...Object.keys(baseline), ...Object.keys(current)]);
+  for (const key of keys) {
+    if ((baseline[key] || "") !== (current[key] || "")) return true;
+  }
+  return false;
 }
 
 function renderCoreEditorSection(section) {
@@ -2770,10 +2723,7 @@ function renderCoreEditorSection(section) {
 async function saveCoreAnchor() {
   const anchor = state.currentCoreAnchor;
   if (!anchor || !state.current) return;
-  const sections = {};
-  el("coreBody").querySelectorAll("[data-core-section]").forEach((input) => {
-    sections[input.dataset.coreSection] = input.value;
-  });
+  const sections = coreCurrentValues();
   const result = await api().set_core_anchor(state.current.name, anchor.id, sections);
   if (!result.ok) {
     setCoreLocalNotice(result.error || "Could not update core anchor.");

@@ -1684,6 +1684,12 @@ textarea {
   backdrop-filter: blur(4px);
 }
 
+/* Confirmation prompts must sit above any other modal that triggers them
+   (e.g. the discard-unsaved-edits prompt over the core/lantern editors). */
+#confirmDialog {
+  z-index: 200;
+}
+
 .modal-card {
   width: min(420px, calc(100vw - 48px));
   background: var(--surface);
@@ -1800,6 +1806,7 @@ textarea {
 
 .lantern-card {
   width: min(620px, calc(100vw - 48px));
+  background: var(--surface-raised);
 }
 
 .lantern-modal-head {
@@ -1899,12 +1906,16 @@ textarea {
   border-left-color: rgba(249, 115, 22, 0.36);
 }
 
-.lantern-warning {
+/* Shared notice pill used at the top of modal editors (core, lantern).
+   One consistent amber style for every notice — intros, hints, and warnings. */
+.notice-pill {
+  margin-bottom: 12px;
   padding: 10px 12px;
   border: 1px solid rgba(245, 158, 11, 0.25);
   border-radius: 8px;
   background: rgba(245, 158, 11, 0.08);
   color: #f8c471;
+  line-height: 1.4;
 }
 
 .lantern-empty {
@@ -1943,7 +1954,7 @@ textarea {
   width: 100%;
   border: 1px solid var(--border);
   border-radius: 8px;
-  background: var(--surface-raised);
+  background: var(--surface);
   color: var(--text-primary);
   font: 500 13px/1.45 var(--body);
   padding: 10px 11px;
@@ -2243,6 +2254,7 @@ textarea {
   max-height: min(760px, calc(100vh - 48px));
   display: flex;
   flex-direction: column;
+  background: var(--surface-raised);
 }
 
 .core-body {
@@ -2307,16 +2319,6 @@ textarea {
   color: var(--text-tertiary);
 }
 
-.core-notice {
-  margin-bottom: 12px;
-  padding: 10px 12px;
-  border: 1px solid rgba(245, 158, 11, 0.25);
-  border-radius: 8px;
-  background: rgba(245, 158, 11, 0.08);
-  color: #f8c471;
-  line-height: 1.4;
-}
-
 .core-editor-sections {
   display: grid;
   gap: 10px;
@@ -2339,7 +2341,7 @@ textarea {
   min-height: 118px;
   border: 1px solid var(--border);
   border-radius: 8px;
-  background: var(--surface-raised);
+  background: var(--surface);
   color: var(--text-primary);
   font: 500 13px/1.45 var(--body);
   padding: 10px 11px;
