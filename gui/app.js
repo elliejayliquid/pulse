@@ -31,6 +31,7 @@ const state = {
   currentTraits: [],
   secretsRows: new Map(),
   memoryBrowse: { view: "active", kind: "fact", page: 0, pageSize: 25, total: 0, hasMore: false, items: [] },
+  journalBrowse: { view: "active", type: "all", page: 0, pageSize: 25, total: 0, hasMore: false, items: [] },
 };
 
 const fallbackApi = {
@@ -158,6 +159,8 @@ const fallbackApi = {
   async get_lantern() { return { ok: false, error: "Run through pywebview to read lantern." }; },
   async list_memories() { return { ok: false, error: "Run through pywebview to browse memories." }; },
   async get_memory_detail() { return { ok: false, error: "Run through pywebview to inspect memories." }; },
+  async list_journal_entries() { return { ok: false, error: "Run through pywebview to browse journal entries." }; },
+  async get_journal_entry() { return { ok: false, error: "Run through pywebview to inspect journal entries." }; },
   async pick_voice_sample() { return { ok: false, error: "Run through pywebview to pick files." }; },
   async pick_folder() { return { ok: false, error: "Run through pywebview to pick folders." }; },
   async pick_model_file() { return { ok: false, error: "Run through pywebview to pick model files." }; },
@@ -182,6 +185,7 @@ let noticeTimer = null;
 let secretsBackdropPointerDown = false;
 let lanternBackdropPointerDown = false;
 let memoriesBackdropPointerDown = false;
+let journalBackdropPointerDown = false;
 let confirmBackdropPointerDown = false;
 
 function setNotice(message, kind = "info", autoHideMs = 0) {
@@ -1434,13 +1438,16 @@ function handleContinuityAction(action) {
     openMemoriesDialog();
     return;
   }
+  if (action === "browse-journal") {
+    openJournalDialog();
+    return;
+  }
   const messages = {
     "dim-lantern": "Lantern dim/clear will be enabled after the safe write flow exists.",
     "update-lantern": "Lantern update will use preview and confirmation before writing.",
     "add-memory": "Adding memories will come after the memory browser and preview flow.",
     "edit-memory": "Memory edit/supersede will prefer safe supersede, with direct edit marked as advanced.",
     "delete-memory": "Memory delete will require a stern confirmation and a small before-image safety record.",
-    "browse-journal": "Journal browsing is planned as a read-only continuity slice.",
     "resolve-journal": "Journal resolve will be the safe first action for stale or completed entries.",
     "edit-journal": "Journal edit/delete will come after browse and resolve are stable.",
     "core-self": "Core self anchors will edit the pinned _self journal entry.",
@@ -1766,6 +1773,21 @@ function wireEvents() {
   });
   el("memoryTypeTabs").querySelectorAll("[data-memory-kind]").forEach((button) => {
     button.addEventListener("click", () => setMemoryKind(button.dataset.memoryKind));
+  });
+  el("journalCloseBtn").addEventListener("click", hideJournalDialog);
+  el("journalDialog").addEventListener("pointerdown", (event) => {
+    journalBackdropPointerDown = event.target === el("journalDialog");
+  });
+  el("journalDialog").addEventListener("click", (event) => {
+    if (journalBackdropPointerDown && event.target === el("journalDialog")) hideJournalDialog();
+    journalBackdropPointerDown = false;
+  });
+  el("journalLoadMoreBtn").addEventListener("click", () => loadJournalPage(state.journalBrowse.page + 1));
+  el("journalViewTabs").querySelectorAll("[data-journal-view]").forEach((button) => {
+    button.addEventListener("click", () => setJournalView(button.dataset.journalView));
+  });
+  el("journalTypeTabs").querySelectorAll("[data-journal-type]").forEach((button) => {
+    button.addEventListener("click", () => setJournalType(button.dataset.journalType));
   });
   document.querySelectorAll(".section-header").forEach((header) => {
     header.addEventListener("click", () => header.parentElement.classList.toggle("open"));
@@ -2265,6 +2287,194 @@ function emptyMemoryHint(view, kind) {
   if (kind === "journal") return "Journal index memories appear when journal entries create companion-searchable summaries.";
   if (kind === "session_log") return "Chat summaries are historical orientation memories. They are useful, but should be handled carefully.";
   return "Try another filter if you expected to see journal index memories or chat summaries.";
+}
+
+async function openJournalDialog() {
+  if (!state.current || state.current.name === "__base__") {
+    setNotice("Choose a persona first.", "warning", NOTICE_WARNING_MS);
+    return;
+  }
+  state.journalBrowse = { view: "active", type: "all", page: 0, pageSize: 25, total: 0, hasMore: false, items: [] };
+  el("journalDialog").classList.remove("hidden");
+  document.body.classList.add("modal-open");
+  syncJournalTabs();
+  showJournalList();
+  await loadJournalPage(1);
+}
+
+function hideJournalDialog() {
+  el("journalDialog").classList.add("hidden");
+  document.body.classList.remove("modal-open");
+}
+
+async function setJournalView(view) {
+  if (!view || view === state.journalBrowse.view) return;
+  state.journalBrowse = { ...state.journalBrowse, view, page: 0, total: 0, hasMore: false, items: [] };
+  syncJournalTabs();
+  showJournalList();
+  await loadJournalPage(1);
+}
+
+async function setJournalType(type) {
+  if (!type || type === state.journalBrowse.type) return;
+  state.journalBrowse = { ...state.journalBrowse, type, page: 0, total: 0, hasMore: false, items: [] };
+  syncJournalTabs();
+  showJournalList();
+  await loadJournalPage(1);
+}
+
+function syncJournalTabs() {
+  el("journalViewTabs").querySelectorAll("[data-journal-view]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.journalView === state.journalBrowse.view);
+  });
+  el("journalTypeTabs").querySelectorAll("[data-journal-type]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.journalType === state.journalBrowse.type);
+  });
+}
+
+function showJournalList() {
+  el("journalDetail").classList.add("hidden");
+  el("journalDetail").innerHTML = "";
+  el("journalBody").classList.remove("hidden");
+  renderJournalList();
+}
+
+async function loadJournalPage(page) {
+  if (!state.current || state.current.name === "__base__") return;
+  if (page === 1) {
+    el("journalBody").innerHTML = `<div class="memory-empty">Loading journal entries...</div>`;
+    el("journalLoadMoreBtn").classList.add("hidden");
+  }
+  const result = await api().list_journal_entries(
+    state.current.name,
+    state.journalBrowse.view,
+    state.journalBrowse.type,
+    page,
+    state.journalBrowse.pageSize
+  );
+  if (!result.ok) {
+    el("journalSubtitle").textContent = "Could not read journal entries.";
+    el("journalBody").innerHTML = `<div class="memory-empty">${escapeHtml(result.error || "Journal browse unavailable.")}</div>`;
+    return;
+  }
+  state.journalBrowse.page = result.page || page;
+  state.journalBrowse.total = result.total || 0;
+  state.journalBrowse.hasMore = Boolean(result.has_more);
+  state.journalBrowse.items = page === 1
+    ? (result.items || [])
+    : state.journalBrowse.items.concat(result.items || []);
+  renderJournalList();
+}
+
+function renderJournalList() {
+  const browse = state.journalBrowse;
+  const viewLabel = humanizeJournalView(browse.view);
+  const typeLabel = humanizeJournalType(browse.type);
+  el("journalSubtitle").textContent = `${viewLabel} ${typeLabel.toLowerCase()} / showing ${browse.items.length} of ${browse.total}`;
+  if (!browse.items.length) {
+    el("journalBody").innerHTML = `
+      <div class="memory-empty">
+        <strong>No ${viewLabel.toLowerCase()} ${typeLabel.toLowerCase()} found.</strong>
+        <span>${escapeHtml(emptyJournalHint(browse.view, browse.type))}</span>
+      </div>`;
+    el("journalLoadMoreBtn").classList.add("hidden");
+    return;
+  }
+  el("journalBody").innerHTML = browse.items.map(renderJournalCard).join("");
+  el("journalBody").querySelectorAll(".journal-card").forEach((card) => {
+    card.addEventListener("click", () => openJournalDetail(card.dataset.entryId));
+  });
+  const loadMore = el("journalLoadMoreBtn");
+  loadMore.classList.toggle("hidden", !browse.hasMore);
+  loadMore.textContent = `Load More (${browse.items.length}/${browse.total})`;
+}
+
+function renderJournalCard(entry) {
+  const tags = (entry.tags || []).slice(0, 4).map((tag) => `<span>${escapeHtml(tag)}</span>`).join("");
+  const badges = [
+    entry.entry_type,
+    entry.status === "reference" ? "" : entry.status,
+    entry.pinned ? "pinned" : "",
+  ].filter(Boolean);
+  const why = entry.why_preview
+    ? `<div class="journal-why">Why: ${escapeHtml(entry.why_preview)}</div>`
+    : "";
+  return `
+    <button class="journal-card memory-card" type="button" data-entry-id="${escapeHtml(entry.id)}">
+      <div class="memory-card-head">
+        <strong>${escapeHtml(entry.id)}</strong>
+        <span>${escapeHtml(entry.date_display || "unknown")} / ${escapeHtml(entry.age_label || "unknown age")}</span>
+      </div>
+      <h3>${escapeHtml(entry.title || "Untitled entry")}</h3>
+      <p>${escapeHtml(entry.preview || "")}</p>
+      ${why}
+      <div class="memory-card-foot">
+        <div class="memory-tags">${tags || "<span>untagged</span>"}</div>
+        <div class="memory-badges">${badges.map((badge) => `<span>${escapeHtml(humanizeMemoryBadge(badge))}</span>`).join("")}</div>
+      </div>
+    </button>`;
+}
+
+async function openJournalDetail(entryId) {
+  if (!state.current || !entryId) return;
+  el("journalDetail").classList.remove("hidden");
+  el("journalBody").classList.add("hidden");
+  el("journalLoadMoreBtn").classList.add("hidden");
+  el("journalDetail").innerHTML = `<div class="memory-empty">Loading journal entry ${escapeHtml(entryId)}...</div>`;
+
+  const result = await api().get_journal_entry(state.current.name, entryId);
+  if (!result.ok) {
+    el("journalDetail").innerHTML = `<div class="memory-empty">${escapeHtml(result.error || "Journal entry unavailable.")}</div>`;
+    return;
+  }
+  const entry = result.entry || {};
+  const tags = (entry.tags || []).map((tag) => `<span>${escapeHtml(tag)}</span>`).join("");
+  el("journalDetail").innerHTML = `
+    <button class="memory-back-btn" type="button">&larr; Back to journal</button>
+    <article class="journal-entry-detail memory-version">
+      <div class="memory-version-head">
+        <strong>${escapeHtml(entry.id || entryId)}</strong>
+        <span>${escapeHtml(entry.date_display || "unknown")} / ${escapeHtml(entry.age_label || "unknown age")}</span>
+      </div>
+      <h3>${escapeHtml(entry.title || "Untitled entry")}</h3>
+      <div class="memory-badges journal-detail-badges">
+        <span>${escapeHtml(humanizeMemoryBadge(entry.entry_type || "entry"))}</span>
+        ${entry.status === "reference" ? "" : `<span>${escapeHtml(humanizeMemoryBadge(entry.status || "active"))}</span>`}
+        ${entry.pinned ? "<span>Pinned</span>" : ""}
+      </div>
+      <p>${escapeHtml(entry.content || "")}</p>
+      ${entry.why_it_mattered ? `<div class="memory-source-note"><strong>Why it mattered</strong><span>${escapeHtml(entry.why_it_mattered)}</span></div>` : ""}
+      <div class="memory-tags">${tags || "<span>untagged</span>"}</div>
+    </article>`;
+  el("journalDetail").querySelector(".memory-back-btn").addEventListener("click", showJournalList);
+}
+
+function humanizeJournalView(view) {
+  return {
+    active: "Active",
+    resolved: "Resolved",
+    all: "All",
+  }[view] || "Active";
+}
+
+function humanizeJournalType(type) {
+  return {
+    all: "Entries",
+    event: "Events",
+    preference: "Preferences",
+    topic: "Topics",
+    tone: "Tone notes",
+    open_thread: "Open threads",
+    follow_up: "Follow-ups",
+    reflection: "Reflections",
+  }[type] || "Entries";
+}
+
+function emptyJournalHint(view, type) {
+  if (view === "resolved") return "Resolved entries are completed follow-ups or closed threads. Active entries stay in the main view.";
+  if (type === "open_thread") return "Open threads are unresolved topics the companion may want to return to.";
+  if (type === "follow_up") return "Follow-ups appear when the companion writes down something to check later.";
+  return "Try another type filter, or check All if you expected older journal context.";
 }
 
 async function restoreBackup(path) {

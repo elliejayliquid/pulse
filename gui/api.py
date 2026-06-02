@@ -757,6 +757,98 @@ class PulseAPI:
             "db_path": _safe_rel(db_path, self.root),
         }
 
+    def list_journal_entries(self, persona: str, view: str = "active",
+                             entry_type: str = "all", page: int = 1,
+                             page_size: int = 25) -> dict:
+        if not persona or persona == "__base__":
+            return {"ok": False, "error": "Choose a persona first."}
+        persona_dir = self.personas_dir / persona
+        if not persona_dir.is_dir():
+            return {"ok": False, "error": f"Persona not found: {persona}"}
+        if view not in ("active", "resolved", "all"):
+            return {"ok": False, "error": "Journal view must be active, resolved, or all."}
+        allowed_types = {
+            "all", "event", "preference", "topic", "tone",
+            "open_thread", "follow_up", "reflection",
+        }
+        if entry_type not in allowed_types:
+            return {"ok": False, "error": "Journal type filter is not recognized."}
+
+        db_path = self._persona_database_path(persona)
+        page = max(1, int(page or 1))
+        page_size = max(5, min(int(page_size or 25), 100))
+        if not db_path.exists():
+            return self._empty_journal_page(persona, view, entry_type, page, page_size, db_path)
+
+        try:
+            with closing(sqlite3.connect(str(db_path))) as conn:
+                conn.row_factory = sqlite3.Row
+                columns = self._table_columns(conn, "journal_entries")
+                if not columns:
+                    return self._empty_journal_page(persona, view, entry_type, page, page_size, db_path)
+                select_sql = self._journal_select_sql(columns)
+                where, params = self._journal_where(view, entry_type, columns)
+                total = conn.execute(f"SELECT COUNT(*) FROM journal_entries {where}", params).fetchone()[0]
+                offset = (page - 1) * page_size
+                rows = conn.execute(
+                    f"SELECT {select_sql} FROM journal_entries {where} "
+                    "ORDER BY date DESC, id DESC LIMIT ? OFFSET ?",
+                    (*params, page_size, offset),
+                ).fetchall()
+        except (sqlite3.Error, OSError) as e:
+            return {"ok": False, "error": f"Could not read journal entries: {e}"}
+
+        items = [self._format_journal_entry(dict(row), detail=False) for row in rows]
+        return {
+            "ok": True,
+            "persona": persona,
+            "view": view,
+            "entry_type": entry_type,
+            "page": page,
+            "page_size": page_size,
+            "total": total,
+            "has_more": offset + len(items) < total,
+            "items": items,
+            "db_path": _safe_rel(db_path, self.root),
+        }
+
+    def get_journal_entry(self, persona: str, entry_id: str) -> dict:
+        if not persona or persona == "__base__":
+            return {"ok": False, "error": "Choose a persona first."}
+        persona_dir = self.personas_dir / persona
+        if not persona_dir.is_dir():
+            return {"ok": False, "error": f"Persona not found: {persona}"}
+        entry_id = str(entry_id or "").strip()
+        if not entry_id:
+            return {"ok": False, "error": "Journal entry ID is required."}
+
+        db_path = self._persona_database_path(persona)
+        if not db_path.exists():
+            return {"ok": False, "error": "Journal database not found."}
+
+        try:
+            with closing(sqlite3.connect(str(db_path))) as conn:
+                conn.row_factory = sqlite3.Row
+                columns = self._table_columns(conn, "journal_entries")
+                if not columns:
+                    return {"ok": False, "error": "Journal table not found."}
+                select_sql = self._journal_select_sql(columns)
+                row = conn.execute(
+                    f"SELECT {select_sql} FROM journal_entries WHERE id = ?",
+                    (entry_id,),
+                ).fetchone()
+        except (sqlite3.Error, OSError) as e:
+            return {"ok": False, "error": f"Could not read journal entry: {e}"}
+
+        if not row:
+            return {"ok": False, "error": f"Journal entry {entry_id} not found."}
+        return {
+            "ok": True,
+            "persona": persona,
+            "entry": self._format_journal_entry(dict(row), detail=True),
+            "db_path": _safe_rel(db_path, self.root),
+        }
+
     def stop_pulse(self, persona: str) -> dict:
         if not persona or persona == "__base__":
             return {"ok": False, "error": "Choose a persona before stopping Pulse."}
@@ -930,6 +1022,21 @@ class PulseAPI:
             "db_path": _safe_rel(db_path, self.root),
         }
 
+    def _empty_journal_page(self, persona: str, view: str, entry_type: str,
+                            page: int, page_size: int, db_path: Path) -> dict:
+        return {
+            "ok": True,
+            "persona": persona,
+            "view": view,
+            "entry_type": entry_type,
+            "page": page,
+            "page_size": page_size,
+            "total": 0,
+            "has_more": False,
+            "items": [],
+            "db_path": _safe_rel(db_path, self.root),
+        }
+
     def _table_columns(self, conn: sqlite3.Connection, table: str) -> set[str]:
         try:
             rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
@@ -944,6 +1051,15 @@ class PulseAPI:
         ]
         optional = ["status", "confidence", "source", "last_confirmed", "time_sensitive", "valid_until"]
         parts = [name if name in columns else f"NULL AS {name}" for name in required + optional]
+        return ", ".join(parts)
+
+    def _journal_select_sql(self, columns: set[str]) -> str:
+        fields = [
+            "id", "author", "title", "entry_type", "content",
+            "why_it_mattered", "tags", "importance", "pinned",
+            "resolved", "date",
+        ]
+        parts = [name if name in columns else f"NULL AS {name}" for name in fields]
         return ", ".join(parts)
 
     def _memory_view_where(self, view: str, kind: str, columns: set[str]) -> str:
@@ -966,6 +1082,23 @@ class PulseAPI:
                 "(SELECT supersedes FROM memories WHERE supersedes IS NOT NULL)"
             )
         return f"WHERE {' AND '.join(filters)}" if filters else ""
+
+    def _journal_where(self, view: str, entry_type: str,
+                       columns: set[str]) -> tuple[str, tuple]:
+        filters = []
+        params: list[Any] = []
+        if view == "active" and "resolved" in columns:
+            filters.append("(resolved IS NULL OR resolved = 0)")
+        elif view == "resolved":
+            if "resolved" not in columns:
+                return "WHERE 0", ()
+            filters.append("resolved = 1")
+        if entry_type != "all":
+            if "entry_type" not in columns:
+                return "WHERE 0", ()
+            filters.append("entry_type = ?")
+            params.append(entry_type)
+        return (f"WHERE {' AND '.join(filters)}" if filters else ""), tuple(params)
 
     def _decode_tags(self, value: Any) -> list[str]:
         if not value:
@@ -1057,6 +1190,41 @@ class PulseAPI:
         if why:
             parts.append(f"Why it mattered: {str(why).strip()}")
         return "\n\n".join(part for part in parts if part)
+
+    def _format_journal_entry(self, row: dict, detail: bool) -> dict:
+        content = row.get("content") or ""
+        why = row.get("why_it_mattered") or ""
+        date = row.get("date") or ""
+        age_hours = self._hours_since(date)
+        resolved = row.get("resolved")
+        pinned = row.get("pinned")
+        status = "resolved" if resolved else "active"
+        if resolved is None and (row.get("entry_type") or "") not in ("open_thread", "follow_up"):
+            status = "reference"
+        return {
+            "id": row.get("id") or "",
+            "author": row.get("author") or "",
+            "title": row.get("title") or self._journal_fallback_title(row),
+            "entry_type": row.get("entry_type") or "entry",
+            "content": content if detail else "",
+            "preview": content[:260] + ("..." if len(content) > 260 else ""),
+            "why_it_mattered": why if detail else "",
+            "why_preview": why[:180] + ("..." if len(why) > 180 else ""),
+            "tags": self._decode_tags(row.get("tags")),
+            "importance": row.get("importance"),
+            "pinned": bool(pinned) if pinned is not None else False,
+            "resolved": bool(resolved) if resolved is not None else None,
+            "status": status,
+            "date": date,
+            "date_display": str(date)[:10] if date else "unknown",
+            "age_label": self._age_label(age_hours),
+        }
+
+    def _journal_fallback_title(self, row: dict) -> str:
+        entry_type = str(row.get("entry_type") or "entry").replace("_", " ").title()
+        content = str(row.get("content") or "").strip()
+        first_line = next((line.strip() for line in content.splitlines() if line.strip()), "")
+        return first_line[:80] if first_line else entry_type
 
     def _format_memory_item(self, row: dict, history: dict[int, dict]) -> dict:
         tags = self._decode_tags(row.get("tags"))

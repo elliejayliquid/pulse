@@ -2054,6 +2054,21 @@ textarea {
   overflow-wrap: anywhere;
 }
 
+.journal-card h3,
+.journal-entry-detail h3 {
+  margin: 0 0 8px;
+  color: var(--text-primary);
+  font-size: 14px;
+  line-height: 1.25;
+}
+
+.journal-why {
+  margin: 0 0 10px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .memory-card-foot {
   display: flex;
   align-items: flex-end;
@@ -2154,6 +2169,10 @@ textarea {
   color: var(--text-secondary);
   font-size: 12px;
   line-height: 1.45;
+}
+
+.journal-detail-badges {
+  margin: 0 0 10px;
 }
 
 .memory-empty {

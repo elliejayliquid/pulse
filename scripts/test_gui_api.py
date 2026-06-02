@@ -367,6 +367,103 @@ def test_gui_api_list_memories_read_only_with_history_views():
         assert [item["id"] for item in detail["versions"]] == [2, 1]
 
 
+def test_gui_api_list_journal_entries_read_only_views():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        persona_dir = root / "personas" / "demo"
+        data_dir = persona_dir / "data"
+        data_dir.mkdir(parents=True)
+        (root / "logs").mkdir()
+        (root / "config.yaml").write_text("", encoding="utf-8")
+        (root / "persona.yaml").write_text("name: Base\n", encoding="utf-8")
+        (persona_dir / "config.yaml").write_text("", encoding="utf-8")
+        (persona_dir / "persona.yaml").write_text("name: Demo\n", encoding="utf-8")
+
+        db_path = data_dir / "demo.db"
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                """
+                CREATE TABLE journal_entries (
+                    id TEXT PRIMARY KEY,
+                    author TEXT NOT NULL DEFAULT 'Pulse',
+                    title TEXT,
+                    entry_type TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    why_it_mattered TEXT,
+                    tags TEXT NOT NULL DEFAULT '[]',
+                    importance INTEGER NOT NULL DEFAULT 5,
+                    pinned INTEGER NOT NULL DEFAULT 0,
+                    resolved INTEGER,
+                    date TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                "INSERT INTO journal_entries "
+                "(id, author, title, entry_type, content, why_it_mattered, tags, importance, pinned, resolved, date) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "001", "Demo", "Cyclone thread", "open_thread",
+                    "A stale open thread that should stay visible until resolved.",
+                    "Future Demo should know whether this still matters.",
+                    json.dumps(["weather", "stale"]),
+                    6, 0, 0, "2026-04-01T00:00:00+00:00",
+                ),
+            )
+            conn.execute(
+                "INSERT INTO journal_entries "
+                "(id, author, title, entry_type, content, why_it_mattered, tags, importance, pinned, resolved, date) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "002", "Demo", "Resolved coffee", "follow_up",
+                    "The coffee follow-up was completed.",
+                    "It was resolved cleanly.",
+                    json.dumps(["coffee"]),
+                    4, 0, 1, "2026-04-02T00:00:00+00:00",
+                ),
+            )
+            conn.execute(
+                "INSERT INTO journal_entries "
+                "(id, author, title, entry_type, content, why_it_mattered, tags, importance, pinned, resolved, date) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "003", "Demo", "Quiet reflection", "reflection",
+                    "A normal reflection without a resolved lifecycle.",
+                    "It captures a useful internal state.",
+                    json.dumps(["tone"]),
+                    5, 1, None, "2026-04-03T00:00:00+00:00",
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        api = PulseAPI(root)
+        active = api.list_journal_entries("demo", "active", "all", page=1, page_size=25)
+        assert active["ok"] is True
+        assert active["total"] == 2
+        assert [item["id"] for item in active["items"]] == ["003", "001"]
+        assert active["items"][0]["status"] == "reference"
+        assert active["items"][0]["pinned"] is True
+
+        open_threads = api.list_journal_entries("demo", "active", "open_thread", page=1, page_size=25)
+        assert open_threads["ok"] is True
+        assert open_threads["total"] == 1
+        assert open_threads["items"][0]["id"] == "001"
+
+        resolved = api.list_journal_entries("demo", "resolved", "all", page=1, page_size=25)
+        assert resolved["ok"] is True
+        assert resolved["total"] == 1
+        assert resolved["items"][0]["id"] == "002"
+
+        detail = api.get_journal_entry("demo", "001")
+        assert detail["ok"] is True
+        assert detail["entry"]["content"].startswith("A stale open thread")
+        assert detail["entry"]["why_it_mattered"].startswith("Future Demo")
+        assert detail["entry"]["tags"] == ["weather", "stale"]
+
+
 def test_gui_api_model_file_path_validation():
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -463,6 +560,7 @@ if __name__ == "__main__":
     test_gui_api_standard_provider_env_fallback()
     test_gui_api_get_lantern_read_only()
     test_gui_api_list_memories_read_only_with_history_views()
+    test_gui_api_list_journal_entries_read_only_views()
     test_gui_api_model_file_path_validation()
     test_gui_api_secrets_preserve_env_and_validate_keys()
     print("[OK] GUI API")

@@ -544,6 +544,36 @@
     </div>
   </div>
 
+  <div id="journalDialog" class="modal-overlay hidden">
+    <div class="modal-card memories-card journal-card-shell">
+      <div class="memories-modal-head">
+        <div>
+          <h2 class="modal-title">Journal</h2>
+          <p id="journalSubtitle" class="modal-body">Browse journal entries.</p>
+        </div>
+        <div id="journalViewTabs" class="memory-view-tabs" role="tablist" aria-label="Journal view">
+          <button class="active" type="button" data-journal-view="active">Active</button>
+          <button type="button" data-journal-view="resolved">Resolved</button>
+          <button type="button" data-journal-view="all">All</button>
+        </div>
+      </div>
+      <div id="journalTypeTabs" class="memory-type-tabs" role="tablist" aria-label="Journal type">
+        <button class="active" type="button" data-journal-type="all">All</button>
+        <button type="button" data-journal-type="open_thread">Open Threads</button>
+        <button type="button" data-journal-type="follow_up">Follow-ups</button>
+        <button type="button" data-journal-type="reflection">Reflections</button>
+        <button type="button" data-journal-type="topic">Topics</button>
+        <button type="button" data-journal-type="tone">Tone</button>
+      </div>
+      <div id="journalDetail" class="memory-detail hidden"></div>
+      <div id="journalBody" class="memories-body"></div>
+      <button id="journalLoadMoreBtn" class="memory-load-more hidden" type="button">Load More</button>
+      <div class="modal-actions">
+        <button id="journalCloseBtn" class="modal-btn ghost" type="button">Close</button>
+      </div>
+    </div>
+  </div>
+
   <div id="secretsDialog" class="modal-overlay hidden">
     <div class="modal-card secrets-card">
       <h2 id="secretsTitle" class="modal-title">API Keys</h2>
