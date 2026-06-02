@@ -161,6 +161,7 @@ const fallbackApi = {
   async get_memory_detail() { return { ok: false, error: "Run through pywebview to inspect memories." }; },
   async list_journal_entries() { return { ok: false, error: "Run through pywebview to browse journal entries." }; },
   async get_journal_entry() { return { ok: false, error: "Run through pywebview to inspect journal entries." }; },
+  async get_core_anchor() { return { ok: false, error: "Run through pywebview to inspect core anchors." }; },
   async pick_voice_sample() { return { ok: false, error: "Run through pywebview to pick files." }; },
   async pick_folder() { return { ok: false, error: "Run through pywebview to pick folders." }; },
   async pick_model_file() { return { ok: false, error: "Run through pywebview to pick model files." }; },
@@ -186,6 +187,7 @@ let secretsBackdropPointerDown = false;
 let lanternBackdropPointerDown = false;
 let memoriesBackdropPointerDown = false;
 let journalBackdropPointerDown = false;
+let coreBackdropPointerDown = false;
 let confirmBackdropPointerDown = false;
 
 function setNotice(message, kind = "info", autoHideMs = 0) {
@@ -578,6 +580,23 @@ function renderChannels(channels) {
       setDirty(hasEditableChanges());
       renderSecrets(state.current.key_status || {});
     });
+  });
+}
+
+function renderCoreAnchorIndicators(statuses) {
+  document.querySelectorAll("[data-core-anchor]").forEach((button) => {
+    const anchor = button.dataset.coreAnchor;
+    const status = statuses?.[anchor] || {};
+    const hasContent = Boolean(status.has_content);
+    button.classList.toggle("has-content", hasContent);
+    button.classList.toggle("is-empty", !hasContent);
+    if (!button.dataset.baseTitle) {
+      button.dataset.baseTitle = button.getAttribute("title") || "View core anchor";
+    }
+    button.setAttribute(
+      "title",
+      `${button.dataset.baseTitle} (${hasContent ? "has notes" : "empty"})`
+    );
   });
 }
 
@@ -1442,6 +1461,18 @@ function handleContinuityAction(action) {
     openJournalDialog();
     return;
   }
+  if (action === "core-self") {
+    openCoreDialog("_self");
+    return;
+  }
+  if (action === "core-user") {
+    openCoreDialog("_user");
+    return;
+  }
+  if (action === "core-relationship") {
+    openCoreDialog("_relationship");
+    return;
+  }
   const messages = {
     "dim-lantern": "Lantern dim/clear will be enabled after the safe write flow exists.",
     "update-lantern": "Lantern update will use preview and confirmation before writing.",
@@ -1450,9 +1481,6 @@ function handleContinuityAction(action) {
     "delete-memory": "Memory delete will require a stern confirmation and a small before-image safety record.",
     "resolve-journal": "Journal resolve will be the safe first action for stale or completed entries.",
     "edit-journal": "Journal edit/delete will come after browse and resolve are stable.",
-    "core-self": "Core self anchors will edit the pinned _self journal entry.",
-    "core-user": "Core user anchors will edit the pinned _user journal entry.",
-    "core-relationship": "Core relationship anchors will edit the pinned _relationship journal entry.",
     "import-content": "Continuity import will start with pasted companion-written notes and preview before writing.",
     "learn-more": "Continuity planning lives in designs/continuity_section.md.",
   };
@@ -1475,6 +1503,7 @@ async function loadPersona(name) {
   renderRuntime(data.status || {}, data.summary || {});
   renderSkills(data.skills || []);
   renderChannels(data.channels || []);
+  renderCoreAnchorIndicators(data.core_anchors || {});
   renderProcessButton(data);
   setEditableState(data);
   setBackupState();
@@ -1788,6 +1817,14 @@ function wireEvents() {
   });
   el("journalTypeTabs").querySelectorAll("[data-journal-type]").forEach((button) => {
     button.addEventListener("click", () => setJournalType(button.dataset.journalType));
+  });
+  el("coreCloseBtn").addEventListener("click", hideCoreDialog);
+  el("coreDialog").addEventListener("pointerdown", (event) => {
+    coreBackdropPointerDown = event.target === el("coreDialog");
+  });
+  el("coreDialog").addEventListener("click", (event) => {
+    if (coreBackdropPointerDown && event.target === el("coreDialog")) hideCoreDialog();
+    coreBackdropPointerDown = false;
   });
   document.querySelectorAll(".section-header").forEach((header) => {
     header.addEventListener("click", () => header.parentElement.classList.toggle("open"));
@@ -2475,6 +2512,70 @@ function emptyJournalHint(view, type) {
   if (type === "open_thread") return "Open threads are unresolved topics the companion may want to return to.";
   if (type === "follow_up") return "Follow-ups appear when the companion writes down something to check later.";
   return "Try another type filter, or check All if you expected older journal context.";
+}
+
+async function openCoreDialog(anchorId) {
+  if (!state.current || state.current.name === "__base__") {
+    setNotice("Choose a persona first.", "warning", NOTICE_WARNING_MS);
+    return;
+  }
+  el("coreDialog").classList.remove("hidden");
+  document.body.classList.add("modal-open");
+  el("coreTitle").textContent = coreAnchorLabel(anchorId);
+  el("coreSubtitle").textContent = "Loading journal identity anchor...";
+  el("coreBody").innerHTML = `<div class="memory-empty">Loading ${escapeHtml(coreAnchorLabel(anchorId).toLowerCase())}...</div>`;
+
+  const result = await api().get_core_anchor(state.current.name, anchorId);
+  if (!result.ok) {
+    el("coreSubtitle").textContent = "Could not read core anchor.";
+    el("coreBody").innerHTML = `<div class="memory-empty">${escapeHtml(result.error || "Core anchor unavailable.")}</div>`;
+    return;
+  }
+  renderCoreAnchor(result.anchor || {});
+}
+
+function hideCoreDialog() {
+  el("coreDialog").classList.add("hidden");
+  document.body.classList.remove("modal-open");
+}
+
+function renderCoreAnchor(anchor) {
+  el("coreTitle").textContent = anchor.title || coreAnchorLabel(anchor.id);
+  el("coreSubtitle").textContent = `${escapeHtml(anchor.id || "anchor")} / journal identity anchor / updated ${anchor.last_updated_display || "unknown"}`;
+  const sections = anchor.sections || [];
+  if (!sections.length) {
+    el("coreBody").innerHTML = `
+      <div class="memory-empty">
+        <strong>No sections found.</strong>
+        <span>This anchor has not been created yet, or the identity table is unavailable for this persona.</span>
+      </div>`;
+    return;
+  }
+  el("coreBody").innerHTML = `
+    <div class="core-meta">
+      <span>${escapeHtml(anchor.age_label || "unknown age")}</span>
+      ${anchor.empty ? "<span>Empty anchor</span>" : "<span>Read-only</span>"}
+    </div>
+    <div class="core-sections">
+      ${sections.map(renderCoreSection).join("")}
+    </div>`;
+}
+
+function renderCoreSection(section) {
+  const value = text(section.value).trim();
+  return `
+    <article class="core-section ${value ? "" : "empty"}">
+      <strong>${escapeHtml(section.label || section.key || "Section")}</strong>
+      <p>${escapeHtml(value || "No notes yet.")}</p>
+    </article>`;
+}
+
+function coreAnchorLabel(anchorId) {
+  return {
+    _self: "Core Self",
+    _user: "Core User",
+    _relationship: "Core Relationship",
+  }[anchorId] || "Core Anchor";
 }
 
 async function restoreBackup(path) {

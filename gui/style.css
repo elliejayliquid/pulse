@@ -857,6 +857,26 @@ input[type="number"]::-webkit-outer-spin-button {
   min-width: 104px;
 }
 
+.core-anchor-btn::after {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  box-shadow: none;
+}
+
+.core-anchor-btn.has-content::after {
+  border-color: rgba(249, 115, 22, 0.58);
+  background: var(--accent);
+  box-shadow: 0 0 10px rgba(249, 115, 22, 0.45);
+}
+
+.core-anchor-btn.is-empty::after {
+  opacity: 0.55;
+}
+
 .continuity-btn.wide {
   width: 100%;
 }
@@ -2173,6 +2193,75 @@ textarea {
 
 .journal-detail-badges {
   margin: 0 0 10px;
+}
+
+.core-card {
+  width: min(720px, calc(100vw - 48px));
+  max-height: min(760px, calc(100vh - 48px));
+  display: flex;
+  flex-direction: column;
+}
+
+.core-body {
+  display: grid;
+  gap: 12px;
+  min-height: 0;
+  overflow: auto;
+  margin-bottom: 16px;
+  padding: 2px 2px 0;
+}
+
+.core-meta {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.core-meta span {
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-raised);
+  color: var(--text-tertiary);
+  font: 700 10px/1 var(--body);
+}
+
+.core-sections {
+  display: grid;
+  gap: 10px;
+}
+
+.core-section {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-raised);
+  transition: border-color 140ms ease, background 140ms ease;
+}
+
+.core-section:hover {
+  border-color: rgba(249, 115, 22, 0.28);
+  background: #222228;
+}
+
+.core-section strong {
+  display: block;
+  margin-bottom: 8px;
+  color: var(--text-tertiary);
+  font: 700 11px/1 var(--mono);
+  text-transform: uppercase;
+}
+
+.core-section p {
+  margin: 0;
+  color: var(--text-primary);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.core-section.empty p {
+  color: var(--text-tertiary);
 }
 
 .memory-empty {

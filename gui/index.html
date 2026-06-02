@@ -174,15 +174,15 @@
                 <small>Edit self, user, and relationship journal anchors.</small>
               </div>
               <div class="continuity-actions">
-                <button class="continuity-btn compact" type="button" data-continuity-action="core-self" title="Edit companion core anchor">
+                <button class="continuity-btn compact core-anchor-btn" type="button" data-continuity-action="core-self" data-core-anchor="_self" title="View companion core anchor">
                   <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"></circle><path d="M5 21a7 7 0 0 1 14 0"></path></svg>
                   <span>Self</span>
                 </button>
-                <button class="continuity-btn compact" type="button" data-continuity-action="core-user" title="Edit human core anchor">
+                <button class="continuity-btn compact core-anchor-btn" type="button" data-continuity-action="core-user" data-core-anchor="_user" title="View human core anchor">
                   <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"></circle><path d="M5 21a7 7 0 0 1 14 0"></path></svg>
                   <span>User</span>
                 </button>
-                <button class="continuity-btn compact" type="button" data-continuity-action="core-relationship" title="Edit relationship core anchor">
+                <button class="continuity-btn compact core-anchor-btn" type="button" data-continuity-action="core-relationship" data-core-anchor="_relationship" title="View relationship core anchor">
                   <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="9" r="3"></circle><circle cx="16" cy="9" r="3"></circle><path d="M3 21a5 5 0 0 1 10 0"></path><path d="M11 21a5 5 0 0 1 10 0"></path></svg>
                   <span>Relationship</span>
                 </button>
@@ -570,6 +570,17 @@
       <button id="journalLoadMoreBtn" class="memory-load-more hidden" type="button">Load More</button>
       <div class="modal-actions">
         <button id="journalCloseBtn" class="modal-btn ghost" type="button">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="coreDialog" class="modal-overlay hidden">
+    <div class="modal-card core-card">
+      <h2 id="coreTitle" class="modal-title">Core Anchor</h2>
+      <p id="coreSubtitle" class="modal-body">Journal identity anchor.</p>
+      <div id="coreBody" class="core-body"></div>
+      <div class="modal-actions">
+        <button id="coreCloseBtn" class="modal-btn ghost" type="button">Close</button>
       </div>
     </div>
   </div>

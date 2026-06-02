@@ -464,6 +464,73 @@ def test_gui_api_list_journal_entries_read_only_views():
         assert detail["entry"]["tags"] == ["weather", "stale"]
 
 
+def test_gui_api_get_core_anchor_read_only():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        persona_dir = root / "personas" / "demo"
+        data_dir = persona_dir / "data"
+        data_dir.mkdir(parents=True)
+        (root / "logs").mkdir()
+        (root / "config.yaml").write_text("", encoding="utf-8")
+        (root / "persona.yaml").write_text("name: Base\n", encoding="utf-8")
+        (persona_dir / "config.yaml").write_text("", encoding="utf-8")
+        (persona_dir / "persona.yaml").write_text("name: Demo\n", encoding="utf-8")
+
+        db_path = data_dir / "demo.db"
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                """
+                CREATE TABLE identity (
+                    id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    sections TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    last_updated TEXT
+                )
+                """
+            )
+            conn.execute(
+                "INSERT INTO identity (id, title, sections, created_at, last_updated) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    "_user",
+                    "About My Human",
+                    json.dumps({
+                        "who_they_are": "Lena is building Pulse.",
+                        "what_theyre_like": "Curious and careful.",
+                        "extra_notes": "",
+                    }),
+                    "2026-04-01T00:00:00+00:00",
+                    "2026-04-02T00:00:00+00:00",
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        api = PulseAPI(root)
+        anchor = api.get_core_anchor("demo", "_user")
+        assert anchor["ok"] is True
+        assert anchor["anchor"]["title"] == "About My Human"
+        assert anchor["anchor"]["empty"] is False
+        assert anchor["anchor"]["sections"][0]["label"] == "Who They Are"
+        assert anchor["anchor"]["sections"][0]["value"] == "Lena is building Pulse."
+        assert anchor["anchor"]["sections"][1]["label"] == "What They're Like"
+
+        loaded = api.load_persona("demo")
+        assert loaded["core_anchors"]["_user"]["has_content"] is True
+        assert loaded["core_anchors"]["_self"]["has_content"] is False
+
+        missing = api.get_core_anchor("demo", "_self")
+        assert missing["ok"] is True
+        assert missing["anchor"]["empty"] is True
+        assert missing["anchor"]["title"] == "Who I Am"
+
+        rejected = api.get_core_anchor("demo", "persona_yaml")
+        assert rejected["ok"] is False
+
+
 def test_gui_api_model_file_path_validation():
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -561,6 +628,7 @@ if __name__ == "__main__":
     test_gui_api_get_lantern_read_only()
     test_gui_api_list_memories_read_only_with_history_views()
     test_gui_api_list_journal_entries_read_only_views()
+    test_gui_api_get_core_anchor_read_only()
     test_gui_api_model_file_path_validation()
     test_gui_api_secrets_preserve_env_and_validate_keys()
     print("[OK] GUI API")

@@ -209,6 +209,7 @@ class PulseAPI:
             "channels": self._list_channels(config),
             "key_status": self.get_key_status(name),
             "status": self.get_status(name),
+            "core_anchors": self._core_anchor_statuses(name),
             "paths": {
                 "persona_dir": _safe_rel(persona_dir, self.root),
                 "config": _safe_rel(persona_dir / "config.yaml", self.root) if name != "__base__" else "config.yaml",
@@ -849,6 +850,90 @@ class PulseAPI:
             "db_path": _safe_rel(db_path, self.root),
         }
 
+    def get_core_anchor(self, persona: str, anchor_id: str) -> dict:
+        if not persona or persona == "__base__":
+            return {"ok": False, "error": "Choose a persona first."}
+        persona_dir = self.personas_dir / persona
+        if not persona_dir.is_dir():
+            return {"ok": False, "error": f"Persona not found: {persona}"}
+        if anchor_id not in ("_self", "_user", "_relationship"):
+            return {"ok": False, "error": "Core anchor must be _self, _user, or _relationship."}
+
+        db_path = self._persona_database_path(persona)
+        if not db_path.exists():
+            return {
+                "ok": True,
+                "persona": persona,
+                "anchor": self._empty_core_anchor(anchor_id),
+                "db_path": _safe_rel(db_path, self.root),
+            }
+
+        try:
+            with closing(sqlite3.connect(str(db_path))) as conn:
+                conn.row_factory = sqlite3.Row
+                columns = self._table_columns(conn, "identity")
+                if not columns:
+                    return {
+                        "ok": True,
+                        "persona": persona,
+                        "anchor": self._empty_core_anchor(anchor_id),
+                        "db_path": _safe_rel(db_path, self.root),
+                    }
+                select_sql = self._core_anchor_select_sql(columns)
+                row = conn.execute(
+                    f"SELECT {select_sql} FROM identity WHERE id = ?",
+                    (anchor_id,),
+                ).fetchone()
+        except (sqlite3.Error, OSError) as e:
+            return {"ok": False, "error": f"Could not read core anchor: {e}"}
+
+        anchor = (
+            self._format_core_anchor(dict(row))
+            if row else self._empty_core_anchor(anchor_id)
+        )
+        return {
+            "ok": True,
+            "persona": persona,
+            "anchor": anchor,
+            "db_path": _safe_rel(db_path, self.root),
+        }
+
+    def _core_anchor_statuses(self, persona: str) -> dict:
+        anchor_ids = ("_self", "_user", "_relationship")
+        statuses = {
+            anchor_id: {"exists": False, "has_content": False}
+            for anchor_id in anchor_ids
+        }
+        if not persona or persona == "__base__":
+            return statuses
+        persona_dir = self.personas_dir / persona
+        if not persona_dir.is_dir():
+            return statuses
+        db_path = self._persona_database_path(persona)
+        if not db_path.exists():
+            return statuses
+        try:
+            with closing(sqlite3.connect(str(db_path))) as conn:
+                conn.row_factory = sqlite3.Row
+                columns = self._table_columns(conn, "identity")
+                if not columns:
+                    return statuses
+                select_sql = self._core_anchor_select_sql(columns)
+                rows = conn.execute(
+                    f"SELECT {select_sql} FROM identity WHERE id IN (?, ?, ?)",
+                    anchor_ids,
+                ).fetchall()
+        except (sqlite3.Error, OSError):
+            return statuses
+
+        for row in rows:
+            anchor = self._format_core_anchor(dict(row))
+            statuses[anchor["id"]] = {
+                "exists": True,
+                "has_content": not anchor["empty"],
+            }
+        return statuses
+
     def stop_pulse(self, persona: str) -> dict:
         if not persona or persona == "__base__":
             return {"ok": False, "error": "Choose a persona before stopping Pulse."}
@@ -1062,6 +1147,11 @@ class PulseAPI:
         parts = [name if name in columns else f"NULL AS {name}" for name in fields]
         return ", ".join(parts)
 
+    def _core_anchor_select_sql(self, columns: set[str]) -> str:
+        fields = ["id", "title", "sections", "created_at", "last_updated"]
+        parts = [name if name in columns else f"NULL AS {name}" for name in fields]
+        return ", ".join(parts)
+
     def _memory_view_where(self, view: str, kind: str, columns: set[str]) -> str:
         filters = []
         if view == "archived":
@@ -1225,6 +1315,73 @@ class PulseAPI:
         content = str(row.get("content") or "").strip()
         first_line = next((line.strip() for line in content.splitlines() if line.strip()), "")
         return first_line[:80] if first_line else entry_type
+
+    def _empty_core_anchor(self, anchor_id: str) -> dict:
+        titles = {
+            "_self": "Who I Am",
+            "_user": "About My Human",
+            "_relationship": "Our Relationship",
+        }
+        return {
+            "id": anchor_id,
+            "title": titles.get(anchor_id, anchor_id),
+            "sections": [],
+            "empty": True,
+            "created_at": "",
+            "created_at_display": "unknown",
+            "last_updated": "",
+            "last_updated_display": "unknown",
+            "age_label": "unknown age",
+        }
+
+    def _format_core_anchor(self, row: dict) -> dict:
+        raw_sections = row.get("sections") or "{}"
+        try:
+            sections = json.loads(raw_sections) if isinstance(raw_sections, str) else raw_sections
+        except (TypeError, ValueError):
+            sections = {}
+        if not isinstance(sections, dict):
+            sections = {}
+        section_items = [
+            {
+                "key": str(key),
+                "label": self._core_section_label(str(key)),
+                "value": str(value or ""),
+            }
+            for key, value in sections.items()
+        ]
+        updated = row.get("last_updated") or row.get("created_at") or ""
+        age_hours = self._hours_since(updated)
+        return {
+            "id": row.get("id") or "",
+            "title": row.get("title") or self._empty_core_anchor(row.get("id") or "")["title"],
+            "sections": section_items,
+            "empty": not any(item["value"].strip() for item in section_items),
+            "created_at": row.get("created_at") or "",
+            "created_at_display": self._format_timestamp(row.get("created_at") or ""),
+            "last_updated": row.get("last_updated") or "",
+            "last_updated_display": self._format_timestamp(row.get("last_updated") or ""),
+            "age_label": self._age_label(age_hours),
+        }
+
+    def _core_section_label(self, key: str) -> str:
+        labels = {
+            "what_theyre_like": "What They're Like",
+            "how_they_communicate": "How They Communicate",
+            "their_preferences": "Their Preferences",
+            "who_they_are": "Who They Are",
+            "what_im_like": "What I'm Like",
+            "what_im_working_on": "What I'm Working On",
+            "who_i_am": "Who I Am",
+            "my_preferences": "My Preferences",
+            "how_i_present_myself": "How I Present Myself",
+            "how_we_relate": "How We Relate",
+            "our_dynamic": "Our Dynamic",
+            "shared_context": "Shared Context",
+            "boundaries_or_norms": "Boundaries Or Norms",
+            "extra_notes": "Extra Notes",
+        }
+        return labels.get(key, key.replace("_", " ").title())
 
     def _format_memory_item(self, row: dict, history: dict[int, dict]) -> dict:
         tags = self._decode_tags(row.get("tags"))
