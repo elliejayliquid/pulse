@@ -3,6 +3,7 @@ import json
 import sqlite3
 import sys
 import tempfile
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -430,6 +431,112 @@ def test_gui_api_list_memories_read_only_with_history_views():
         assert [item["id"] for item in detail["versions"]] == [2, 1]
 
 
+def test_gui_api_memory_mutations_backup_restore_and_relink():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        persona_dir = root / "personas" / "demo"
+        data_dir = persona_dir / "data"
+        data_dir.mkdir(parents=True)
+        (root / "logs").mkdir()
+        (root / "config.yaml").write_text("", encoding="utf-8")
+        (root / "persona.yaml").write_text("name: Base\n", encoding="utf-8")
+        (persona_dir / "config.yaml").write_text("", encoding="utf-8")
+        (persona_dir / "persona.yaml").write_text("name: Demo\n", encoding="utf-8")
+
+        db_path = data_dir / "demo.db"
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                """
+                CREATE TABLE memories (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    text TEXT NOT NULL,
+                    tags TEXT NOT NULL DEFAULT '[]',
+                    type TEXT NOT NULL DEFAULT 'fact',
+                    importance INTEGER NOT NULL DEFAULT 5,
+                    retrieval_count INTEGER NOT NULL DEFAULT 0,
+                    last_accessed TEXT,
+                    supersedes INTEGER,
+                    journal_file TEXT,
+                    date TEXT NOT NULL,
+                    status TEXT,
+                    confidence TEXT,
+                    source TEXT,
+                    last_confirmed TEXT,
+                    time_sensitive INTEGER,
+                    valid_until TEXT,
+                    embedding BLOB
+                )
+                """
+            )
+            rows = [
+                (1, "Piper is Lena's boy cat.", "[]", "fact", 5, None, "2026-01-01T00:00:00+00:00", "current", b"old-embed"),
+                (2, "Middle memory", "[]", "fact", 5, 1, "2026-01-02T00:00:00+00:00", "current", b"mid"),
+                (3, "Tail memory", "[]", "fact", 5, 2, "2026-01-03T00:00:00+00:00", "current", b"tail"),
+                (10, "Head memory", "[]", "fact", 5, None, "2026-01-04T00:00:00+00:00", "current", b"head"),
+                (11, "Head child", "[]", "fact", 5, 10, "2026-01-05T00:00:00+00:00", "current", b"child"),
+                (20, "Tail only", "[]", "fact", 5, 19, "2026-01-06T00:00:00+00:00", "current", b"tail-only"),
+            ]
+            conn.executemany(
+                "INSERT INTO memories "
+                "(id, text, tags, type, importance, supersedes, date, status, embedding) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                rows,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        api = PulseAPI(root)
+        update = api.update_memory("demo", 1, {
+            "text": "Piper is Lena's girl cat.",
+            "tags": ["piper", "cat"],
+            "confidence": "high",
+        })
+        assert update["ok"] is True
+        with closing(sqlite3.connect(db_path)) as conn:
+            row = conn.execute("SELECT text, tags, confidence, embedding FROM memories WHERE id = 1").fetchone()
+            assert row[0] == "Piper is Lena's girl cat."
+            assert json.loads(row[1]) == ["piper", "cat"]
+            assert row[2] == "high"
+            assert row[3] is None
+
+        payload_path = next((root / "gui_data" / "db_backups" / "demo" / update["undo_stamp"]).glob("*.json"))
+        payload = json.loads(payload_path.read_text(encoding="utf-8"))
+        assert payload["before"]["embedding"]["__pulse_bytes_b64"]
+
+        restored = api.restore_db_before_image("demo", update["undo_stamp"])
+        assert restored["ok"] is True
+        with closing(sqlite3.connect(db_path)) as conn:
+            row = conn.execute("SELECT text, tags, confidence, embedding FROM memories WHERE id = 1").fetchone()
+            assert row[0] == "Piper is Lena's boy cat."
+            assert json.loads(row[1]) == []
+            assert row[2] is None
+            assert row[3] == b"old-embed"
+
+        middle = api.delete_memory("demo", 2)
+        assert middle["ok"] is True
+        assert middle["relinked"] == 1
+        with closing(sqlite3.connect(db_path)) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM memories WHERE id = 2").fetchone()[0] == 0
+            assert conn.execute("SELECT supersedes FROM memories WHERE id = 3").fetchone()[0] == 1
+        assert api.restore_db_before_image("demo", middle["undo_stamp"])["ok"] is True
+        with closing(sqlite3.connect(db_path)) as conn:
+            assert conn.execute("SELECT supersedes FROM memories WHERE id = 3").fetchone()[0] == 2
+
+        head = api.delete_memory("demo", 10)
+        assert head["ok"] is True
+        with closing(sqlite3.connect(db_path)) as conn:
+            assert conn.execute("SELECT supersedes FROM memories WHERE id = 11").fetchone()[0] is None
+        assert api.restore_db_before_image("demo", head["undo_stamp"])["ok"] is True
+
+        tail = api.delete_memory("demo", 20)
+        assert tail["ok"] is True
+        assert tail["relinked"] == 0
+        with closing(sqlite3.connect(db_path)) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM memories WHERE id = 20").fetchone()[0] == 0
+
+
 def test_gui_api_list_journal_entries_read_only_views():
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -525,6 +632,179 @@ def test_gui_api_list_journal_entries_read_only_views():
         assert detail["entry"]["content"].startswith("A stale open thread")
         assert detail["entry"]["why_it_mattered"].startswith("Future Demo")
         assert detail["entry"]["tags"] == ["weather", "stale"]
+
+
+def test_gui_api_journal_mutations_update_mirror_and_restore():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        persona_dir = root / "personas" / "demo"
+        data_dir = persona_dir / "data"
+        data_dir.mkdir(parents=True)
+        (root / "logs").mkdir()
+        (root / "config.yaml").write_text("", encoding="utf-8")
+        (root / "persona.yaml").write_text("name: Base\n", encoding="utf-8")
+        (persona_dir / "config.yaml").write_text("", encoding="utf-8")
+        (persona_dir / "persona.yaml").write_text("name: Demo\n", encoding="utf-8")
+
+        db_path = data_dir / "demo.db"
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                """
+                CREATE TABLE journal_entries (
+                    id TEXT PRIMARY KEY,
+                    author TEXT NOT NULL DEFAULT 'Pulse',
+                    title TEXT,
+                    entry_type TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    why_it_mattered TEXT,
+                    search_summary TEXT,
+                    summary_needs_review INTEGER NOT NULL DEFAULT 0,
+                    tags TEXT NOT NULL DEFAULT '[]',
+                    importance INTEGER NOT NULL DEFAULT 5,
+                    pinned INTEGER NOT NULL DEFAULT 0,
+                    resolved INTEGER,
+                    date TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE memories (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    text TEXT NOT NULL,
+                    tags TEXT NOT NULL DEFAULT '[]',
+                    type TEXT NOT NULL DEFAULT 'fact',
+                    importance INTEGER NOT NULL DEFAULT 5,
+                    retrieval_count INTEGER NOT NULL DEFAULT 0,
+                    last_accessed TEXT,
+                    supersedes INTEGER,
+                    journal_file TEXT,
+                    date TEXT NOT NULL,
+                    status TEXT,
+                    confidence TEXT,
+                    source TEXT,
+                    last_confirmed TEXT,
+                    time_sensitive INTEGER,
+                    valid_until TEXT,
+                    embedding BLOB
+                )
+                """
+            )
+            conn.execute(
+                "INSERT INTO journal_entries "
+                "(id, author, title, entry_type, content, why_it_mattered, search_summary, "
+                "summary_needs_review, tags, importance, pinned, resolved, date) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "001", "Demo", "Piper note", "reflection",
+                    "Piper was mentioned as a cat.",
+                    "This matters for pet continuity.",
+                    "Piper is Lena's cat.",
+                    0,
+                    json.dumps(["piper"]),
+                    5, 0, None, "2026-04-01T00:00:00+00:00",
+                ),
+            )
+            conn.execute(
+                "INSERT INTO memories "
+                "(id, text, tags, type, importance, date, status, confidence, source, journal_file, embedding) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    42,
+                    "Old journal mirror",
+                    json.dumps(["journal", "piper"]),
+                    "journal",
+                    5,
+                    "2026-04-01T00:00:00+00:00",
+                    "current",
+                    "medium",
+                    "model_extracted",
+                    "entries/001.md",
+                    b"journal-embed",
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        api = PulseAPI(root)
+        updated = api.update_journal_entry("demo", "001", {
+            "content": "Piper is Lena's girl cat, not a boy.",
+            "search_summary": "Piper is Lena's female cat; never call her a boy.",
+            "tags": ["piper", "cat"],
+        })
+        assert updated["ok"] is True
+        with closing(sqlite3.connect(db_path)) as conn:
+            entry = conn.execute(
+                "SELECT content, search_summary, summary_needs_review, tags FROM journal_entries WHERE id = '001'"
+            ).fetchone()
+            assert entry[0] == "Piper is Lena's girl cat, not a boy."
+            assert "female cat" in entry[1]
+            assert entry[2] == 0
+            assert json.loads(entry[3]) == ["piper", "cat"]
+            mirror = conn.execute(
+                "SELECT text, tags, embedding FROM memories WHERE id = 42"
+            ).fetchone()
+            assert "Search summary:" in mirror[0]
+            assert "female cat" in mirror[0]
+            assert json.loads(mirror[1]) == ["journal", "piper", "cat"]
+            assert mirror[2] is None
+
+        assert api.restore_db_before_image("demo", updated["undo_stamp"])["ok"] is True
+        with closing(sqlite3.connect(db_path)) as conn:
+            entry = conn.execute(
+                "SELECT content, search_summary, tags FROM journal_entries WHERE id = '001'"
+            ).fetchone()
+            assert entry[0] == "Piper was mentioned as a cat."
+            assert entry[1] == "Piper is Lena's cat."
+            assert json.loads(entry[2]) == ["piper"]
+            mirror = conn.execute("SELECT text, embedding FROM memories WHERE id = 42").fetchone()
+            assert mirror[0] == "Old journal mirror"
+            assert mirror[1] == b"journal-embed"
+
+        deleted = api.delete_journal_entry("demo", "001")
+        assert deleted["ok"] is True
+        assert deleted["deleted_mirrors"] == 1
+        with closing(sqlite3.connect(db_path)) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM journal_entries").fetchone()[0] == 0
+            assert conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0] == 0
+        assert api.restore_db_before_image("demo", deleted["undo_stamp"])["ok"] is True
+        with closing(sqlite3.connect(db_path)) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM journal_entries").fetchone()[0] == 1
+            assert conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0] == 1
+
+        with closing(sqlite3.connect(db_path)) as conn:
+            conn.execute(
+                "INSERT INTO journal_entries "
+                "(id, author, title, entry_type, content, why_it_mattered, search_summary, "
+                "summary_needs_review, tags, importance, pinned, resolved, date) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "002", "Demo", "Missing mirror", "reflection",
+                    "Entry starts without a companion memory mirror.",
+                    "Undo should remove any mirror created by editing.",
+                    "Entry has no mirror yet.",
+                    0,
+                    json.dumps(["mirror"]),
+                    5, 0, None, "2026-04-02T00:00:00+00:00",
+                ),
+            )
+            conn.commit()
+
+        created = api.update_journal_entry("demo", "002", {
+            "search_summary": "This edit creates a missing journal mirror."
+        })
+        assert created["ok"] is True
+        with closing(sqlite3.connect(db_path)) as conn:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM memories WHERE type = 'journal' AND journal_file = 'entries/002.md'"
+            ).fetchone()[0] == 1
+        assert api.restore_db_before_image("demo", created["undo_stamp"])["ok"] is True
+        with closing(sqlite3.connect(db_path)) as conn:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM memories WHERE type = 'journal' AND journal_file = 'entries/002.md'"
+            ).fetchone()[0] == 0
 
 
 def test_gui_api_core_anchor_read_and_write():
@@ -738,7 +1018,9 @@ if __name__ == "__main__":
     test_gui_api_get_lantern_read_only()
     test_gui_api_lantern_update_and_dim_write_safely()
     test_gui_api_list_memories_read_only_with_history_views()
+    test_gui_api_memory_mutations_backup_restore_and_relink()
     test_gui_api_list_journal_entries_read_only_views()
+    test_gui_api_journal_mutations_update_mirror_and_restore()
     test_gui_api_core_anchor_read_and_write()
     test_gui_api_model_file_path_validation()
     test_gui_api_secrets_preserve_env_and_validate_keys()

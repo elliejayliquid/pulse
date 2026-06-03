@@ -25,6 +25,11 @@ import yaml
 
 from gui.backup import BackupManager
 from gui.config_editor import ConfigEditor
+from core.journal_mirror import (
+    journal_memory_display_text,
+    search_summary_is_thin,
+)
+from skills.journal import VALID_ENTRY_TYPES
 
 
 STATUS_STALE_AFTER_SECONDS = 120
@@ -80,6 +85,9 @@ PROVIDER_KEY_LABELS = {
 }
 
 SECRET_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]{1,80}$")
+MEMORY_STATUSES = {"current", "historical", "superseded", "archived"}
+MEMORY_CONFIDENCES = {"high", "medium", "low"}
+MEMORY_SOURCES = {"user_defined", "model_extracted", "imported", "system"}
 
 
 SKILL_ICONS = {
@@ -188,6 +196,13 @@ def _safe_rel(path: Path, root: Path) -> str:
         return str(path.relative_to(root))
     except ValueError:
         return str(path)
+
+
+def _connect_sqlite(db_path: Path) -> sqlite3.Connection:
+    """Open a GUI-side SQLite connection that waits briefly on writer locks."""
+    conn = sqlite3.connect(str(db_path), timeout=10)
+    conn.execute("PRAGMA busy_timeout = 10000")
+    return conn
 
 
 class PulseAPI:
@@ -307,6 +322,56 @@ class PulseAPI:
             return self.backups.restore(persona, backups[0]["path"])
         except (FileNotFoundError, ValueError, OSError) as e:
             return {"ok": False, "error": str(e)}
+
+    def restore_db_before_image(self, persona: str, stamp: str) -> dict:
+        valid = self._validate_persona_for_db_write(persona)
+        if not valid["ok"]:
+            return valid
+        if not re.fullmatch(r"\d{8}_\d{6}(?:_\d{6})?(?:_\d{2})?", str(stamp or "")):
+            return {"ok": False, "error": "Invalid undo stamp."}
+
+        backup_root = (self.root / "gui_data" / "db_backups" / persona).resolve()
+        backup_dir = (backup_root / stamp).resolve()
+        try:
+            backup_dir.relative_to(backup_root)
+        except ValueError:
+            return {"ok": False, "error": "Invalid undo path."}
+        if not backup_dir.is_dir():
+            return {"ok": False, "error": "Undo snapshot not found."}
+
+        files = sorted(backup_dir.glob("*.json"))
+        if not files:
+            return {"ok": False, "error": "Undo snapshot is empty."}
+
+        db_path = self._persona_database_path(persona)
+        if not db_path.exists():
+            return {"ok": False, "error": "Persona database not found."}
+
+        restored = 0
+        try:
+            with closing(_connect_sqlite(db_path)) as conn:
+                conn.row_factory = sqlite3.Row
+                with conn:
+                    for file in files:
+                        payload = json.loads(file.read_text(encoding="utf-8"))
+                        if payload.get("persona") != persona:
+                            raise ValueError("Undo snapshot belongs to another persona.")
+                        table = str(payload.get("table") or "")
+                        delete_where = self._json_restore_db_value(payload.get("delete_where"))
+                        if delete_where:
+                            restored += self._delete_table_rows_for_undo(conn, table, delete_where)
+                        before = self._json_restore_db_value(payload.get("before"))
+                        restored += self._restore_table_before_image(conn, table, before)
+        except (sqlite3.Error, OSError, ValueError, json.JSONDecodeError) as e:
+            return {"ok": False, "error": f"Could not restore undo snapshot: {e}"}
+
+        return {
+            "ok": True,
+            "changed": True,
+            "restored": restored,
+            "stamp": stamp,
+            "running": self._persona_is_running(persona),
+        }
 
     # File pickers
 
@@ -763,7 +828,7 @@ class PulseAPI:
             return self._empty_memory_page(persona, view, kind, page, page_size, db_path)
 
         try:
-            with closing(sqlite3.connect(str(db_path))) as conn:
+            with closing(_connect_sqlite(db_path)) as conn:
                 conn.row_factory = sqlite3.Row
                 columns = self._table_columns(conn, "memories")
                 if not columns:
@@ -815,7 +880,7 @@ class PulseAPI:
             return {"ok": False, "error": "Memory database not found."}
 
         try:
-            with closing(sqlite3.connect(str(db_path))) as conn:
+            with closing(_connect_sqlite(db_path)) as conn:
                 conn.row_factory = sqlite3.Row
                 columns = self._table_columns(conn, "memories")
                 if not columns:
@@ -864,6 +929,148 @@ class PulseAPI:
             "db_path": _safe_rel(db_path, self.root),
         }
 
+    def update_memory(self, persona: str, memory_id: int, changes: dict) -> dict:
+        valid = self._validate_persona_for_db_write(persona)
+        if not valid["ok"]:
+            return valid
+        try:
+            memory_id = int(memory_id)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "Invalid memory ID."}
+
+        db_path = self._persona_database_path(persona)
+        if not db_path.exists():
+            return {"ok": False, "error": "Memory database not found."}
+
+        try:
+            with closing(_connect_sqlite(db_path)) as conn:
+                conn.row_factory = sqlite3.Row
+                row = conn.execute("SELECT * FROM memories WHERE id = ?", (memory_id,)).fetchone()
+                if not row:
+                    return {"ok": False, "error": f"Memory #{memory_id} not found."}
+                before = dict(row)
+                if before.get("type") == "journal":
+                    return {
+                        "ok": False,
+                        "error": "Journal memories are mirrors. Edit the linked journal entry instead.",
+                    }
+
+                cleaned, text_changed = self._clean_memory_update(changes or {}, before)
+                if not cleaned:
+                    return {"ok": True, "changed": False, "memory": self.get_memory_detail(persona, memory_id)}
+
+                stamp = self._write_db_before_image(persona, "memory-update", "memories", before)
+                assignments = [f"{key} = ?" for key in cleaned]
+                values = list(cleaned.values())
+                if text_changed:
+                    assignments.append("embedding = NULL")
+                values.append(memory_id)
+                with conn:
+                    conn.execute(
+                        f"UPDATE memories SET {', '.join(assignments)} WHERE id = ?",
+                        values,
+                    )
+        except (sqlite3.Error, OSError, ValueError) as e:
+            return {"ok": False, "error": f"Could not update memory: {e}"}
+
+        return {
+            "ok": True,
+            "changed": True,
+            "undo_stamp": stamp,
+            "memory": self.get_memory_detail(persona, memory_id),
+            "running": self._persona_is_running(persona),
+        }
+
+    def delete_memory(self, persona: str, memory_id: int) -> dict:
+        valid = self._validate_persona_for_db_write(persona)
+        if not valid["ok"]:
+            return valid
+        try:
+            memory_id = int(memory_id)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "Invalid memory ID."}
+
+        db_path = self._persona_database_path(persona)
+        if not db_path.exists():
+            return {"ok": False, "error": "Memory database not found."}
+
+        try:
+            with closing(_connect_sqlite(db_path)) as conn:
+                conn.row_factory = sqlite3.Row
+                row = conn.execute("SELECT * FROM memories WHERE id = ?", (memory_id,)).fetchone()
+                if not row:
+                    return {"ok": False, "error": f"Memory #{memory_id} not found."}
+                deleted = dict(row)
+                if deleted.get("type") == "journal":
+                    return {
+                        "ok": False,
+                        "error": "Journal memories are mirrors. Delete the linked journal entry instead.",
+                    }
+                children = [
+                    dict(child)
+                    for child in conn.execute(
+                        "SELECT * FROM memories WHERE supersedes = ?",
+                        (memory_id,),
+                    ).fetchall()
+                ]
+                stamp = self._write_db_before_image(
+                    persona,
+                    "memory-delete",
+                    "memories",
+                    [deleted] + children,
+                )
+                with conn:
+                    conn.execute(
+                        "UPDATE memories SET supersedes = ? WHERE supersedes = ?",
+                        (deleted.get("supersedes"), memory_id),
+                    )
+                    conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
+        except (sqlite3.Error, OSError, ValueError) as e:
+            return {"ok": False, "error": f"Could not delete memory: {e}"}
+
+        return {
+            "ok": True,
+            "changed": True,
+            "undo_stamp": stamp,
+            "deleted_id": memory_id,
+            "relinked": len(children),
+            "running": self._persona_is_running(persona),
+        }
+
+    def delete_all_memories(self, persona: str, include_journal: bool = False) -> dict:
+        valid = self._validate_persona_for_db_write(persona)
+        if not valid["ok"]:
+            return valid
+        db_path = self._persona_database_path(persona)
+        if not db_path.exists():
+            return {"ok": True, "changed": False, "deleted": 0}
+
+        try:
+            with closing(_connect_sqlite(db_path)) as conn:
+                conn.row_factory = sqlite3.Row
+                where = "" if include_journal else "WHERE type != 'journal'"
+                rows = [dict(row) for row in conn.execute(f"SELECT * FROM memories {where}").fetchall()]
+                if not rows:
+                    return {"ok": True, "changed": False, "deleted": 0}
+                stamp = self._write_db_before_image(
+                    persona,
+                    "memory-delete-all",
+                    "memories",
+                    rows,
+                )
+                with conn:
+                    conn.execute(f"DELETE FROM memories {where}")
+        except (sqlite3.Error, OSError, ValueError) as e:
+            return {"ok": False, "error": f"Could not delete memories: {e}"}
+
+        return {
+            "ok": True,
+            "changed": True,
+            "undo_stamp": stamp,
+            "deleted": len(rows),
+            "running": self._persona_is_running(persona),
+        }
+
     def list_journal_entries(self, persona: str, view: str = "active",
                              entry_type: str = "all", page: int = 1,
                              page_size: int = 25) -> dict:
@@ -888,7 +1095,7 @@ class PulseAPI:
             return self._empty_journal_page(persona, view, entry_type, page, page_size, db_path)
 
         try:
-            with closing(sqlite3.connect(str(db_path))) as conn:
+            with closing(_connect_sqlite(db_path)) as conn:
                 conn.row_factory = sqlite3.Row
                 columns = self._table_columns(conn, "journal_entries")
                 if not columns:
@@ -934,7 +1141,7 @@ class PulseAPI:
             return {"ok": False, "error": "Journal database not found."}
 
         try:
-            with closing(sqlite3.connect(str(db_path))) as conn:
+            with closing(_connect_sqlite(db_path)) as conn:
                 conn.row_factory = sqlite3.Row
                 columns = self._table_columns(conn, "journal_entries")
                 if not columns:
@@ -956,6 +1163,193 @@ class PulseAPI:
             "db_path": _safe_rel(db_path, self.root),
         }
 
+    def update_journal_entry(self, persona: str, entry_id: str, changes: dict) -> dict:
+        valid = self._validate_persona_for_db_write(persona)
+        if not valid["ok"]:
+            return valid
+        entry_id = str(entry_id or "").strip()
+        if not entry_id or entry_id.startswith("_"):
+            return {"ok": False, "error": "Choose a transient journal entry."}
+        db_path = self._persona_database_path(persona)
+        if not db_path.exists():
+            return {"ok": False, "error": "Journal database not found."}
+
+        try:
+            with closing(_connect_sqlite(db_path)) as conn:
+                conn.row_factory = sqlite3.Row
+                entry_row = conn.execute(
+                    "SELECT * FROM journal_entries WHERE id = ?",
+                    (entry_id,),
+                ).fetchone()
+                if not entry_row:
+                    return {"ok": False, "error": f"Journal entry {entry_id} not found."}
+                before_entry = dict(entry_row)
+                cleaned, mirror_stale = self._clean_journal_update(changes or {}, before_entry)
+                if not cleaned:
+                    return {"ok": True, "changed": False, "entry": self.get_journal_entry(persona, entry_id)}
+
+                journal_file = f"entries/{entry_id}.md"
+                before_mirrors = [
+                    dict(row)
+                    for row in conn.execute(
+                        "SELECT * FROM memories WHERE type = 'journal' AND journal_file = ?",
+                        (journal_file,),
+                    ).fetchall()
+                ]
+                stamp = self._write_db_before_image(
+                    persona,
+                    "journal-update-entry",
+                    "journal_entries",
+                    before_entry,
+                )
+                self._write_db_before_image(
+                    persona,
+                    "journal-update-memory",
+                    "memories",
+                    before_mirrors,
+                    stamp=stamp,
+                    delete_where={"type": "journal", "journal_file": journal_file} if not before_mirrors else None,
+                )
+
+                assignments = [f"{key} = ?" for key in cleaned]
+                values = list(cleaned.values())
+                values.append(entry_id)
+                with conn:
+                    conn.execute(
+                        f"UPDATE journal_entries SET {', '.join(assignments)} WHERE id = ?",
+                        values,
+                    )
+                    updated_entry = dict(before_entry)
+                    updated_entry.update(cleaned)
+                    if mirror_stale:
+                        self._upsert_journal_mirror(conn, updated_entry)
+        except (sqlite3.Error, OSError, ValueError) as e:
+            return {"ok": False, "error": f"Could not update journal entry: {e}"}
+
+        return {
+            "ok": True,
+            "changed": True,
+            "undo_stamp": stamp,
+            "entry": self.get_journal_entry(persona, entry_id),
+            "running": self._persona_is_running(persona),
+        }
+
+    def delete_journal_entry(self, persona: str, entry_id: str) -> dict:
+        valid = self._validate_persona_for_db_write(persona)
+        if not valid["ok"]:
+            return valid
+        entry_id = str(entry_id or "").strip()
+        if not entry_id or entry_id.startswith("_"):
+            return {"ok": False, "error": "Choose a transient journal entry."}
+        db_path = self._persona_database_path(persona)
+        if not db_path.exists():
+            return {"ok": False, "error": "Journal database not found."}
+
+        try:
+            with closing(_connect_sqlite(db_path)) as conn:
+                conn.row_factory = sqlite3.Row
+                entry_row = conn.execute(
+                    "SELECT * FROM journal_entries WHERE id = ?",
+                    (entry_id,),
+                ).fetchone()
+                if not entry_row:
+                    return {"ok": False, "error": f"Journal entry {entry_id} not found."}
+                before_entry = dict(entry_row)
+                journal_file = f"entries/{entry_id}.md"
+                before_mirrors = [
+                    dict(row)
+                    for row in conn.execute(
+                        "SELECT * FROM memories WHERE type = 'journal' AND journal_file = ?",
+                        (journal_file,),
+                    ).fetchall()
+                ]
+                stamp = self._write_db_before_image(
+                    persona,
+                    "journal-delete-entry",
+                    "journal_entries",
+                    before_entry,
+                )
+                self._write_db_before_image(
+                    persona,
+                    "journal-delete-memory",
+                    "memories",
+                    before_mirrors,
+                    stamp=stamp,
+                )
+                with conn:
+                    conn.execute("DELETE FROM journal_entries WHERE id = ?", (entry_id,))
+                    conn.execute(
+                        "DELETE FROM memories WHERE type = 'journal' AND journal_file = ?",
+                        (journal_file,),
+                    )
+        except (sqlite3.Error, OSError, ValueError) as e:
+            return {"ok": False, "error": f"Could not delete journal entry: {e}"}
+
+        return {
+            "ok": True,
+            "changed": True,
+            "undo_stamp": stamp,
+            "deleted_id": entry_id,
+            "deleted_mirrors": len(before_mirrors),
+            "running": self._persona_is_running(persona),
+        }
+
+    def delete_all_journal_entries(self, persona: str) -> dict:
+        valid = self._validate_persona_for_db_write(persona)
+        if not valid["ok"]:
+            return valid
+        db_path = self._persona_database_path(persona)
+        if not db_path.exists():
+            return {"ok": True, "changed": False, "deleted": 0}
+
+        try:
+            with closing(_connect_sqlite(db_path)) as conn:
+                conn.row_factory = sqlite3.Row
+                entries = [dict(row) for row in conn.execute("SELECT * FROM journal_entries").fetchall()]
+                if not entries:
+                    return {"ok": True, "changed": False, "deleted": 0}
+                journal_files = [f"entries/{row['id']}.md" for row in entries]
+                placeholders = ", ".join("?" for _ in journal_files)
+                mirrors = [
+                    dict(row)
+                    for row in conn.execute(
+                        "SELECT * FROM memories WHERE type = 'journal' "
+                        f"AND journal_file IN ({placeholders})",
+                        tuple(journal_files),
+                    ).fetchall()
+                ]
+                stamp = self._write_db_before_image(
+                    persona,
+                    "journal-delete-all-entries",
+                    "journal_entries",
+                    entries,
+                )
+                self._write_db_before_image(
+                    persona,
+                    "journal-delete-all-memories",
+                    "memories",
+                    mirrors,
+                    stamp=stamp,
+                )
+                with conn:
+                    conn.execute("DELETE FROM journal_entries")
+                    conn.execute(
+                        "DELETE FROM memories WHERE type = 'journal' "
+                        f"AND journal_file IN ({placeholders})",
+                        tuple(journal_files),
+                    )
+        except (sqlite3.Error, OSError, ValueError) as e:
+            return {"ok": False, "error": f"Could not delete journal entries: {e}"}
+
+        return {
+            "ok": True,
+            "changed": True,
+            "undo_stamp": stamp,
+            "deleted": len(entries),
+            "deleted_mirrors": len(mirrors),
+            "running": self._persona_is_running(persona),
+        }
+
     def get_core_anchor(self, persona: str, anchor_id: str) -> dict:
         if not persona or persona == "__base__":
             return {"ok": False, "error": "Choose a persona first."}
@@ -975,7 +1369,7 @@ class PulseAPI:
             }
 
         try:
-            with closing(sqlite3.connect(str(db_path))) as conn:
+            with closing(_connect_sqlite(db_path)) as conn:
                 conn.row_factory = sqlite3.Row
                 columns = self._table_columns(conn, "identity")
                 if not columns:
@@ -1078,7 +1472,7 @@ class PulseAPI:
         if not db_path.exists():
             return statuses
         try:
-            with closing(sqlite3.connect(str(db_path))) as conn:
+            with closing(_connect_sqlite(db_path)) as conn:
                 conn.row_factory = sqlite3.Row
                 columns = self._table_columns(conn, "identity")
                 if not columns:
@@ -1358,7 +1752,7 @@ class PulseAPI:
     def _upsert_lantern(self, db_path: Path, persona: str,
                         fields: dict[str, str], updated_at: str) -> None:
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        with closing(sqlite3.connect(str(db_path))) as conn:
+        with closing(_connect_sqlite(db_path)) as conn:
             self._ensure_lantern_table(conn)
             with conn:
                 conn.execute(
@@ -1401,7 +1795,7 @@ class PulseAPI:
     def _upsert_core_anchor(self, db_path: Path, anchor_id: str, title: str,
                             sections: dict[str, str], updated_at: str) -> None:
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        with closing(sqlite3.connect(str(db_path))) as conn:
+        with closing(_connect_sqlite(db_path)) as conn:
             self._ensure_identity_table(conn)
             with conn:
                 conn.execute(
@@ -1421,9 +1815,262 @@ class PulseAPI:
                     ),
                 )
 
+    def _clean_memory_update(self, changes: dict, before: dict) -> tuple[dict, bool]:
+        if not isinstance(changes, dict):
+            raise ValueError("Memory changes must be an object.")
+        allowed = {
+            "text", "tags", "importance", "status", "confidence", "source",
+            "time_sensitive", "valid_until",
+        }
+        unknown = set(changes) - allowed
+        if unknown:
+            raise ValueError(f"Unknown memory field: {sorted(unknown)[0]}")
+
+        cleaned: dict[str, Any] = {}
+        text_changed = False
+        if "text" in changes:
+            text = self._clean_db_text(changes.get("text"), "Memory text", max_len=50000)
+            if not text.strip():
+                raise ValueError("Memory text cannot be empty.")
+            if text != (before.get("text") or ""):
+                cleaned["text"] = text
+                text_changed = True
+
+        if "tags" in changes:
+            tags = self._clean_tag_list(changes.get("tags"))
+            before_tags = self._decode_tags(before.get("tags"))
+            if tags != before_tags:
+                cleaned["tags"] = json.dumps(tags, ensure_ascii=False)
+
+        if "importance" in changes:
+            importance = self._clean_int(changes.get("importance"), "Memory importance", 1, 10)
+            if importance != before.get("importance"):
+                cleaned["importance"] = importance
+
+        for field, allowed_values in (
+            ("status", MEMORY_STATUSES),
+            ("confidence", MEMORY_CONFIDENCES),
+            ("source", MEMORY_SOURCES),
+        ):
+            if field in changes:
+                value = str(changes.get(field) or "").strip()
+                if value not in allowed_values:
+                    raise ValueError(f"Invalid memory {field}: {value}")
+                if value != (before.get(field) or ""):
+                    cleaned[field] = value
+
+        if "time_sensitive" in changes:
+            value = int(bool(changes.get("time_sensitive")))
+            before_value = before.get("time_sensitive")
+            before_bool = int(bool(before_value)) if before_value is not None else None
+            if value != before_bool:
+                cleaned["time_sensitive"] = value
+
+        if "valid_until" in changes:
+            value = self._clean_optional_db_text(changes.get("valid_until"), "Valid until", max_len=80)
+            if value != (before.get("valid_until") or ""):
+                cleaned["valid_until"] = value or None
+
+        return cleaned, text_changed
+
+    def _clean_journal_update(self, changes: dict, before: dict) -> tuple[dict, bool]:
+        if not isinstance(changes, dict):
+            raise ValueError("Journal changes must be an object.")
+        allowed = {
+            "title", "entry_type", "content", "why_it_mattered",
+            "search_summary", "tags", "importance", "pinned", "resolved",
+        }
+        unknown = set(changes) - allowed
+        if unknown:
+            raise ValueError(f"Unknown journal field: {sorted(unknown)[0]}")
+
+        cleaned: dict[str, Any] = {}
+        mirror_stale = False
+        textual_changed = False
+
+        if "title" in changes:
+            title = self._clean_optional_db_text(changes.get("title"), "Journal title", max_len=500)
+            if title != (before.get("title") or ""):
+                cleaned["title"] = title or None
+                textual_changed = True
+
+        if "entry_type" in changes:
+            entry_type = str(changes.get("entry_type") or "").strip()
+            if entry_type not in VALID_ENTRY_TYPES:
+                raise ValueError(f"Invalid journal entry type: {entry_type}")
+            if entry_type != (before.get("entry_type") or ""):
+                cleaned["entry_type"] = entry_type
+                textual_changed = True
+
+        if "content" in changes:
+            content = self._clean_db_text(changes.get("content"), "Journal content", max_len=120000)
+            if not content.strip():
+                raise ValueError("Journal content cannot be empty.")
+            if content != (before.get("content") or ""):
+                cleaned["content"] = content
+                cleaned["summary_needs_review"] = 1
+                textual_changed = True
+                mirror_stale = True
+
+        if "why_it_mattered" in changes:
+            why = self._clean_optional_db_text(changes.get("why_it_mattered"), "Why it mattered", max_len=12000)
+            if why != (before.get("why_it_mattered") or ""):
+                cleaned["why_it_mattered"] = why or None
+                textual_changed = True
+
+        if "search_summary" in changes:
+            summary = self._clean_optional_db_text(changes.get("search_summary"), "Search summary", max_len=12000)
+            if summary != (before.get("search_summary") or ""):
+                cleaned["search_summary"] = summary or None
+                cleaned["summary_needs_review"] = int(search_summary_is_thin(summary))
+                textual_changed = True
+                mirror_stale = True
+
+        if "tags" in changes:
+            tags = self._clean_tag_list(changes.get("tags"))
+            before_tags = self._decode_tags(before.get("tags"))
+            if tags != before_tags:
+                cleaned["tags"] = json.dumps(tags, ensure_ascii=False)
+                textual_changed = True
+
+        if "importance" in changes:
+            importance = self._clean_int(changes.get("importance"), "Journal importance", 1, 10)
+            if importance != before.get("importance"):
+                cleaned["importance"] = importance
+
+        if "pinned" in changes:
+            pinned = int(bool(changes.get("pinned")))
+            if pinned != int(bool(before.get("pinned"))):
+                cleaned["pinned"] = pinned
+
+        if "resolved" in changes:
+            entry_type = cleaned.get("entry_type") or before.get("entry_type")
+            resolved = None
+            if entry_type in ("open_thread", "follow_up"):
+                resolved = int(bool(changes.get("resolved")))
+            if resolved != before.get("resolved"):
+                cleaned["resolved"] = resolved
+        elif "entry_type" in cleaned:
+            if cleaned["entry_type"] in ("open_thread", "follow_up"):
+                if before.get("resolved") is None:
+                    cleaned["resolved"] = 0
+            elif before.get("resolved") is not None:
+                cleaned["resolved"] = None
+
+        if textual_changed:
+            cleaned["date"] = datetime.now(timezone.utc).isoformat()
+            mirror_stale = True
+        elif cleaned:
+            cleaned["date"] = datetime.now(timezone.utc).isoformat()
+
+        return cleaned, mirror_stale
+
+    def _clean_db_text(self, value: Any, label: str, *, max_len: int) -> str:
+        if not isinstance(value, str):
+            raise ValueError(f"{label} must be text.")
+        if "\x00" in value:
+            raise ValueError(f"{label} contains an invalid character.")
+        value = value.replace("\r\n", "\n").replace("\r", "\n").strip()
+        if len(value) > max_len:
+            raise ValueError(f"{label} is too long.")
+        return value
+
+    def _clean_optional_db_text(self, value: Any, label: str, *, max_len: int) -> str:
+        if value is None:
+            return ""
+        return self._clean_db_text(value, label, max_len=max_len)
+
+    def _clean_tag_list(self, value: Any) -> list[str]:
+        if value is None:
+            return []
+        raw = value.split(",") if isinstance(value, str) else value
+        if not isinstance(raw, list):
+            raise ValueError("Tags must be a list or comma-separated text.")
+        tags = []
+        seen = set()
+        for item in raw:
+            tag = str(item or "").strip()
+            if not tag:
+                continue
+            if "\x00" in tag:
+                raise ValueError("Tag contains an invalid character.")
+            if len(tag) > 80:
+                raise ValueError("Tag is too long.")
+            key = tag.lower()
+            if key not in seen:
+                seen.add(key)
+                tags.append(tag)
+        if len(tags) > 50:
+            raise ValueError("Too many tags.")
+        return tags
+
+    def _clean_int(self, value: Any, label: str, minimum: int, maximum: int) -> int:
+        try:
+            number = int(value)
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"{label} must be a number.") from e
+        if number < minimum or number > maximum:
+            raise ValueError(f"{label} must be between {minimum} and {maximum}.")
+        return number
+
+    def _upsert_journal_mirror(self, conn: sqlite3.Connection,
+                               entry: dict) -> None:
+        entry_id = str(entry.get("id") or "")
+        journal_file = f"entries/{entry_id}.md"
+        tags = ["journal"] + self._decode_tags(entry.get("tags"))
+        display_text = journal_memory_display_text({
+            **entry,
+            "tags": self._decode_tags(entry.get("tags")),
+        })
+        now = entry.get("date") or datetime.now(timezone.utc).isoformat()
+        row = conn.execute(
+            "SELECT id FROM memories WHERE type = 'journal' AND journal_file = ? "
+            "ORDER BY id ASC LIMIT 1",
+            (journal_file,),
+        ).fetchone()
+        if row:
+            conn.execute(
+                "UPDATE memories SET text = ?, tags = ?, importance = ?, "
+                "embedding = ?, journal_file = ?, date = ?, status = ?, "
+                "confidence = ?, source = ? WHERE id = ?",
+                (
+                    display_text,
+                    json.dumps(tags, ensure_ascii=False),
+                    5,
+                    None,
+                    journal_file,
+                    now,
+                    "current",
+                    "medium",
+                    "model_extracted",
+                    row["id"],
+                ),
+            )
+            return
+
+        conn.execute(
+            "INSERT INTO memories "
+            "(text, tags, type, importance, embedding, journal_file, date, "
+            "status, confidence, source) "
+            "VALUES (?, ?, 'journal', ?, ?, ?, ?, ?, ?, ?)",
+            (
+                display_text,
+                json.dumps(tags, ensure_ascii=False),
+                5,
+                None,
+                journal_file,
+                now,
+                "current",
+                "medium",
+                "model_extracted",
+            ),
+        )
+
     def _write_db_before_image(self, persona: str, action: str,
-                               table: str, before: dict | None) -> None:
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+                               table: str, before: Any,
+                               stamp: str | None = None,
+                               delete_where: dict[str, Any] | None = None) -> str:
+        stamp = stamp or self._new_db_backup_stamp(persona)
         safe_action = re.sub(r"[^a-zA-Z0-9_-]+", "-", action).strip("-") or "db-edit"
         out_dir = self.root / "gui_data" / "db_backups" / persona / stamp
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -1432,12 +2079,92 @@ class PulseAPI:
             "action": action,
             "table": table,
             "created_at": datetime.now(timezone.utc).isoformat(),
-            "before": before,
+            "before": self._json_safe_db_value(before),
+            "delete_where": self._json_safe_db_value(delete_where),
         }
         (out_dir / f"{safe_action}.json").write_text(
             json.dumps(payload, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
+        return stamp
+
+    def _new_db_backup_stamp(self, persona: str) -> str:
+        base = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+        root = self.root / "gui_data" / "db_backups" / persona
+        stamp = base
+        counter = 2
+        while (root / stamp).exists():
+            stamp = f"{base}_{counter:02d}"
+            counter += 1
+        return stamp
+
+    def _json_safe_db_value(self, value: Any) -> Any:
+        if isinstance(value, (bytes, bytearray)):
+            return {"__pulse_bytes_b64": base64.b64encode(bytes(value)).decode("ascii")}
+        if isinstance(value, dict):
+            return {str(key): self._json_safe_db_value(val) for key, val in value.items()}
+        if isinstance(value, list):
+            return [self._json_safe_db_value(item) for item in value]
+        return value
+
+    def _json_restore_db_value(self, value: Any) -> Any:
+        if isinstance(value, dict):
+            if set(value) == {"__pulse_bytes_b64"}:
+                return base64.b64decode(value["__pulse_bytes_b64"].encode("ascii"))
+            return {key: self._json_restore_db_value(val) for key, val in value.items()}
+        if isinstance(value, list):
+            return [self._json_restore_db_value(item) for item in value]
+        return value
+
+    def _restore_table_before_image(self, conn: sqlite3.Connection,
+                                    table: str, before: Any) -> int:
+        allowed_tables = {"memories", "journal_entries", "resident_lanterns", "identity"}
+        if table not in allowed_tables:
+            raise ValueError(f"Unsupported undo table: {table}")
+        if before is None:
+            return 0
+
+        rows = before if isinstance(before, list) else [before]
+        table_columns = self._table_columns(conn, table)
+        restored = 0
+        for row in rows:
+            if not isinstance(row, dict):
+                raise ValueError("Undo row is malformed.")
+            if not row:
+                continue
+            columns = [column for column in row.keys() if column in table_columns]
+            if not columns:
+                continue
+            placeholders = ", ".join("?" for _ in columns)
+            names = ", ".join(f'"{column}"' for column in columns)
+            values = [row[column] for column in columns]
+            conn.execute(
+                f"INSERT OR REPLACE INTO {table} ({names}) VALUES ({placeholders})",
+                values,
+            )
+            restored += 1
+        return restored
+
+    def _delete_table_rows_for_undo(self, conn: sqlite3.Connection,
+                                    table: str, where: dict[str, Any]) -> int:
+        allowed_tables = {"memories", "journal_entries", "resident_lanterns", "identity"}
+        if table not in allowed_tables:
+            raise ValueError(f"Unsupported undo table: {table}")
+        if not isinstance(where, dict) or not where:
+            return 0
+        table_columns = self._table_columns(conn, table)
+        conditions = []
+        values = []
+        for column, value in where.items():
+            if column not in table_columns:
+                raise ValueError(f"Unsupported undo column: {column}")
+            conditions.append(f'"{column}" = ?')
+            values.append(value)
+        cur = conn.execute(
+            f"DELETE FROM {table} WHERE {' AND '.join(conditions)}",
+            values,
+        )
+        return cur.rowcount
 
     def _empty_memory_page(self, persona: str, view: str, kind: str, page: int,
                            page_size: int, db_path: Path) -> dict:
@@ -1584,7 +2311,7 @@ class PulseAPI:
             return rows
 
         try:
-            with closing(sqlite3.connect(str(db_path))) as conn:
+            with closing(_connect_sqlite(db_path)) as conn:
                 conn.row_factory = sqlite3.Row
                 if not self._table_columns(conn, "journal_entries"):
                     return rows
@@ -1768,7 +2495,7 @@ class PulseAPI:
     def _read_core_anchor_row(self, db_path: Path, anchor_id: str) -> dict | None:
         if not db_path.exists():
             return None
-        with closing(sqlite3.connect(str(db_path))) as conn:
+        with closing(_connect_sqlite(db_path)) as conn:
             conn.row_factory = sqlite3.Row
             columns = self._table_columns(conn, "identity")
             if not columns:
@@ -1784,7 +2511,7 @@ class PulseAPI:
         if not db_path.exists():
             return None
         try:
-            with closing(sqlite3.connect(str(db_path))) as conn:
+            with closing(_connect_sqlite(db_path)) as conn:
                 conn.row_factory = sqlite3.Row
                 row = conn.execute(
                     "SELECT * FROM resident_lanterns WHERE resident_id = ?",
