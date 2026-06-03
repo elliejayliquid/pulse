@@ -46,6 +46,8 @@ class PulseDatabase:
             "ALTER TABLE memories ADD COLUMN last_confirmed TEXT",
             "ALTER TABLE memories ADD COLUMN time_sensitive INTEGER",
             "ALTER TABLE memories ADD COLUMN valid_until TEXT",
+            "ALTER TABLE journal_entries ADD COLUMN search_summary TEXT",
+            "ALTER TABLE journal_entries ADD COLUMN summary_needs_review INTEGER NOT NULL DEFAULT 0",
         ]:
             try:
                 self.conn.execute(stmt)
@@ -263,6 +265,52 @@ class PulseDatabase:
             )
         self.conn.commit()
         return cur.lastrowid
+
+    def upsert_journal_memory(self, journal_file: str, text: str,
+                              tags: list[str] | None = None,
+                              importance: int = 5,
+                              embedding: Optional[bytes] = None,
+                              date: Optional[str] = None) -> int:
+        """Insert or update the searchable memory mirror for a journal entry."""
+        tags_json = json.dumps(tags or [])
+        row = self.conn.execute(
+            "SELECT id FROM memories WHERE type = 'journal' AND journal_file = ? "
+            "ORDER BY id ASC LIMIT 1",
+            (journal_file,),
+        ).fetchone()
+        if row:
+            memory_id = int(row["id"])
+            self.conn.execute(
+                "UPDATE memories SET text = ?, tags = ?, type = 'journal', "
+                "importance = ?, embedding = ?, journal_file = ?, date = ?, "
+                "status = ?, confidence = ?, source = ? WHERE id = ?",
+                (
+                    text,
+                    tags_json,
+                    importance,
+                    embedding,
+                    journal_file,
+                    date or datetime.now().isoformat(),
+                    "current",
+                    "medium",
+                    "model_extracted",
+                    memory_id,
+                ),
+            )
+            self.conn.commit()
+            return memory_id
+        return self.save_memory(
+            text=text,
+            tags=tags,
+            type="journal",
+            importance=importance,
+            embedding=embedding,
+            journal_file=journal_file,
+            date=date,
+            status="current",
+            confidence="medium",
+            source="model_extracted",
+        )
 
     def get_memory(self, memory_id: int) -> Optional[dict]:
         """Get a single memory by id."""
@@ -540,29 +588,34 @@ class PulseDatabase:
                            tags: list[str] | None = None,
                            importance: int = 5, pinned: bool = False,
                            resolved: Optional[bool] = None,
-                           date: Optional[str] = None) -> str:
+                           date: Optional[str] = None,
+                           search_summary: Optional[str] = None,
+                           summary_needs_review: bool = False) -> str:
         """Insert or replace a journal entry."""
         tags_json = json.dumps(tags or [])
         resolved_int = None if resolved is None else int(resolved)
+        review_int = int(bool(summary_needs_review))
         if date:
             self.conn.execute(
                 "INSERT OR REPLACE INTO journal_entries "
                 "(id, author, title, entry_type, content, why_it_mattered, "
-                "tags, importance, pinned, resolved, date) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "tags, importance, pinned, resolved, date, search_summary, "
+                "summary_needs_review) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (entry_id, author, title, entry_type, content,
                  why_it_mattered, tags_json, importance, int(pinned),
-                 resolved_int, date)
+                 resolved_int, date, search_summary, review_int)
             )
         else:
             self.conn.execute(
                 "INSERT OR REPLACE INTO journal_entries "
                 "(id, author, title, entry_type, content, why_it_mattered, "
-                "tags, importance, pinned, resolved) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "tags, importance, pinned, resolved, search_summary, "
+                "summary_needs_review) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (entry_id, author, title, entry_type, content,
                  why_it_mattered, tags_json, importance, int(pinned),
-                 resolved_int)
+                 resolved_int, search_summary, review_int)
             )
         self.conn.commit()
         return entry_id
@@ -579,9 +632,7 @@ class PulseDatabase:
             rows = self.conn.execute(sql, (limit,)).fetchall()
         result = []
         for row in rows:
-            d = dict(row)
-            d["tags"] = json.loads(d["tags"])
-            result.append(d)
+            result.append(self._row_to_journal_entry(row))
         return result
 
     def get_journal_entry(self, entry_id: str) -> Optional[dict]:
@@ -590,9 +641,7 @@ class PulseDatabase:
             "SELECT * FROM journal_entries WHERE id = ?", (entry_id,)
         ).fetchone()
         if row:
-            d = dict(row)
-            d["tags"] = json.loads(d["tags"])
-            return d
+            return self._row_to_journal_entry(row)
         return None
 
     def delete_journal_entry(self, entry_id: str) -> bool:
@@ -613,10 +662,16 @@ class PulseDatabase:
         ).fetchall()
         result = []
         for row in rows:
-            d = dict(row)
-            d["tags"] = json.loads(d["tags"])
-            result.append(d)
+            result.append(self._row_to_journal_entry(row))
         return result
+
+    def _row_to_journal_entry(self, row: sqlite3.Row) -> dict:
+        """Convert a journal row to a dict with decoded tags/bool metadata."""
+        d = dict(row)
+        d["tags"] = json.loads(d["tags"])
+        if d.get("summary_needs_review") is not None:
+            d["summary_needs_review"] = bool(d["summary_needs_review"])
+        return d
 
     # ── Identity ─────────────────────────────────────────────
 
@@ -922,6 +977,8 @@ CREATE TABLE IF NOT EXISTS journal_entries (
     entry_type       TEXT NOT NULL,
     content          TEXT NOT NULL,
     why_it_mattered  TEXT,
+    search_summary   TEXT,
+    summary_needs_review INTEGER NOT NULL DEFAULT 0,
     tags             TEXT NOT NULL DEFAULT '[]',
     importance       INTEGER NOT NULL DEFAULT 5,
     pinned           INTEGER NOT NULL DEFAULT 0,

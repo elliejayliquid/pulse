@@ -1488,8 +1488,8 @@ class PulseAPI:
     def _journal_select_sql(self, columns: set[str]) -> str:
         fields = [
             "id", "author", "title", "entry_type", "content",
-            "why_it_mattered", "tags", "importance", "pinned",
-            "resolved", "date",
+            "why_it_mattered", "search_summary", "summary_needs_review",
+            "tags", "importance", "pinned", "resolved", "date",
         ]
         parts = [name if name in columns else f"NULL AS {name}" for name in fields]
         return ", ".join(parts)
@@ -1635,6 +1635,7 @@ class PulseAPI:
         age_hours = self._hours_since(date)
         resolved = row.get("resolved")
         pinned = row.get("pinned")
+        review = row.get("summary_needs_review")
         status = "resolved" if resolved else "active"
         if resolved is None and (row.get("entry_type") or "") not in ("open_thread", "follow_up"):
             status = "reference"
@@ -1647,6 +1648,8 @@ class PulseAPI:
             "preview": content[:260] + ("..." if len(content) > 260 else ""),
             "why_it_mattered": why if detail else "",
             "why_preview": why[:180] + ("..." if len(why) > 180 else ""),
+            "search_summary": row.get("search_summary") if detail else "",
+            "summary_needs_review": bool(review) if review is not None else False,
             "tags": self._decode_tags(row.get("tags")),
             "importance": row.get("importance"),
             "pinned": bool(pinned) if pinned is not None else False,

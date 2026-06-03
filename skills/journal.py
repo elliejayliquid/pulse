@@ -240,6 +240,17 @@ class JournalSkill(BaseSkill):
                                     "the entry probably isn't worth saving."
                                 ),
                             },
+                            "search_summary": {
+                                "type": "string",
+                                "description": (
+                                    "Factual key points for retrieval, 2-5 bullets or a short "
+                                    "paragraph. This is what future-you would search for. "
+                                    "Different from why_it_mattered: e.g. why_it_mattered="
+                                    "'I want to follow up gently tomorrow'; search_summary="
+                                    "'Lena felt overloaded after work; yoga was historical "
+                                    "context, not current; verify mood before assuming.'"
+                                ),
+                            },
                             "tags": {
                                 "type": "string",
                                 "description": "Comma-separated tags for searchability (optional)",
@@ -264,7 +275,7 @@ class JournalSkill(BaseSkill):
                                 ),
                             },
                         },
-                        "required": ["content", "entry_type", "why_it_mattered"],
+                        "required": ["content", "entry_type", "why_it_mattered", "search_summary"],
                     },
                 },
             },
@@ -374,6 +385,14 @@ class JournalSkill(BaseSkill):
                                 "type": "boolean",
                                 "description": "Mark an open_thread or follow_up as resolved (optional)",
                             },
+                            "search_summary": {
+                                "type": "string",
+                                "description": (
+                                    "For transient entries: refreshed factual key points for "
+                                    "retrieval. Provide this whenever content changes so the "
+                                    "search mirror stays accurate. Ignored for pinned entries."
+                                ),
+                            },
                         },
                         "required": ["entry_id", "content"],
                     },
@@ -425,6 +444,7 @@ class JournalSkill(BaseSkill):
                 content=arguments.get("content", ""),
                 entry_type=arguments.get("entry_type", "reflection"),
                 why_it_mattered=arguments.get("why_it_mattered", ""),
+                search_summary=arguments.get("search_summary", ""),
                 tags=arguments.get("tags", ""),
                 force=arguments.get("force", False),
                 pinned=arguments.get("pinned", False),
@@ -457,6 +477,7 @@ class JournalSkill(BaseSkill):
                 content=arguments.get("content", ""),
                 section=arguments.get("section"),
                 resolved=arguments.get("resolved"),
+                search_summary=arguments.get("search_summary"),
             )
         return f"Unknown tool: {tool_name}"
 
@@ -489,7 +510,8 @@ class JournalSkill(BaseSkill):
         return f"{(max(ids) + 1 if ids else 1):03d}"
 
     def _write_entry(self, content: str, entry_type: str,
-                     why_it_mattered: str = "", tags: str = "",
+                     why_it_mattered: str = "", search_summary: str = "",
+                     tags: str = "",
                      force: bool = False, pinned: bool = False) -> str:
         """Create a new transient journal entry."""
         if not content.strip():
@@ -528,6 +550,8 @@ class JournalSkill(BaseSkill):
         entry_id = self._get_next_entry_id()
         now = datetime.now().isoformat()
         tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
+        clean_summary = search_summary.strip()
+        summary_needs_review = self._search_summary_is_thin(clean_summary)
 
         # Derive a short title from the first non-empty line
         first_line = next(
@@ -547,6 +571,8 @@ class JournalSkill(BaseSkill):
                 entry_type=entry_type,
                 content=content.strip(),
                 why_it_mattered=why_it_mattered.strip(),
+                search_summary=clean_summary,
+                summary_needs_review=summary_needs_review,
                 tags=tag_list,
                 importance=5,
                 pinned=pinned,
@@ -559,6 +585,8 @@ class JournalSkill(BaseSkill):
                     "date": now, "author": self._author_name, "title": title,
                     "entry_type": entry_type,
                     "why_it_mattered": why_it_mattered.strip(),
+                    "search_summary": clean_summary,
+                    "summary_needs_review": summary_needs_review,
                     "tags": tag_list, "importance": 5,
                     "pinned": pinned, "resolved": resolved,
                 }
@@ -570,7 +598,17 @@ class JournalSkill(BaseSkill):
                 except IOError:
                     logger.warning(f"Failed to mirror entry {entry_id} to shared dir")
             # Create companion memory for search
-            self._create_companion_memory(entry_id, content.strip(), tag_list, now)
+            self._create_companion_memory({
+                "id": entry_id,
+                "title": title,
+                "entry_type": entry_type,
+                "content": content.strip(),
+                "why_it_mattered": why_it_mattered.strip(),
+                "search_summary": clean_summary,
+                "summary_needs_review": summary_needs_review,
+                "tags": tag_list,
+                "date": now,
+            })
             self._generate_latest()
             logger.info(f"Journal entry written to DB: {entry_id} ({entry_type}) — {content[:50]}...")
             return f"Journal entry saved (ID: {entry_id}, type: {entry_type}): '{content[:80]}'"
@@ -582,6 +620,8 @@ class JournalSkill(BaseSkill):
             "title": title,
             "entry_type": entry_type,
             "why_it_mattered": why_it_mattered.strip(),
+            "search_summary": clean_summary,
+            "summary_needs_review": summary_needs_review,
             "tags": tag_list,
             "importance": 5,
             "pinned": pinned,
@@ -594,7 +634,17 @@ class JournalSkill(BaseSkill):
             logger.error(f"Failed to write journal entry: {e}")
             return f"Failed to write journal entry: {e}"
 
-        self._create_companion_memory(entry_id, content.strip(), tag_list, now)
+        self._create_companion_memory({
+            "id": entry_id,
+            "title": title,
+            "entry_type": entry_type,
+            "content": content.strip(),
+            "why_it_mattered": why_it_mattered.strip(),
+            "search_summary": clean_summary,
+            "summary_needs_review": summary_needs_review,
+            "tags": tag_list,
+            "date": now,
+        })
         self._generate_latest()
         logger.info(f"Journal entry written: {entry_id} ({entry_type}) — {content[:50]}...")
         return f"Journal entry saved (ID: {entry_id}, type: {entry_type}): '{content[:80]}'"
@@ -658,38 +708,40 @@ class JournalSkill(BaseSkill):
 
         return best
 
-    def _create_companion_memory(self, entry_id: str, content: str,
-                                  tags: list[str], date: str):
+    def _create_companion_memory(self, entry: dict):
         """Create a companion memory for journal search.
 
         DB mode: inserts into the memories table (via shared DB).
         File mode: writes memory_NNN.json to the memory directory.
         """
+        entry_id = str(entry.get("id") or "")
+        date = entry.get("date") or datetime.now().isoformat()
+        tags = entry.get("tags") or []
+        embedded_text = self._journal_memory_embedded_text(entry)
+        display_text = self._journal_memory_display_text(entry)
         model = _get_embedding_model()
-        embedding_vec = model.encode(content) if model else None
-        preview = content[:500] + ("..." if len(content) > 500 else "")
+        embedding_vec = model.encode(embedded_text) if model else None
         journal_file = f"entries/{entry_id}.md"
 
         db = self._shared_db or self._db
         if db:
             embedding_blob = _embedding_to_blob(embedding_vec)
-            mem_id = db.save_memory(
-                text=preview,
+            mem_id = db.upsert_journal_memory(
+                journal_file=journal_file,
+                text=display_text,
                 tags=["journal"] + tags,
-                type="journal",
                 importance=5,
                 embedding=embedding_blob,
-                journal_file=journal_file,
                 date=date,
             )
-            logger.info(f"Companion memory created in DB (ID: {mem_id}) -> {journal_file}")
+            logger.info(f"Companion memory upserted in DB (ID: {mem_id}) -> {journal_file}")
             return
 
         # File fallback
         embedding = embedding_vec.tolist() if embedding_vec is not None else []
         mem_id = f"{self._get_next_memory_id():03d}"
         memory = {
-            "id": mem_id, "text": preview,
+            "id": mem_id, "text": display_text,
             "tags": ["journal"] + tags, "type": "journal",
             "importance": 5, "retrieval_count": 0, "last_accessed": None,
             "date": date, "embedding": embedding,
@@ -703,6 +755,49 @@ class JournalSkill(BaseSkill):
             logger.info(f"Companion memory created: {mem_file.name} -> {journal_file}")
         except IOError as e:
             logger.warning(f"Failed to create companion memory: {e}")
+
+    def _journal_memory_embedded_text(self, entry: dict) -> str:
+        """Build clean semantic text for journal mirror embeddings."""
+        tags = entry.get("tags") or []
+        summary = str(entry.get("search_summary") or "").strip()
+        if self._search_summary_is_thin(summary):
+            summary = self._deterministic_journal_summary(entry)
+        parts = [
+            str(entry.get("title") or "").strip(),
+            summary,
+            str(entry.get("why_it_mattered") or "").strip(),
+            " ".join(str(tag) for tag in tags if tag),
+        ]
+        return "\n".join(part for part in parts if part).strip()
+
+    def _journal_memory_display_text(self, entry: dict) -> str:
+        """Build recall text for the journal mirror memory."""
+        entry_id = str(entry.get("id") or "?")
+        entry_type = str(entry.get("entry_type") or "entry")
+        title = str(entry.get("title") or entry_type.replace("_", " ").title()).strip()
+        why = str(entry.get("why_it_mattered") or "").strip()
+        tags = entry.get("tags") or []
+        summary = str(entry.get("search_summary") or "").strip()
+        if self._search_summary_is_thin(summary):
+            summary = self._deterministic_journal_summary(entry)
+
+        parts = [f"Journal entry {entry_id} ({entry_type})"]
+        if title:
+            parts.append(f"Title: {title}")
+        if why:
+            parts.append(f"Why it mattered: {why}")
+        if summary:
+            parts.append(f"Search summary:\n{summary}")
+        if tags:
+            parts.append(f"Tags: {', '.join(str(tag) for tag in tags if tag)}")
+        return "\n".join(parts)
+
+    def _deterministic_journal_summary(self, entry: dict) -> str:
+        content = str(entry.get("content") or "").strip()
+        return content[:500] + ("..." if len(content) > 500 else "")
+
+    def _search_summary_is_thin(self, summary: str) -> bool:
+        return len(summary.strip().split()) < 6
 
     # ── Read / Search ────────────────────────────────────────
 
@@ -747,11 +842,18 @@ class JournalSkill(BaseSkill):
 
         why = entry.get("why_it_mattered", "")
         why_str = f"\nWhy it mattered: {why}" if why else ""
+        summary = entry.get("search_summary", "")
+        summary_str = f"\nSearch summary: {summary}" if summary else ""
+        review_str = (
+            "\nSearch summary needs review."
+            if entry.get("summary_needs_review")
+            else ""
+        )
 
         return (
             f"Entry {entry.get('id', '?')} ({entry.get('entry_type', '?')}{resolved_tag})\n"
             f"Date: {date_str}\n"
-            f"{tags_str}{why_str}\n\n"
+            f"{tags_str}{why_str}{summary_str}{review_str}\n\n"
             f"{entry.get('content', '')}"
         )
 
@@ -1204,7 +1306,7 @@ class JournalSkill(BaseSkill):
         return f"Journal entry '{entry_id}' deleted.{reason_str}"
 
     def _update_entry(self, entry_id: str, content: str, section: str = None,
-                      resolved: bool = None) -> str:
+                      resolved: bool = None, search_summary: str | None = None) -> str:
         """Update an existing entry (pinned or transient)."""
         if not entry_id:
             return "Entry ID is required."
@@ -1216,7 +1318,7 @@ class JournalSkill(BaseSkill):
             return self._update_pinned(entry_id, content, section, now)
 
         # Transient entry update
-        return self._update_transient(entry_id, content, resolved, now)
+        return self._update_transient(entry_id, content, resolved, now, search_summary)
 
     def _update_pinned(self, entry_id: str, content: str, section: str | None,
                        now: str) -> str:
@@ -1287,13 +1389,25 @@ class JournalSkill(BaseSkill):
             )
 
     def _update_transient(self, entry_id: str, content: str, resolved: bool | None,
-                          now: str) -> str:
+                          now: str, search_summary: str | None = None) -> str:
         """Update a transient journal entry."""
         db = self._shared_db or self._db
         if db:
             entry = db.get_journal_entry(entry_id)
             if entry:
                 new_content = content.strip() if content.strip() else entry["content"]
+                content_changed = bool(content.strip()) and new_content != entry.get("content", "")
+                summary_provided = search_summary is not None and bool(search_summary.strip())
+                new_summary = (
+                    search_summary.strip()
+                    if summary_provided
+                    else (entry.get("search_summary") or "")
+                )
+                summary_needs_review = bool(entry.get("summary_needs_review", False))
+                if summary_provided:
+                    summary_needs_review = self._search_summary_is_thin(new_summary)
+                elif content_changed:
+                    summary_needs_review = True
                 new_resolved = entry.get("resolved")
                 if resolved is not None and new_resolved is not None:
                     new_resolved = resolved
@@ -1305,6 +1419,8 @@ class JournalSkill(BaseSkill):
                     entry_type=entry["entry_type"],
                     content=new_content,
                     why_it_mattered=entry.get("why_it_mattered"),
+                    search_summary=new_summary,
+                    summary_needs_review=summary_needs_review,
                     tags=entry.get("tags", []),
                     importance=entry.get("importance", 5),
                     pinned=bool(entry.get("pinned", False)),
@@ -1320,6 +1436,8 @@ class JournalSkill(BaseSkill):
                         "title": entry.get("title"),
                         "entry_type": entry["entry_type"],
                         "why_it_mattered": entry.get("why_it_mattered"),
+                        "search_summary": new_summary,
+                        "summary_needs_review": summary_needs_review,
                         "tags": entry.get("tags", []),
                         "importance": entry.get("importance", 5),
                         "pinned": bool(entry.get("pinned", False)),
@@ -1333,8 +1451,19 @@ class JournalSkill(BaseSkill):
                     except IOError:
                         logger.warning(f"Failed to mirror update {entry_id} to shared dir")
 
-                if content.strip():
-                    self._update_companion_memory(entry_id, content.strip(), now)
+                mirror_needs_update = summary_provided or self._search_summary_is_thin(new_summary)
+                if content.strip() and summary_needs_review:
+                    mirror_needs_update = mirror_needs_update or not new_summary.strip()
+                if mirror_needs_update:
+                    self._update_companion_memory({
+                        **entry,
+                        "id": entry_id,
+                        "content": new_content,
+                        "search_summary": new_summary,
+                        "summary_needs_review": summary_needs_review,
+                        "resolved": new_resolved,
+                        "date": now,
+                    })
 
                 self._generate_latest()
                 logger.info(f"Updated journal entry in DB: {entry_id}")
@@ -1349,12 +1478,21 @@ class JournalSkill(BaseSkill):
         if not entry:
             return f"Failed to parse journal entry '{entry_id}'."
 
-        if content.strip():
-            entry["content"] = content.strip()
+        old_content = entry.get("content", "")
+        new_content = content.strip() if content.strip() else old_content
+        content_changed = content.strip() and new_content != old_content
+        if content_changed:
+            entry["content"] = new_content
+            if search_summary is None or not search_summary.strip():
+                entry["summary_needs_review"] = True
+        if search_summary is not None and search_summary.strip():
+            entry["search_summary"] = search_summary.strip()
+            entry["summary_needs_review"] = self._search_summary_is_thin(search_summary)
         if resolved is not None and entry.get("resolved") is not None:
             entry["resolved"] = resolved
         entry["date"] = now
 
+        mirror_entry = {**entry, "id": entry_id}
         body = entry.pop("content", "")
         entry.pop("id", None)
         try:
@@ -1362,37 +1500,36 @@ class JournalSkill(BaseSkill):
         except IOError as e:
             return f"Failed to save: {e}"
 
-        if content.strip():
-            self._update_companion_memory(entry_id, content.strip(), now)
+        mirror_needs_update = (
+            (search_summary is not None and search_summary.strip())
+            or self._search_summary_is_thin(str(mirror_entry.get("search_summary") or ""))
+        )
+        if mirror_needs_update:
+            self._update_companion_memory(mirror_entry)
 
         self._generate_latest()
         logger.info(f"Updated journal entry: {entry_id}")
         return f"Journal entry {entry_id} updated: '{content[:80]}'"
 
-    def _update_companion_memory(self, entry_id: str, content: str, date: str):
+    def _update_companion_memory(self, entry: dict):
         """Update the companion memory for a journal entry."""
+        entry_id = str(entry.get("id") or "")
+        date = entry.get("date") or datetime.now().isoformat()
+        tags = entry.get("tags") or []
         journal_file = f"entries/{entry_id}.md"
         model = _get_embedding_model()
-        preview = content[:500] + ("..." if len(content) > 500 else "")
+        embedded_text = self._journal_memory_embedded_text(entry)
+        display_text = self._journal_memory_display_text(entry)
 
         db = self._shared_db or self._db
         if db:
-            # Find existing companion memory by journal_file
-            found_tags = ["journal"]
-            all_memories = db.get_all_memories(include_superseded=True)
-            for mem in all_memories:
-                if mem.get("type") == "journal" and mem.get("journal_file") == journal_file:
-                    found_tags = mem.get("tags", ["journal"])
-                    db.delete_memory(mem["id"])
-                    break
-            embedding_blob = _embedding_to_blob(model.encode(content)) if model else None
-            db.save_memory(
-                text=preview,
-                tags=found_tags,
-                type="journal",
+            embedding_blob = _embedding_to_blob(model.encode(embedded_text)) if model else None
+            db.upsert_journal_memory(
+                journal_file=journal_file,
+                text=display_text,
+                tags=["journal"] + tags,
                 importance=5,
                 embedding=embedding_blob,
-                journal_file=journal_file,
                 date=date,
             )
             return
@@ -1403,8 +1540,9 @@ class JournalSkill(BaseSkill):
                 with open(filepath, "r", encoding="utf-8") as f:
                     mem = json.load(f)
                 if mem.get("type") == "journal" and mem.get("journal_file") == journal_file:
-                    mem["text"] = preview
-                    mem["embedding"] = model.encode(content).tolist() if model else []
+                    mem["text"] = display_text
+                    mem["tags"] = ["journal"] + tags
+                    mem["embedding"] = model.encode(embedded_text).tolist() if model else []
                     mem["date"] = date
                     with open(filepath, "w", encoding="utf-8") as f:
                         json.dump(mem, f, indent=2)
@@ -1414,7 +1552,7 @@ class JournalSkill(BaseSkill):
                 continue
 
         # No existing companion — create one
-        self._create_companion_memory(entry_id, content, [], date)
+        self._create_companion_memory(entry)
 
     # ── latest.md generation ─────────────────────────────────
 

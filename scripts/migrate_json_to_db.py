@@ -340,6 +340,8 @@ def migrate_journal_entries(db: PulseDatabase, data_dir: Path) -> int:
             pinned=meta.get("pinned", False),
             resolved=resolved,
             date=str(meta["date"]) if meta.get("date") else None,
+            search_summary=meta.get("search_summary"),
+            summary_needs_review=meta.get("summary_needs_review", False),
         )
         count += 1
 
