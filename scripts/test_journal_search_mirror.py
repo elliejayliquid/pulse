@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.db import PulseDatabase
 import skills.journal as journal_module
 from skills.journal import JournalSkill
+from skills.memory import MemorySkill
 
 
 class FakeEmbeddingModel:
@@ -90,6 +91,40 @@ def test_journal_search_mirror():
             skill._update_entry("001", "Content changed without touching the summary.")
             drift_entry = db.get_journal_entry("001")
             assert drift_entry["summary_needs_review"] is True
+
+            db.update_memory_embedding(updated_mirror["id"], None)
+            fact_id = db.save_memory(
+                text="Nova prefers careful debugging.",
+                tags=["debugging"],
+                type="fact",
+                embedding=None,
+            )
+            before_repair = len(model.texts)
+            memory_skill = MemorySkill({
+                "_db": db,
+                "_persona_name": "Demo",
+                "_user_name": "Lena",
+                "paths": {
+                    "memories": str(root / "memories"),
+                },
+            })
+            recomputed, remaining = memory_skill.recompute_missing_embeddings(
+                reason="test",
+                model=model,
+            )
+            assert recomputed == 2
+            assert remaining == 0
+            assert db.get_memory(fact_id)["embedding"] is not None
+            assert db.get_memory(updated_mirror["id"])["embedding"] is not None
+
+            repair_texts = model.texts[before_repair:]
+            assert any(t == "Nova prefers careful debugging." for t in repair_texts)
+            assert any(
+                "female cat" in t
+                and "Journal entry" not in t
+                and "Search summary:" not in t
+                for t in repair_texts
+            )
         finally:
             journal_module._get_embedding_model = original_get_model
             db.close()

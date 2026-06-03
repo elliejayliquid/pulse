@@ -353,6 +353,14 @@ async def main(config_path: str, persona_name: str | None = None):
     except Exception as e:
         logger.warning(f"Failed to load skill registry: {e}")
 
+    if skill_registry:
+        try:
+            memory_skill = skill_registry.get_skill("memory")
+            if memory_skill and hasattr(memory_skill, "recompute_missing_embeddings"):
+                memory_skill.recompute_missing_embeddings(reason="startup")
+        except Exception as e:
+            logger.warning(f"Failed to repair missing memory embeddings: {e}")
+
     # Create engine (with skill registry and provider details)
     engine = PulseEngine(config, channels, skill_registry=skill_registry,
                          llm_endpoint=endpoint, api_key=api_key)

@@ -26,6 +26,12 @@ import yaml
 
 from skills.base import BaseSkill
 from core.context import _get_embedding_model
+from core.journal_mirror import (
+    deterministic_journal_summary,
+    journal_memory_display_text,
+    journal_memory_embedded_text,
+    search_summary_is_thin,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -758,46 +764,17 @@ class JournalSkill(BaseSkill):
 
     def _journal_memory_embedded_text(self, entry: dict) -> str:
         """Build clean semantic text for journal mirror embeddings."""
-        tags = entry.get("tags") or []
-        summary = str(entry.get("search_summary") or "").strip()
-        if self._search_summary_is_thin(summary):
-            summary = self._deterministic_journal_summary(entry)
-        parts = [
-            str(entry.get("title") or "").strip(),
-            summary,
-            str(entry.get("why_it_mattered") or "").strip(),
-            " ".join(str(tag) for tag in tags if tag),
-        ]
-        return "\n".join(part for part in parts if part).strip()
+        return journal_memory_embedded_text(entry)
 
     def _journal_memory_display_text(self, entry: dict) -> str:
         """Build recall text for the journal mirror memory."""
-        entry_id = str(entry.get("id") or "?")
-        entry_type = str(entry.get("entry_type") or "entry")
-        title = str(entry.get("title") or entry_type.replace("_", " ").title()).strip()
-        why = str(entry.get("why_it_mattered") or "").strip()
-        tags = entry.get("tags") or []
-        summary = str(entry.get("search_summary") or "").strip()
-        if self._search_summary_is_thin(summary):
-            summary = self._deterministic_journal_summary(entry)
-
-        parts = [f"Journal entry {entry_id} ({entry_type})"]
-        if title:
-            parts.append(f"Title: {title}")
-        if why:
-            parts.append(f"Why it mattered: {why}")
-        if summary:
-            parts.append(f"Search summary:\n{summary}")
-        if tags:
-            parts.append(f"Tags: {', '.join(str(tag) for tag in tags if tag)}")
-        return "\n".join(parts)
+        return journal_memory_display_text(entry)
 
     def _deterministic_journal_summary(self, entry: dict) -> str:
-        content = str(entry.get("content") or "").strip()
-        return content[:500] + ("..." if len(content) > 500 else "")
+        return deterministic_journal_summary(entry)
 
     def _search_summary_is_thin(self, summary: str) -> bool:
-        return len(summary.strip().split()) < 6
+        return search_summary_is_thin(summary)
 
     # ── Read / Search ────────────────────────────────────────
 

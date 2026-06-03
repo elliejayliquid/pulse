@@ -19,6 +19,7 @@ import numpy as np
 
 from skills.base import BaseSkill
 from core.context import _get_embedding_model
+from core.journal_mirror import journal_memory_embedded_text
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,8 @@ class MemorySkill(BaseSkill):
             config.get("paths", {}).get("memories", str(Path.home() / ".local-memory"))
         )
         self.memory_dir.mkdir(parents=True, exist_ok=True)
+        self._embedding_repair_failures: set[int] = set()
+        self._warned_missing_embedding_model = False
 
         # Display names for conversation roles (companions, not assistants!)
         persona_name = config.get("_persona_name", "companion")
@@ -519,6 +522,89 @@ class MemorySkill(BaseSkill):
 
     # ── History ──────────────────────────────────────────────
 
+    # --- Embedding repair -------------------------------------------------
+
+    def recompute_missing_embeddings(self, limit: int | None = None,
+                                     reason: str = "manual",
+                                     model=None) -> tuple[int, int]:
+        """Repair DB memory rows whose embeddings are NULL.
+
+        Journal mirror rows are rebuilt from their journal entry so the vector
+        stays clean; normal memories embed their stored text directly.
+        Returns (recomputed_count, remaining_count).
+        """
+        if not self._db:
+            return 0, 0
+
+        missing_before = self._db.count_memories_missing_embeddings()
+        if missing_before <= 0:
+            return 0, 0
+
+        model = model or _get_embedding_model()
+        if model is None:
+            if not self._warned_missing_embedding_model:
+                logger.warning(
+                    "Memory embeddings missing (%s rows), but embedding model is "
+                    "unavailable; memory search will rely on keyword fallback.",
+                    missing_before,
+                )
+                self._warned_missing_embedding_model = True
+            return 0, missing_before
+
+        rows = self._db.get_memories_missing_embeddings(limit=limit)
+        recomputed = 0
+        for mem in rows:
+            mem_id = mem.get("id")
+            if mem_id in self._embedding_repair_failures:
+                continue
+
+            try:
+                text = self._embedding_text_for_memory(mem)
+                if not text.strip():
+                    raise ValueError("empty embedding text")
+                embedding = _embedding_to_blob(model.encode(text))
+                if embedding is None:
+                    raise ValueError("model returned empty embedding")
+                if self._db.update_memory_embedding(mem_id, embedding):
+                    recomputed += 1
+            except Exception as e:
+                self._embedding_repair_failures.add(mem_id)
+                logger.warning(
+                    "Failed to recompute memory embedding for #%s: %s",
+                    mem_id,
+                    e,
+                )
+
+        remaining = self._db.count_memories_missing_embeddings()
+        if recomputed or remaining:
+            logger.info(
+                "Recomputed %s missing memory embeddings (%s remaining) [%s].",
+                recomputed,
+                remaining,
+                reason,
+            )
+        return recomputed, remaining
+
+    def _embedding_text_for_memory(self, mem: dict) -> str:
+        """Return the text that should be embedded for a memory row."""
+        if mem.get("type") != "journal":
+            return str(mem.get("text") or "")
+
+        journal_file = str(mem.get("journal_file") or "")
+        entry_id = Path(journal_file.replace("\\", "/")).stem if journal_file else ""
+        if entry_id and self._db:
+            entry = self._db.get_journal_entry(entry_id)
+            if entry:
+                return journal_memory_embedded_text(entry)
+
+        logger.warning(
+            "Journal memory #%s references missing journal entry '%s'; "
+            "embedding stored display text as fallback.",
+            mem.get("id"),
+            journal_file or "(none)",
+        )
+        return str(mem.get("text") or "")
+
     def _memory_history(self, memory_id: str) -> str:
         """Show the full evolution chain for a memory."""
         if not memory_id.strip():
@@ -597,6 +683,16 @@ class MemorySkill(BaseSkill):
             return "No memories found yet."
 
         model = _get_embedding_model()
+        if model:
+            repaired, _remaining = self.recompute_missing_embeddings(
+                limit=25,
+                reason="lazy-search",
+                model=model,
+            )
+            if repaired:
+                memories = self._load_all_memories()
+        elif self._db and self._db.count_memories_missing_embeddings() > 0:
+            self.recompute_missing_embeddings(limit=1, reason="lazy-search")
 
         if model and any(m.get("embedding") for m in memories):
             return self._semantic_search(query, memories, model)

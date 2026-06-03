@@ -338,6 +338,46 @@ class PulseDatabase:
         ).fetchall()
         return [self._row_to_memory(row) for row in rows]
 
+    def count_memories_missing_embeddings(self) -> int:
+        """Return how many memory rows have no embedding."""
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS count FROM memories WHERE embedding IS NULL"
+        ).fetchone()
+        return int(row["count"]) if row else 0
+
+    def get_memories_missing_embeddings(self, limit: Optional[int] = None) -> list[dict]:
+        """Return memory rows that need embedding repair.
+
+        Current/searchable rows are returned first so startup and lazy batches
+        spend their first work on rows most likely to affect search quality.
+        """
+        sql = (
+            "SELECT * FROM memories WHERE embedding IS NULL "
+            "ORDER BY "
+            "CASE "
+            "  WHEN status IS NULL OR status = 'current' THEN 0 "
+            "  WHEN status = 'superseded' THEN 2 "
+            "  WHEN status = 'archived' THEN 3 "
+            "  ELSE 1 "
+            "END, date DESC, id ASC"
+        )
+        params: tuple = ()
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = (max(1, int(limit)),)
+        rows = self.conn.execute(sql, params).fetchall()
+        return [self._row_to_memory(row) for row in rows]
+
+    def update_memory_embedding(self, memory_id: int,
+                                embedding: Optional[bytes]) -> bool:
+        """Update a memory embedding. Returns True if a row was updated."""
+        cur = self.conn.execute(
+            "UPDATE memories SET embedding = ? WHERE id = ?",
+            (embedding, memory_id),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
     def update_memory_metadata(self, memory_id: int, *,
                                status: Optional[str] = None,
                                confidence: Optional[str] = None,
