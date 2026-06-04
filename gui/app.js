@@ -20,6 +20,14 @@ const EXPECTED_ENV_VARS = {
   anthropic: "ANTHROPIC_API_KEY",
 };
 
+const MEMORY_STATUSES = ["current", "historical", "superseded", "archived"];
+// User-selectable statuses. "superseded" is engine-managed (it implies a
+// replacement chain) so it's never offered as a manual choice in the GUI.
+const MEMORY_USER_STATUSES = ["current", "historical", "archived"];
+const MEMORY_CONFIDENCES = ["high", "medium", "low"];
+const MEMORY_SOURCES = ["user_defined", "model_extracted", "imported", "system"];
+const JOURNAL_ENTRY_TYPES = ["event", "preference", "topic", "tone", "open_thread", "follow_up", "reflection"];
+
 const state = {
   personas: [],
   current: null,
@@ -35,7 +43,13 @@ const state = {
   currentCoreAnchor: null,
   coreBaseline: {},
   memoryBrowse: { view: "active", kind: "fact", page: 0, pageSize: 25, total: 0, hasMore: false, items: [] },
-  journalBrowse: { view: "active", type: "all", page: 0, pageSize: 25, total: 0, hasMore: false, items: [] },
+  memoryDetailId: "",
+  memoryBaselines: {},
+  memoryUndoStamp: "",
+  journalBrowse: { view: "active", type: "open_thread", page: 0, pageSize: 25, total: 0, hasMore: false, items: [] },
+  journalDetailId: "",
+  journalBaseline: {},
+  journalUndoStamp: "",
 };
 
 const fallbackApi = {
@@ -165,8 +179,13 @@ const fallbackApi = {
   async dim_lantern() { return { ok: false, error: "Run through pywebview to dim lantern." }; },
   async list_memories() { return { ok: false, error: "Run through pywebview to browse memories." }; },
   async get_memory_detail() { return { ok: false, error: "Run through pywebview to inspect memories." }; },
+  async update_memory() { return { ok: false, error: "Run through pywebview to edit memories." }; },
+  async delete_memory() { return { ok: false, error: "Run through pywebview to delete memories." }; },
   async list_journal_entries() { return { ok: false, error: "Run through pywebview to browse journal entries." }; },
   async get_journal_entry() { return { ok: false, error: "Run through pywebview to inspect journal entries." }; },
+  async update_journal_entry() { return { ok: false, error: "Run through pywebview to edit journal entries." }; },
+  async delete_journal_entry() { return { ok: false, error: "Run through pywebview to delete journal entries." }; },
+  async restore_db_before_image() { return { ok: false, error: "Run through pywebview to undo database edits." }; },
   async get_core_anchor() { return { ok: false, error: "Run through pywebview to inspect core anchors." }; },
   async set_core_anchor() { return { ok: false, error: "Run through pywebview to edit core anchors." }; },
   async pick_voice_sample() { return { ok: false, error: "Run through pywebview to pick files." }; },
@@ -1486,10 +1505,6 @@ function handleContinuityAction(action) {
   }
   const messages = {
     "add-memory": "Adding memories will come after the memory browser and preview flow.",
-    "edit-memory": "Memory edit/supersede will prefer safe supersede, with direct edit marked as advanced.",
-    "delete-memory": "Memory delete will require a stern confirmation and a small before-image safety record.",
-    "resolve-journal": "Journal resolve will be the safe first action for stale or completed entries.",
-    "edit-journal": "Journal edit/delete will come after browse and resolve are stable.",
     "import-content": "Continuity import will start with pasted companion-written notes and preview before writing.",
     "learn-more": "Continuity planning lives in designs/continuity_section.md.",
   };
@@ -1799,35 +1814,35 @@ function wireEvents() {
     if (lanternBackdropPointerDown && e.target === el("lanternDialog")) closeLanternDialog();
     lanternBackdropPointerDown = false;
   });
-  el("memoriesCloseBtn").addEventListener("click", hideMemoriesDialog);
+  el("memoriesCloseBtn").addEventListener("click", () => { void hideMemoriesDialog(); });
   el("memoriesDialog").addEventListener("pointerdown", (event) => {
     memoriesBackdropPointerDown = event.target === el("memoriesDialog");
   });
   el("memoriesDialog").addEventListener("click", (event) => {
-    if (memoriesBackdropPointerDown && event.target === el("memoriesDialog")) hideMemoriesDialog();
+    if (memoriesBackdropPointerDown && event.target === el("memoriesDialog")) void hideMemoriesDialog();
     memoriesBackdropPointerDown = false;
   });
   el("memoryLoadMoreBtn").addEventListener("click", () => loadMemoryPage(state.memoryBrowse.page + 1));
   el("memoryViewTabs").querySelectorAll("[data-memory-view]").forEach((button) => {
-    button.addEventListener("click", () => setMemoryView(button.dataset.memoryView));
+    button.addEventListener("click", () => { void setMemoryView(button.dataset.memoryView); });
   });
   el("memoryTypeTabs").querySelectorAll("[data-memory-kind]").forEach((button) => {
-    button.addEventListener("click", () => setMemoryKind(button.dataset.memoryKind));
+    button.addEventListener("click", () => { void setMemoryKind(button.dataset.memoryKind); });
   });
-  el("journalCloseBtn").addEventListener("click", hideJournalDialog);
+  el("journalCloseBtn").addEventListener("click", () => { void hideJournalDialog(); });
   el("journalDialog").addEventListener("pointerdown", (event) => {
     journalBackdropPointerDown = event.target === el("journalDialog");
   });
   el("journalDialog").addEventListener("click", (event) => {
-    if (journalBackdropPointerDown && event.target === el("journalDialog")) hideJournalDialog();
+    if (journalBackdropPointerDown && event.target === el("journalDialog")) void hideJournalDialog();
     journalBackdropPointerDown = false;
   });
   el("journalLoadMoreBtn").addEventListener("click", () => loadJournalPage(state.journalBrowse.page + 1));
   el("journalViewTabs").querySelectorAll("[data-journal-view]").forEach((button) => {
-    button.addEventListener("click", () => setJournalView(button.dataset.journalView));
+    button.addEventListener("click", () => { void setJournalView(button.dataset.journalView); });
   });
   el("journalTypeTabs").querySelectorAll("[data-journal-type]").forEach((button) => {
-    button.addEventListener("click", () => setJournalType(button.dataset.journalType));
+    button.addEventListener("click", () => { void setJournalType(button.dataset.journalType); });
   });
   el("coreCloseBtn").addEventListener("click", closeCoreDialog);
   el("coreSaveBtn").addEventListener("click", saveCoreAnchor);
@@ -2229,6 +2244,10 @@ async function openMemoriesDialog() {
     return;
   }
   state.memoryBrowse = { view: "active", kind: "fact", page: 0, pageSize: 25, total: 0, hasMore: false, items: [] };
+  state.memoryDetailId = "";
+  state.memoryBaselines = {};
+  state.memoryUndoStamp = "";
+  setMemoryNotice("Select a memory to review or edit. Journal index memories are edited from Journal.");
   el("memoriesDialog").classList.remove("hidden");
   document.body.classList.add("modal-open");
   syncMemoryTabs();
@@ -2237,13 +2256,18 @@ async function openMemoriesDialog() {
   await loadMemoryPage(1);
 }
 
-function hideMemoriesDialog() {
+async function hideMemoriesDialog() {
+  if (!(await confirmDiscardMemoryEdits())) return;
   el("memoriesDialog").classList.add("hidden");
+  state.memoryDetailId = "";
+  state.memoryBaselines = {};
+  state.memoryUndoStamp = "";
   document.body.classList.remove("modal-open");
 }
 
 async function setMemoryView(view) {
   if (!view || view === state.memoryBrowse.view) return;
+  if (!(await confirmDiscardMemoryEdits())) return;
   state.memoryBrowse = { ...state.memoryBrowse, view, page: 0, total: 0, hasMore: false, items: [] };
   syncMemoryTabs();
   showMemoryList();
@@ -2252,6 +2276,7 @@ async function setMemoryView(view) {
 
 async function setMemoryKind(kind) {
   if (!kind || kind === state.memoryBrowse.kind) return;
+  if (!(await confirmDiscardMemoryEdits())) return;
   state.memoryBrowse = { ...state.memoryBrowse, kind, page: 0, total: 0, hasMore: false, items: [] };
   syncMemoryTypeTabs();
   showMemoryList();
@@ -2271,6 +2296,8 @@ function syncMemoryTypeTabs() {
 }
 
 function showMemoryList() {
+  state.memoryDetailId = "";
+  state.memoryBaselines = {};
   el("memoryDetail").classList.add("hidden");
   el("memoryDetail").innerHTML = "";
   el("memoriesBody").classList.remove("hidden");
@@ -2320,7 +2347,7 @@ function renderMemoryList(dbPath = "") {
   }
   el("memoriesBody").innerHTML = browse.items.map(renderMemoryCard).join("");
   el("memoriesBody").querySelectorAll(".memory-card").forEach((card) => {
-    card.addEventListener("click", () => openMemoryDetail(card.dataset.memoryId));
+    card.addEventListener("click", () => { void openMemoryDetail(card.dataset.memoryId); });
   });
   const loadMore = el("memoryLoadMoreBtn");
   loadMore.classList.toggle("hidden", !browse.hasMore);
@@ -2356,8 +2383,11 @@ function renderMemoryCard(memory) {
     </button>`;
 }
 
-async function openMemoryDetail(memoryId) {
+async function openMemoryDetail(memoryId, force = false) {
   if (!state.current || !memoryId) return;
+  if (!force && state.memoryDetailId && state.memoryDetailId !== String(memoryId) && !(await confirmDiscardMemoryEdits())) return;
+  state.memoryDetailId = String(memoryId);
+  state.memoryBaselines = {};
   el("memoryDetail").classList.remove("hidden");
   el("memoriesBody").classList.add("hidden");
   el("memoryLoadMoreBtn").classList.add("hidden");
@@ -2369,6 +2399,9 @@ async function openMemoryDetail(memoryId) {
     return;
   }
   const versions = result.versions || [];
+  versions.forEach((memory) => {
+    if (memoryIsEditable(memory)) state.memoryBaselines[String(memory.id)] = memoryBaseline(memory);
+  });
   el("memoryDetail").innerHTML = `
     <button class="memory-back-btn" type="button">&larr; Back to memories</button>
     <div class="memory-detail-head">
@@ -2378,12 +2411,25 @@ async function openMemoryDetail(memoryId) {
     <div class="memory-versions">
       ${versions.map((memory, index) => renderMemoryVersion(memory, index === 0)).join("")}
     </div>`;
-  el("memoryDetail").querySelector(".memory-back-btn").addEventListener("click", showMemoryList);
+  el("memoryDetail").querySelector(".memory-back-btn").addEventListener("click", async () => {
+    if (await confirmDiscardMemoryEdits()) showMemoryList();
+  });
+  el("memoryDetail").querySelectorAll("[data-memory-save]").forEach((button) => {
+    button.addEventListener("click", () => { void saveMemoryEditor(button.dataset.memorySave); });
+  });
+  el("memoryDetail").querySelectorAll("[data-memory-delete]").forEach((button) => {
+    button.addEventListener("click", () => { void deleteMemoryFromEditor(button.dataset.memoryDelete); });
+  });
+  el("memoryDetail").querySelectorAll("[data-memory-editor]").forEach((editor) => {
+    editor.addEventListener("input", () => syncMemoryEditorDirty(editor.dataset.memoryEditor));
+    editor.addEventListener("change", () => syncMemoryEditorDirty(editor.dataset.memoryEditor));
+  });
 }
 
 function renderMemoryVersion(memory, current) {
-  const tags = (memory.tags || []).map((tag) => `<span>${escapeHtml(tag)}</span>`).join("");
   const sourceNote = renderMemoryDetailSourceNote(memory);
+  if (memoryIsEditable(memory)) return renderMemoryEditor(memory, current, sourceNote);
+  const tags = (memory.tags || []).map((tag) => `<span>${escapeHtml(tag)}</span>`).join("");
   return `
     <article class="memory-version ${current ? "current" : ""}">
       <div class="memory-version-head">
@@ -2394,6 +2440,219 @@ function renderMemoryVersion(memory, current) {
       <p>${escapeHtml(memory.text || "")}</p>
       <div class="memory-tags">${tags || "<span>untagged</span>"}</div>
     </article>`;
+}
+
+function renderMemoryEditor(memory, current, sourceNote = "") {
+  const baseline = memoryBaseline(memory);
+  const status = selectValue(baseline.status, MEMORY_STATUSES, "current");
+  const statusLocked = status === "superseded";
+  const confidence = selectValue(baseline.confidence, MEMORY_CONFIDENCES, "medium");
+  const source = selectValue(baseline.source, MEMORY_SOURCES, "model_extracted");
+  return `
+    <article class="memory-version memory-editor-card ${current ? "current" : ""}">
+      <div class="memory-version-head">
+        <strong>#${escapeHtml(memory.id)}${current ? " / Current" : ""}</strong>
+        <span>${escapeHtml(memory.date_display || "unknown")} / ${escapeHtml(memory.age_label || "unknown age")}</span>
+      </div>
+      ${sourceNote}
+      <div id="memoryEditor-${escapeHtml(memory.id)}" class="memory-editor-grid" data-memory-editor="${escapeHtml(memory.id)}">
+        <label class="memory-editor-field wide">
+          <span>Memory</span>
+          <textarea data-field="text" rows="8">${escapeHtml(baseline.text)}</textarea>
+        </label>
+        <label class="memory-editor-field">
+          <span>Tags</span>
+          <input data-field="tags" type="text" value="${escapeHtml(baseline.tags)}" placeholder="comma, separated, tags">
+        </label>
+        <label class="memory-editor-field">
+          <span>Importance</span>
+          <input data-field="importance" type="number" min="1" max="10" value="${escapeHtml(baseline.importance)}">
+        </label>
+        <label class="memory-editor-field">
+          <span>Valid Until</span>
+          <input data-field="valid_until" type="text" value="${escapeHtml(baseline.valid_until)}" placeholder="YYYY-MM-DD (optional)">
+        </label>
+        <label class="memory-editor-check">
+          <span>Time-sensitive</span>
+          <div class="memory-editor-check-box">
+            <input data-field="time_sensitive" type="checkbox" ${baseline.time_sensitive ? "checked" : ""}>
+          </div>
+        </label>
+        <details class="memory-editor-advanced">
+          <summary>Advanced classification</summary>
+          <div class="memory-editor-grid advanced-grid">
+        <label class="memory-editor-field">
+          <span>Status</span>
+          <select data-field="status"${statusLocked ? ' disabled title="Superseding is engine-managed and set automatically."' : ""}>${renderOptions(statusLocked ? MEMORY_STATUSES : MEMORY_USER_STATUSES, status)}</select>
+        </label>
+        <label class="memory-editor-field">
+          <span>Confidence</span>
+          <select data-field="confidence">${renderOptions(MEMORY_CONFIDENCES, confidence)}</select>
+        </label>
+        <label class="memory-editor-field">
+          <span>Source</span>
+          <select data-field="source">${renderOptions(MEMORY_SOURCES, source)}</select>
+        </label>
+          </div>
+        </details>
+      </div>
+      <div class="memory-editor-actions">
+        <button class="modal-btn secondary" type="button" data-memory-save="${escapeHtml(memory.id)}">Save Memory</button>
+        <button class="modal-btn danger" type="button" data-memory-delete="${escapeHtml(memory.id)}">Delete</button>
+      </div>
+    </article>`;
+}
+
+function memoryIsEditable(memory) {
+  return memory && memory.type !== "journal" && memory.type !== "session_log";
+}
+
+function memoryBaseline(memory) {
+  return {
+    text: memory.text || "",
+    tags: (memory.tags || []).join(", "),
+    importance: memory.importance === undefined || memory.importance === null ? "" : String(memory.importance),
+    status: selectValue(memory.status, MEMORY_STATUSES, "current"),
+    confidence: selectValue(memory.confidence, MEMORY_CONFIDENCES, "medium"),
+    source: selectValue(memory.source, MEMORY_SOURCES, "model_extracted"),
+    valid_until: memory.valid_until || "",
+    time_sensitive: Boolean(memory.time_sensitive),
+  };
+}
+
+function memoryCurrentValues(memoryId) {
+  const editor = el(`memoryEditor-${memoryId}`);
+  if (!editor) return {};
+  return {
+    text: editor.querySelector('[data-field="text"]').value,
+    tags: editor.querySelector('[data-field="tags"]').value,
+    importance: editor.querySelector('[data-field="importance"]').value,
+    status: editor.querySelector('[data-field="status"]').value,
+    confidence: editor.querySelector('[data-field="confidence"]').value,
+    source: editor.querySelector('[data-field="source"]').value,
+    valid_until: editor.querySelector('[data-field="valid_until"]').value,
+    time_sensitive: editor.querySelector('[data-field="time_sensitive"]').checked,
+  };
+}
+
+function buildMemoryChanges(memoryId) {
+  const baseline = state.memoryBaselines[String(memoryId)] || {};
+  const current = memoryCurrentValues(memoryId);
+  const changes = {};
+  Object.keys(current).forEach((key) => {
+    if (current[key] !== baseline[key]) changes[key] = current[key];
+  });
+  return changes;
+}
+
+function syncMemoryEditorDirty(memoryId) {
+  const editor = el(`memoryEditor-${memoryId}`);
+  if (!editor) return;
+  editor.classList.toggle("dirty", Object.keys(buildMemoryChanges(memoryId)).length > 0);
+}
+
+function memoryIsDirty() {
+  return Object.keys(state.memoryBaselines || {}).some((memoryId) => Object.keys(buildMemoryChanges(memoryId)).length > 0);
+}
+
+async function confirmDiscardMemoryEdits() {
+  if (!memoryIsDirty()) return true;
+  return showConfirm(
+    "Discard unsaved memory edits?",
+    "You have unsaved memory changes. Leaving this view will discard them.",
+    "Discard",
+    "secondary"
+  );
+}
+
+async function saveMemoryEditor(memoryId) {
+  if (!state.current || !memoryId) return;
+  const changes = buildMemoryChanges(memoryId);
+  if (!Object.keys(changes).length) {
+    setMemoryNotice("No memory changes to save.", state.memoryUndoStamp);
+    return;
+  }
+  const result = await api().update_memory(state.current.name, Number(memoryId), changes);
+  if (!result.ok) {
+    setMemoryNotice(result.error || "Could not update memory.", state.memoryUndoStamp);
+    return;
+  }
+  if (!result.changed) {
+    setMemoryNotice("No memory changes to save.", state.memoryUndoStamp);
+    return;
+  }
+  state.memoryUndoStamp = result.undo_stamp || "";
+  const detailId = state.memoryDetailId || memoryId;
+  await openMemoryDetail(detailId, true);
+  setMemoryNotice(
+    result.running
+      ? "Memory saved. Running persona will pick up the updated embedding after the next search or restart."
+      : "Memory saved. Embedding will be repaired when the persona starts or searches memory.",
+    state.memoryUndoStamp
+  );
+}
+
+async function deleteMemoryFromEditor(memoryId) {
+  if (!state.current || !memoryId) return;
+  const ok = await showConfirm(
+    `Delete memory #${memoryId}?`,
+    "This removes the selected memory row. A one-level undo snapshot will be created first.",
+    "Delete",
+    "danger"
+  );
+  if (!ok) return;
+  const result = await api().delete_memory(state.current.name, Number(memoryId));
+  if (!result.ok) {
+    setMemoryNotice(result.error || "Could not delete memory.", state.memoryUndoStamp);
+    return;
+  }
+  state.memoryUndoStamp = result.undo_stamp || "";
+  showMemoryList();
+  await loadMemoryPage(1);
+  setMemoryNotice(`Memory #${memoryId} deleted.`, state.memoryUndoStamp);
+}
+
+async function undoMemoryDbEdit() {
+  if (!state.current || !state.memoryUndoStamp) return;
+  const stamp = state.memoryUndoStamp;
+  const result = await api().restore_db_before_image(state.current.name, stamp);
+  if (!result.ok) {
+    setMemoryNotice(result.error || "Could not undo memory edit.", stamp);
+    return;
+  }
+  state.memoryUndoStamp = "";
+  if (state.memoryDetailId) {
+    await openMemoryDetail(state.memoryDetailId);
+  } else {
+    await loadMemoryPage(1);
+  }
+  setMemoryNotice("Memory edit undone.");
+}
+
+function setMemoryNotice(message, undoStamp = "") {
+  setEditorNotice("memoryNotice", message || "Select a memory to review or edit. Journal index memories are edited from Journal.", undoStamp, undoMemoryDbEdit);
+}
+
+function setEditorNotice(noticeId, message, undoStamp = "", undoHandler = null) {
+  const notice = el(noticeId);
+  if (!notice) return;
+  notice.innerHTML = `
+    <span>${escapeHtml(message || "")}</span>
+    ${undoStamp ? `<button class="notice-undo-btn" type="button">Undo</button>` : ""}`;
+  const button = notice.querySelector(".notice-undo-btn");
+  if (button && undoHandler) button.addEventListener("click", () => { void undoHandler(); });
+}
+
+function renderOptions(values, selected) {
+  return values.map((value) => {
+    const active = value === selected ? "selected" : "";
+    return `<option value="${escapeHtml(value)}" ${active}>${escapeHtml(humanizeMemoryBadge(value))}</option>`;
+  }).join("");
+}
+
+function selectValue(value, allowed, fallback) {
+  const candidate = text(value);
+  return allowed.includes(candidate) ? candidate : fallback;
 }
 
 function renderMemoryDetailSourceNote(memory) {
@@ -2450,7 +2709,11 @@ async function openJournalDialog() {
     setNotice("Choose a persona first.", "warning", NOTICE_WARNING_MS);
     return;
   }
-  state.journalBrowse = { view: "active", type: "all", page: 0, pageSize: 25, total: 0, hasMore: false, items: [] };
+  state.journalBrowse = { view: "active", type: "open_thread", page: 0, pageSize: 25, total: 0, hasMore: false, items: [] };
+  state.journalDetailId = "";
+  state.journalBaseline = {};
+  state.journalUndoStamp = "";
+  setJournalNotice("Select a journal entry to review or edit. Save keeps this window open.");
   el("journalDialog").classList.remove("hidden");
   document.body.classList.add("modal-open");
   syncJournalTabs();
@@ -2458,13 +2721,18 @@ async function openJournalDialog() {
   await loadJournalPage(1);
 }
 
-function hideJournalDialog() {
+async function hideJournalDialog() {
+  if (!(await confirmDiscardJournalEdits())) return;
   el("journalDialog").classList.add("hidden");
+  state.journalDetailId = "";
+  state.journalBaseline = {};
+  state.journalUndoStamp = "";
   document.body.classList.remove("modal-open");
 }
 
 async function setJournalView(view) {
   if (!view || view === state.journalBrowse.view) return;
+  if (!(await confirmDiscardJournalEdits())) return;
   state.journalBrowse = { ...state.journalBrowse, view, page: 0, total: 0, hasMore: false, items: [] };
   syncJournalTabs();
   showJournalList();
@@ -2473,6 +2741,7 @@ async function setJournalView(view) {
 
 async function setJournalType(type) {
   if (!type || type === state.journalBrowse.type) return;
+  if (!(await confirmDiscardJournalEdits())) return;
   state.journalBrowse = { ...state.journalBrowse, type, page: 0, total: 0, hasMore: false, items: [] };
   syncJournalTabs();
   showJournalList();
@@ -2489,6 +2758,8 @@ function syncJournalTabs() {
 }
 
 function showJournalList() {
+  state.journalDetailId = "";
+  state.journalBaseline = {};
   el("journalDetail").classList.add("hidden");
   el("journalDetail").innerHTML = "";
   el("journalBody").classList.remove("hidden");
@@ -2538,7 +2809,7 @@ function renderJournalList() {
   }
   el("journalBody").innerHTML = browse.items.map(renderJournalCard).join("");
   el("journalBody").querySelectorAll(".journal-card").forEach((card) => {
-    card.addEventListener("click", () => openJournalDetail(card.dataset.entryId));
+    card.addEventListener("click", () => { void openJournalDetail(card.dataset.entryId); });
   });
   const loadMore = el("journalLoadMoreBtn");
   loadMore.classList.toggle("hidden", !browse.hasMore);
@@ -2571,8 +2842,11 @@ function renderJournalCard(entry) {
     </button>`;
 }
 
-async function openJournalDetail(entryId) {
+async function openJournalDetail(entryId, force = false) {
   if (!state.current || !entryId) return;
+  if (!force && state.journalDetailId && state.journalDetailId !== String(entryId) && !(await confirmDiscardJournalEdits())) return;
+  state.journalDetailId = String(entryId);
+  state.journalBaseline = {};
   el("journalDetail").classList.remove("hidden");
   el("journalBody").classList.add("hidden");
   el("journalLoadMoreBtn").classList.add("hidden");
@@ -2584,25 +2858,232 @@ async function openJournalDetail(entryId) {
     return;
   }
   const entry = result.entry || {};
-  const tags = (entry.tags || []).map((tag) => `<span>${escapeHtml(tag)}</span>`).join("");
+  state.journalBaseline = journalBaseline(entry);
   el("journalDetail").innerHTML = `
     <button class="memory-back-btn" type="button">&larr; Back to journal</button>
-    <article class="journal-entry-detail memory-version">
+    ${renderJournalEditor(entry)}`;
+  el("journalDetail").querySelector(".memory-back-btn").addEventListener("click", async () => {
+    if (await confirmDiscardJournalEdits()) showJournalList();
+  });
+  el("journalDetail").querySelector("[data-journal-save]").addEventListener("click", saveJournalEditor);
+  el("journalDetail").querySelector("[data-journal-delete]").addEventListener("click", deleteJournalFromEditor);
+  const editor = el("journalEditor");
+  editor.addEventListener("input", syncJournalEditorState);
+  editor.addEventListener("change", syncJournalEditorState);
+  editor.querySelector('[data-field="entry_type"]').addEventListener("change", syncJournalResolvedField);
+  syncJournalResolvedField();
+}
+
+function renderJournalEditor(entry) {
+  const baseline = journalBaseline(entry);
+  const entryType = selectValue(baseline.entry_type, JOURNAL_ENTRY_TYPES, "reflection");
+  const tags = (entry.tags || []).map((tag) => `<span>${escapeHtml(tag)}</span>`).join("");
+  return `
+    <article class="journal-entry-detail memory-version journal-editor-card">
       <div class="memory-version-head">
-        <strong>${escapeHtml(entry.id || entryId)}</strong>
+        <strong>${escapeHtml(entry.id || "entry")}</strong>
         <span>${escapeHtml(entry.date_display || "unknown")} / ${escapeHtml(entry.age_label || "unknown age")}</span>
       </div>
-      <h3>${escapeHtml(entry.title || "Untitled entry")}</h3>
       <div class="memory-badges journal-detail-badges">
         <span>${escapeHtml(humanizeMemoryBadge(entry.entry_type || "entry"))}</span>
+        ${entry.summary_needs_review ? "<span>Summary needs review</span>" : ""}
         ${entry.status === "reference" ? "" : `<span>${escapeHtml(humanizeMemoryBadge(entry.status || "active"))}</span>`}
         ${entry.pinned ? "<span>Pinned</span>" : ""}
       </div>
-      <p>${escapeHtml(entry.content || "")}</p>
-      ${entry.why_it_mattered ? `<div class="memory-source-note"><strong>Why it mattered</strong><span>${escapeHtml(entry.why_it_mattered)}</span></div>` : ""}
+      <div id="journalEditor" class="memory-editor-grid journal-editor-grid" data-journal-editor="${escapeHtml(entry.id)}">
+        <label class="memory-editor-field">
+          <span>Title</span>
+          <input data-field="title" type="text" value="${escapeHtml(baseline.title)}">
+        </label>
+        <label class="memory-editor-field">
+          <span>Type</span>
+          <select data-field="entry_type">${renderOptions(JOURNAL_ENTRY_TYPES, entryType)}</select>
+        </label>
+        <label class="memory-editor-field">
+          <span>Importance</span>
+          <input data-field="importance" type="number" min="1" max="10" value="${escapeHtml(baseline.importance)}">
+        </label>
+        <label class="memory-editor-check">
+          <span>Pinned</span>
+          <div class="memory-editor-check-box">
+            <input data-field="pinned" type="checkbox" ${baseline.pinned ? "checked" : ""}>
+          </div>
+        </label>
+        <label class="memory-editor-check" id="journalResolvedField">
+          <span>Resolved</span>
+          <div class="memory-editor-check-box">
+            <input data-field="resolved" type="checkbox" ${baseline.resolved ? "checked" : ""}>
+          </div>
+        </label>
+        <label class="memory-editor-field wide">
+          <span>Content</span>
+          <textarea data-field="content" rows="10">${escapeHtml(baseline.content)}</textarea>
+        </label>
+        <label class="memory-editor-field wide">
+          <span>Search Summary</span>
+          <textarea data-field="search_summary" rows="3">${escapeHtml(baseline.search_summary)}</textarea>
+        </label>
+        <label class="memory-editor-field wide">
+          <span>Why It Mattered</span>
+          <textarea data-field="why_it_mattered" rows="3">${escapeHtml(baseline.why_it_mattered)}</textarea>
+        </label>
+        <label class="memory-editor-field wide">
+          <span>Tags</span>
+          <input data-field="tags" type="text" value="${escapeHtml(baseline.tags)}" placeholder="comma, separated, tags">
+        </label>
+      </div>
+      <div class="memory-source-note">
+        <strong>Search mirror</strong>
+        <span>Saving text or summary changes updates the journal's searchable memory mirror and leaves its embedding queued for engine repair.</span>
+      </div>
       <div class="memory-tags">${tags || "<span>untagged</span>"}</div>
+      <div class="memory-editor-actions">
+        <button class="modal-btn secondary" type="button" data-journal-save>Save Entry</button>
+        <button class="modal-btn danger" type="button" data-journal-delete>Delete</button>
+      </div>
     </article>`;
-  el("journalDetail").querySelector(".memory-back-btn").addEventListener("click", showJournalList);
+}
+
+function journalBaseline(entry) {
+  return {
+    title: entry.title || "",
+    entry_type: selectValue(entry.entry_type, JOURNAL_ENTRY_TYPES, "reflection"),
+    content: entry.content || "",
+    why_it_mattered: entry.why_it_mattered || "",
+    search_summary: entry.search_summary || "",
+    tags: (entry.tags || []).join(", "),
+    importance: entry.importance === undefined || entry.importance === null ? "" : String(entry.importance),
+    pinned: Boolean(entry.pinned),
+    resolved: Boolean(entry.resolved),
+  };
+}
+
+function journalCurrentValues() {
+  const editor = el("journalEditor");
+  if (!editor) return {};
+  return {
+    title: editor.querySelector('[data-field="title"]').value,
+    entry_type: editor.querySelector('[data-field="entry_type"]').value,
+    content: editor.querySelector('[data-field="content"]').value,
+    why_it_mattered: editor.querySelector('[data-field="why_it_mattered"]').value,
+    search_summary: editor.querySelector('[data-field="search_summary"]').value,
+    tags: editor.querySelector('[data-field="tags"]').value,
+    importance: editor.querySelector('[data-field="importance"]').value,
+    pinned: editor.querySelector('[data-field="pinned"]').checked,
+    resolved: editor.querySelector('[data-field="resolved"]').checked,
+  };
+}
+
+function buildJournalChanges() {
+  const baseline = state.journalBaseline || {};
+  const current = journalCurrentValues();
+  const changes = {};
+  Object.keys(current).forEach((key) => {
+    if (current[key] !== baseline[key]) changes[key] = current[key];
+  });
+  return changes;
+}
+
+function journalIsDirty() {
+  return Boolean(state.journalDetailId) && Object.keys(buildJournalChanges()).length > 0;
+}
+
+async function confirmDiscardJournalEdits() {
+  if (!journalIsDirty()) return true;
+  return showConfirm(
+    "Discard unsaved journal edits?",
+    "You have unsaved journal changes. Leaving this view will discard them.",
+    "Discard",
+    "secondary"
+  );
+}
+
+function syncJournalEditorState() {
+  const editor = el("journalEditor");
+  if (!editor) return;
+  editor.classList.toggle("dirty", journalIsDirty());
+}
+
+function syncJournalResolvedField() {
+  const editor = el("journalEditor");
+  if (!editor) return;
+  const type = editor.querySelector('[data-field="entry_type"]').value;
+  const resolved = editor.querySelector('[data-field="resolved"]');
+  const field = el("journalResolvedField");
+  const enabled = type === "open_thread" || type === "follow_up";
+  resolved.disabled = !enabled;
+  field.classList.toggle("disabled", !enabled);
+  if (!enabled) resolved.checked = false;
+  syncJournalEditorState();
+}
+
+async function saveJournalEditor() {
+  if (!state.current || !state.journalDetailId) return;
+  const changes = buildJournalChanges();
+  if (!Object.keys(changes).length) {
+    setJournalNotice("No journal changes to save.", state.journalUndoStamp);
+    return;
+  }
+  const result = await api().update_journal_entry(state.current.name, state.journalDetailId, changes);
+  if (!result.ok) {
+    setJournalNotice(result.error || "Could not update journal entry.", state.journalUndoStamp);
+    return;
+  }
+  if (!result.changed) {
+    setJournalNotice("No journal changes to save.", state.journalUndoStamp);
+    return;
+  }
+  state.journalUndoStamp = result.undo_stamp || "";
+  const detailId = state.journalDetailId;
+  await openJournalDetail(detailId, true);
+  setJournalNotice(
+    result.running
+      ? "Journal entry saved. The running persona may pick up the updated mirror after the next memory search."
+      : "Journal entry saved. Its search mirror will be repaired when the persona starts or searches memory.",
+    state.journalUndoStamp
+  );
+}
+
+async function deleteJournalFromEditor() {
+  if (!state.current || !state.journalDetailId) return;
+  const entryId = state.journalDetailId;
+  const ok = await showConfirm(
+    `Delete journal entry ${entryId}?`,
+    "This removes the journal entry and its linked memory mirror. A one-level undo snapshot will be created first.",
+    "Delete",
+    "danger"
+  );
+  if (!ok) return;
+  const result = await api().delete_journal_entry(state.current.name, entryId);
+  if (!result.ok) {
+    setJournalNotice(result.error || "Could not delete journal entry.", state.journalUndoStamp);
+    return;
+  }
+  state.journalUndoStamp = result.undo_stamp || "";
+  showJournalList();
+  await loadJournalPage(1);
+  setJournalNotice(`Journal entry ${entryId} deleted with its linked mirror.`, state.journalUndoStamp);
+}
+
+async function undoJournalDbEdit() {
+  if (!state.current || !state.journalUndoStamp) return;
+  const stamp = state.journalUndoStamp;
+  const result = await api().restore_db_before_image(state.current.name, stamp);
+  if (!result.ok) {
+    setJournalNotice(result.error || "Could not undo journal edit.", stamp);
+    return;
+  }
+  state.journalUndoStamp = "";
+  if (state.journalDetailId) {
+    await openJournalDetail(state.journalDetailId, true);
+  } else {
+    await loadJournalPage(1);
+  }
+  setJournalNotice("Journal edit undone.");
+}
+
+function setJournalNotice(message, undoStamp = "") {
+  setEditorNotice("journalNotice", message || "Select a journal entry to review or edit. Save keeps this window open.", undoStamp, undoJournalDbEdit);
 }
 
 function humanizeJournalView(view) {

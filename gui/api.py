@@ -1856,6 +1856,13 @@ class PulseAPI:
                 value = str(changes.get(field) or "").strip()
                 if value not in allowed_values:
                     raise ValueError(f"Invalid memory {field}: {value}")
+                if field == "status":
+                    before_status = before.get("status") or ""
+                    if value != before_status and "superseded" in (value, before_status):
+                        raise ValueError(
+                            "Superseding is managed automatically and cannot be "
+                            "set or cleared here."
+                        )
                 if value != (before.get(field) or ""):
                     cleaned[field] = value
 

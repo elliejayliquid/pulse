@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Pulse Engine</title>
-  <link rel="stylesheet" href="style.css?v=20260603c">
+  <link rel="stylesheet" href="style.css?v=20260604d">
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
   <meta http-equiv="Pragma" content="no-cache">
   <meta http-equiv="Expires" content="0">
@@ -109,7 +109,7 @@
               <div class="continuity-copy">
                 <h3>Memories</h3>
                 <p>Long-term facts, moments, and corrections</p>
-                <small>Browse, add, edit, supersede, or delete memories.</small>
+                <small>Browse, add, edit, or delete memories.</small>
               </div>
               <div class="continuity-actions">
                 <button class="continuity-btn" type="button" data-continuity-action="browse-memories" title="Browse memories">
@@ -119,14 +119,6 @@
                 <button class="continuity-btn" type="button" data-continuity-action="add-memory" title="Add a memory">
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14"></path><path d="M5 12h14"></path></svg>
                   <span>Add</span>
-                </button>
-                <button class="continuity-btn" type="button" data-continuity-action="edit-memory" title="Edit or supersede a memory">
-                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9"></path><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"></path></svg>
-                  <span>Edit / Supersede</span>
-                </button>
-                <button class="continuity-btn danger" type="button" data-continuity-action="delete-memory" title="Delete a memory">
-                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18"></path><path d="M8 6V4h8v2"></path><path d="M19 6l-1 14H6L5 6"></path><path d="M10 11v5"></path><path d="M14 11v5"></path></svg>
-                  <span>Delete</span>
                 </button>
               </div>
             </article>
@@ -138,20 +130,12 @@
               <div class="continuity-copy">
                 <h3>Journal</h3>
                 <p>Reflections, open threads, and follow-ups</p>
-                <small>Browse, resolve, edit, or delete journal entries.</small>
+                <small>Browse, resolve, edit, or delete journal entries in the detail view.</small>
               </div>
               <div class="continuity-actions">
                 <button class="continuity-btn" type="button" data-continuity-action="browse-journal" title="Browse journal entries">
                   <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="M20 20l-3.5-3.5"></path></svg>
                   <span>Browse</span>
-                </button>
-                <button class="continuity-btn" type="button" data-continuity-action="resolve-journal" title="Resolve stale or completed journal entries">
-                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6L9 17l-5-5"></path></svg>
-                  <span>Resolve</span>
-                </button>
-                <button class="continuity-btn" type="button" data-continuity-action="edit-journal" title="Edit or delete journal entries">
-                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9"></path><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"></path></svg>
-                  <span>Edit / Delete</span>
                 </button>
               </div>
             </article>
@@ -529,6 +513,7 @@
         <button type="button" data-memory-kind="session_log">Chat Summaries</button>
         <button type="button" data-memory-kind="all">All</button>
       </div>
+      <div id="memoryNotice" class="notice-pill">Select a memory to review or edit. Journal index memories are edited from Journal.</div>
       <div id="memoryDetail" class="memory-detail hidden"></div>
       <div id="memoriesBody" class="memories-body"></div>
       <button id="memoryLoadMoreBtn" class="memory-load-more hidden" type="button">Load More</button>
@@ -552,13 +537,14 @@
         </div>
       </div>
       <div id="journalTypeTabs" class="memory-type-tabs" role="tablist" aria-label="Journal type">
-        <button class="active" type="button" data-journal-type="all">All</button>
-        <button type="button" data-journal-type="open_thread">Open Threads</button>
+        <button class="active" type="button" data-journal-type="open_thread">Open Threads</button>
         <button type="button" data-journal-type="follow_up">Follow-ups</button>
         <button type="button" data-journal-type="reflection">Reflections</button>
         <button type="button" data-journal-type="topic">Topics</button>
         <button type="button" data-journal-type="tone">Tone</button>
+        <button type="button" data-journal-type="all">All</button>
       </div>
+      <div id="journalNotice" class="notice-pill">Select a journal entry to review or edit. Save keeps this window open.</div>
       <div id="journalDetail" class="memory-detail hidden"></div>
       <div id="journalBody" class="memories-body"></div>
       <button id="journalLoadMoreBtn" class="memory-load-more hidden" type="button">Load More</button>

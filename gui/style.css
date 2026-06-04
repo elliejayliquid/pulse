@@ -1916,6 +1916,33 @@ textarea {
   background: rgba(245, 158, 11, 0.08);
   color: #f8c471;
   line-height: 1.4;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.notice-pill span {
+  min-width: 0;
+}
+
+.notice-undo-btn {
+  flex: 0 0 auto;
+  min-height: 28px;
+  padding: 6px 10px;
+  border: 1px solid rgba(245, 158, 11, 0.32);
+  border-radius: 7px;
+  background: rgba(245, 158, 11, 0.08);
+  color: #f8c471;
+  font: 700 11px/1 var(--body);
+  cursor: pointer;
+}
+
+.notice-undo-btn:hover {
+  border-color: rgba(245, 158, 11, 0.55);
+  background: rgba(245, 158, 11, 0.14);
+  color: var(--text-primary);
 }
 
 .lantern-empty {
@@ -2247,6 +2274,148 @@ textarea {
 
 .journal-detail-badges {
   margin: 0 0 10px;
+}
+
+.memory-editor-card {
+  transition: border-color 140ms ease, background 140ms ease;
+}
+
+.memory-editor-card.dirty,
+.memory-editor-grid.dirty {
+  border-color: rgba(245, 158, 11, 0.35);
+}
+
+.memory-editor-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.journal-editor-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.memory-editor-field {
+  display: grid;
+  gap: 7px;
+}
+
+.memory-editor-field.wide {
+  grid-column: 1 / -1;
+}
+
+/* Checkboxes sit in a single grid cell (paired beside a neighbour field),
+   with a header label on top like every other field. */
+.memory-editor-check {
+  grid-column: auto;
+  display: grid;
+  gap: 7px;
+}
+
+.memory-editor-field span,
+.memory-editor-check span {
+  color: var(--text-tertiary);
+  font: 700 10px/1.2 var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.memory-editor-field input,
+.memory-editor-field select,
+.memory-editor-field textarea {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text-primary);
+  font: 500 13px/1.45 var(--body);
+  padding: 10px 11px;
+}
+
+.memory-editor-field textarea {
+  resize: vertical;
+}
+
+.memory-editor-field input:focus,
+.memory-editor-field select:focus,
+.memory-editor-field textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px rgba(249, 115, 22, 0.16);
+}
+
+/* The checkbox sits bare (no border/background) so there's no box edge to
+   misalign against the neighbouring input. An invisible min-height + vertical
+   centering line it up with the centre of that input. */
+.memory-editor-check-box {
+  display: flex;
+  align-items: center;
+  min-height: 40px;
+}
+
+.memory-editor-check.disabled {
+  opacity: 0.55;
+}
+
+/* Escape the global `input { width: 100% }` rule so the checkbox stays a
+   checkbox instead of stretching across its box. */
+.memory-editor-check-box input[type="checkbox"] {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+}
+
+.memory-editor-advanced {
+  grid-column: 1 / -1;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.018);
+}
+
+.memory-editor-advanced summary {
+  padding: 10px 11px;
+  color: var(--text-secondary);
+  font: 700 11px/1 var(--body);
+  cursor: pointer;
+}
+
+.memory-editor-advanced summary:hover {
+  color: var(--text-primary);
+}
+
+.memory-editor-advanced[open] {
+  border-color: rgba(249, 115, 22, 0.24);
+}
+
+.memory-editor-advanced .advanced-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 0;
+  padding: 0 10px 10px;
+}
+
+.memory-editor-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.memory-editor-actions .modal-btn {
+  flex: 0 1 180px;
+}
+
+@media (max-width: 760px) {
+  .memory-editor-grid,
+  .journal-editor-grid,
+  .memory-editor-advanced .advanced-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .journal-editor-grid .memory-editor-check {
+    grid-column: 1 / -1;
+  }
 }
 
 .core-card {
