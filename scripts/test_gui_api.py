@@ -431,6 +431,91 @@ def test_gui_api_list_memories_read_only_with_history_views():
         assert [item["id"] for item in detail["versions"]] == [2, 1]
 
 
+def test_gui_api_add_memory_creates_table_and_undoes_insert():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        persona_dir = root / "personas" / "demo"
+        persona_dir.mkdir(parents=True)
+        (root / "logs").mkdir()
+        (root / "config.yaml").write_text("", encoding="utf-8")
+        (root / "persona.yaml").write_text("name: Base\n", encoding="utf-8")
+        (persona_dir / "config.yaml").write_text("", encoding="utf-8")
+        (persona_dir / "persona.yaml").write_text("name: Demo\n", encoding="utf-8")
+
+        db_path = root / "personas" / "demo" / "data" / "demo.db"
+        db_path.parent.mkdir(parents=True)
+        with closing(sqlite3.connect(db_path)) as conn:
+            conn.execute(
+                """
+                CREATE TABLE memories (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    text TEXT NOT NULL,
+                    tags TEXT NOT NULL DEFAULT '[]',
+                    type TEXT NOT NULL DEFAULT 'fact',
+                    importance INTEGER NOT NULL DEFAULT 5,
+                    retrieval_count INTEGER NOT NULL DEFAULT 0,
+                    last_accessed TEXT,
+                    supersedes INTEGER,
+                    journal_file TEXT,
+                    date TEXT NOT NULL,
+                    embedding BLOB
+                )
+                """
+            )
+            conn.commit()
+
+        api = PulseAPI(root)
+        added = api.add_memory("demo", {
+            "text": "Piper is Lena's girl cat.",
+            "tags": "piper, cat, correction",
+            "importance": 7,
+            "date": "2026-04-20",
+            "time_sensitive": False,
+        })
+        assert added["ok"] is True
+        assert added["changed"] is True
+        assert added["memory_id"] == 1
+
+        with closing(sqlite3.connect(db_path)) as conn:
+            row = conn.execute(
+                "SELECT text, tags, type, importance, status, confidence, source, embedding, date "
+                "FROM memories WHERE id = 1"
+            ).fetchone()
+            assert row[0] == "Piper is Lena's girl cat."
+            assert json.loads(row[1]) == ["piper", "cat", "correction"]
+            assert row[2] == "fact"
+            assert row[3] == 7
+            assert row[4] == "current"
+            assert row[5] == "medium"
+            assert row[6] == "user_defined"
+            assert row[7] is None
+            assert row[8] == "2026-04-20T00:00:00+00:00"
+
+        payload_path = next((root / "gui_data" / "db_backups" / "demo" / added["undo_stamp"]).glob("*.json"))
+        payload = json.loads(payload_path.read_text(encoding="utf-8"))
+        assert payload["action"] == "memory-add"
+        assert payload["before"] is None
+        assert payload["delete_where"] == {"id": 1}
+
+        restored = api.restore_db_before_image("demo", added["undo_stamp"])
+        assert restored["ok"] is True
+        with closing(sqlite3.connect(db_path)) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0] == 0
+
+        rejected = api.add_memory("demo", {"text": "   "})
+        assert rejected["ok"] is False
+        rejected_status = api.add_memory("demo", {
+            "text": "This should not be born orphaned.",
+            "status": "superseded",
+        })
+        assert rejected_status["ok"] is False
+        rejected_date = api.add_memory("demo", {
+            "text": "This date is nonsense.",
+            "date": "not-a-date",
+        })
+        assert rejected_date["ok"] is False
+
+
 def test_gui_api_memory_mutations_backup_restore_and_relink():
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -1018,6 +1103,7 @@ if __name__ == "__main__":
     test_gui_api_get_lantern_read_only()
     test_gui_api_lantern_update_and_dim_write_safely()
     test_gui_api_list_memories_read_only_with_history_views()
+    test_gui_api_add_memory_creates_table_and_undoes_insert()
     test_gui_api_memory_mutations_backup_restore_and_relink()
     test_gui_api_list_journal_entries_read_only_views()
     test_gui_api_journal_mutations_update_mirror_and_restore()
