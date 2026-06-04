@@ -929,6 +929,57 @@ class PulseAPI:
             "db_path": _safe_rel(db_path, self.root),
         }
 
+    def add_memory(self, persona: str, fields: dict) -> dict:
+        valid = self._validate_persona_for_db_write(persona)
+        if not valid["ok"]:
+            return valid
+
+        db_path = self._persona_database_path(persona)
+        try:
+            cleaned = self._clean_memory_insert(fields or {})
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+            with closing(_connect_sqlite(db_path)) as conn:
+                self._ensure_memories_table(conn)
+                memory_date = cleaned["date"] or datetime.now(timezone.utc).isoformat()
+                with conn:
+                    cur = conn.execute(
+                        "INSERT INTO memories "
+                        "(text, tags, type, importance, embedding, supersedes, "
+                        "journal_file, date, status, confidence, source, "
+                        "last_confirmed, time_sensitive, valid_until) "
+                        "VALUES (?, ?, 'fact', ?, NULL, NULL, NULL, ?, ?, ?, ?, NULL, ?, ?)",
+                        (
+                            cleaned["text"],
+                            json.dumps(cleaned["tags"], ensure_ascii=False),
+                            cleaned["importance"],
+                            memory_date,
+                            cleaned["status"],
+                            cleaned["confidence"],
+                            cleaned["source"],
+                            cleaned["time_sensitive"],
+                            cleaned["valid_until"],
+                        ),
+                    )
+                    memory_id = int(cur.lastrowid)
+                stamp = self._write_db_before_image(
+                    persona,
+                    "memory-add",
+                    "memories",
+                    None,
+                    delete_where={"id": memory_id},
+                )
+        except (sqlite3.Error, OSError, ValueError) as e:
+            return {"ok": False, "error": f"Could not add memory: {e}"}
+
+        return {
+            "ok": True,
+            "changed": True,
+            "memory_id": memory_id,
+            "undo_stamp": stamp,
+            "memory": self.get_memory_detail(persona, memory_id),
+            "running": self._persona_is_running(persona),
+        }
+
     def update_memory(self, persona: str, memory_id: int, changes: dict) -> dict:
         valid = self._validate_persona_for_db_write(persona)
         if not valid["ok"]:
@@ -1820,7 +1871,7 @@ class PulseAPI:
             raise ValueError("Memory changes must be an object.")
         allowed = {
             "text", "tags", "importance", "status", "confidence", "source",
-            "time_sensitive", "valid_until",
+            "time_sensitive", "valid_until", "date",
         }
         unknown = set(changes) - allowed
         if unknown:
@@ -1879,6 +1930,58 @@ class PulseAPI:
                 cleaned["valid_until"] = value or None
 
         return cleaned, text_changed
+
+    def _clean_memory_insert(self, fields: dict) -> dict:
+        if not isinstance(fields, dict):
+            raise ValueError("Memory fields must be an object.")
+        allowed = {
+            "text", "tags", "importance", "status", "confidence", "source",
+            "time_sensitive", "valid_until", "date",
+        }
+        unknown = set(fields) - allowed
+        if unknown:
+            raise ValueError(f"Unknown memory field: {sorted(unknown)[0]}")
+
+        text = self._clean_db_text(fields.get("text"), "Memory text", max_len=50000)
+        if not text.strip():
+            raise ValueError("Memory text cannot be empty.")
+
+        status = str(fields.get("status") or "current").strip()
+        if status not in MEMORY_STATUSES:
+            raise ValueError(f"Invalid memory status: {status}")
+        if status == "superseded":
+            raise ValueError("New memories cannot start as superseded.")
+        confidence = str(fields.get("confidence") or "medium").strip()
+        if confidence not in MEMORY_CONFIDENCES:
+            raise ValueError(f"Invalid memory confidence: {confidence}")
+        source = str(fields.get("source") or "user_defined").strip()
+        if source not in MEMORY_SOURCES:
+            raise ValueError(f"Invalid memory source: {source}")
+
+        return {
+            "text": text,
+            "tags": self._clean_tag_list(fields.get("tags")),
+            "importance": self._clean_int(fields.get("importance", 5), "Memory importance", 1, 10),
+            "status": status,
+            "confidence": confidence,
+            "source": source,
+            "date": self._clean_memory_date(fields.get("date")),
+            "time_sensitive": int(bool(fields.get("time_sensitive"))) if "time_sensitive" in fields else None,
+            "valid_until": self._clean_optional_db_text(fields.get("valid_until"), "Valid until", max_len=80) or None,
+        }
+
+    def _clean_memory_date(self, value: Any) -> str | None:
+        raw = self._clean_optional_db_text(value, "Memory date", max_len=80)
+        if not raw:
+            return None
+        candidate = raw
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", candidate):
+            candidate = f"{candidate}T00:00:00+00:00"
+        try:
+            datetime.fromisoformat(candidate.replace("Z", "+00:00"))
+        except ValueError as e:
+            raise ValueError("Memory date must be YYYY-MM-DD or an ISO timestamp.") from e
+        return candidate
 
     def _clean_journal_update(self, changes: dict, before: dict) -> tuple[dict, bool]:
         if not isinstance(changes, dict):
@@ -2122,6 +2225,49 @@ class PulseAPI:
         if isinstance(value, list):
             return [self._json_restore_db_value(item) for item in value]
         return value
+
+    def _ensure_memories_table(self, conn: sqlite3.Connection) -> None:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS memories (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                text            TEXT NOT NULL,
+                tags            TEXT NOT NULL DEFAULT '[]',
+                type            TEXT NOT NULL DEFAULT 'fact',
+                importance      INTEGER NOT NULL DEFAULT 5,
+                retrieval_count INTEGER NOT NULL DEFAULT 0,
+                last_accessed   TEXT,
+                supersedes      INTEGER,
+                journal_file    TEXT,
+                date            TEXT NOT NULL DEFAULT (datetime('now')),
+                status          TEXT,
+                confidence      TEXT,
+                source          TEXT,
+                last_confirmed  TEXT,
+                time_sensitive  INTEGER,
+                valid_until     TEXT,
+                embedding       BLOB
+            );
+            CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(type, date DESC);
+            CREATE INDEX IF NOT EXISTS idx_memories_importance ON memories(importance DESC);
+            """
+        )
+        for stmt in [
+            "ALTER TABLE memories ADD COLUMN status TEXT",
+            "ALTER TABLE memories ADD COLUMN confidence TEXT",
+            "ALTER TABLE memories ADD COLUMN source TEXT",
+            "ALTER TABLE memories ADD COLUMN last_confirmed TEXT",
+            "ALTER TABLE memories ADD COLUMN time_sensitive INTEGER",
+            "ALTER TABLE memories ADD COLUMN valid_until TEXT",
+        ]:
+            try:
+                conn.execute(stmt)
+            except sqlite3.OperationalError:
+                pass
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_memories_status "
+            "ON memories(status, date DESC)"
+        )
 
     def _restore_table_before_image(self, conn: sqlite3.Connection,
                                     table: str, before: Any) -> int:

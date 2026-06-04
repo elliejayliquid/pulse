@@ -179,6 +179,7 @@ const fallbackApi = {
   async dim_lantern() { return { ok: false, error: "Run through pywebview to dim lantern." }; },
   async list_memories() { return { ok: false, error: "Run through pywebview to browse memories." }; },
   async get_memory_detail() { return { ok: false, error: "Run through pywebview to inspect memories." }; },
+  async add_memory() { return { ok: false, error: "Run through pywebview to add memories." }; },
   async update_memory() { return { ok: false, error: "Run through pywebview to edit memories." }; },
   async delete_memory() { return { ok: false, error: "Run through pywebview to delete memories." }; },
   async list_journal_entries() { return { ok: false, error: "Run through pywebview to browse journal entries." }; },
@@ -1487,6 +1488,10 @@ function handleContinuityAction(action) {
     openMemoriesDialog();
     return;
   }
+  if (action === "add-memory") {
+    void openAddMemoryDialog();
+    return;
+  }
   if (action === "browse-journal") {
     openJournalDialog();
     return;
@@ -1504,7 +1509,6 @@ function handleContinuityAction(action) {
     return;
   }
   const messages = {
-    "add-memory": "Adding memories will come after the memory browser and preview flow.",
     "import-content": "Continuity import will start with pasted companion-written notes and preview before writing.",
     "learn-more": "Continuity planning lives in designs/continuity_section.md.",
   };
@@ -2256,6 +2260,20 @@ async function openMemoriesDialog() {
   await loadMemoryPage(1);
 }
 
+async function openAddMemoryDialog() {
+  if (!state.current || state.current.name === "__base__") {
+    setNotice("Choose a persona first.", "warning", NOTICE_WARNING_MS);
+    return;
+  }
+  state.memoryBrowse = { view: "active", kind: "fact", page: 0, pageSize: 25, total: 0, hasMore: false, items: [] };
+  state.memoryUndoStamp = "";
+  el("memoriesDialog").classList.remove("hidden");
+  document.body.classList.add("modal-open");
+  syncMemoryTabs();
+  syncMemoryTypeTabs();
+  showAddMemoryForm();
+}
+
 async function hideMemoriesDialog() {
   if (!(await confirmDiscardMemoryEdits())) return;
   el("memoriesDialog").classList.add("hidden");
@@ -2298,10 +2316,35 @@ function syncMemoryTypeTabs() {
 function showMemoryList() {
   state.memoryDetailId = "";
   state.memoryBaselines = {};
+  el("memoryViewTabs").classList.remove("hidden");
+  el("memoryTypeTabs").classList.remove("hidden");
   el("memoryDetail").classList.add("hidden");
   el("memoryDetail").innerHTML = "";
   el("memoriesBody").classList.remove("hidden");
   renderMemoryList();
+}
+
+function showAddMemoryForm() {
+  state.memoryDetailId = "__add__";
+  state.memoryBaselines = { new: memoryBaseline(defaultMemoryDraft()) };
+  el("memoryViewTabs").classList.add("hidden");
+  el("memoryTypeTabs").classList.add("hidden");
+  el("memoryDetail").classList.remove("hidden");
+  el("memoriesBody").classList.add("hidden");
+  el("memoryLoadMoreBtn").classList.add("hidden");
+  el("memoriesSubtitle").textContent = "Add a new fact memory.";
+  el("memoryDetail").innerHTML = `
+    <button class="memory-back-btn" type="button">&larr; Back to memories</button>
+    <div class="memory-detail-head">
+      <h3>Add Memory</h3>
+      <span>Fact / user-defined</span>
+    </div>
+    <div class="memory-versions">
+      ${renderMemoryEditor(defaultMemoryDraft(), true, "", "add")}
+    </div>`;
+  el("memoryDetail").querySelector(".memory-back-btn").addEventListener("click", () => { void cancelAddMemory(); });
+  wireMemoryEditorEvents(el("memoryDetail"));
+  setMemoryNotice("Write a fact, correction, or useful continuity note, then add it.");
 }
 
 async function loadMemoryPage(page) {
@@ -2414,16 +2457,7 @@ async function openMemoryDetail(memoryId, force = false) {
   el("memoryDetail").querySelector(".memory-back-btn").addEventListener("click", async () => {
     if (await confirmDiscardMemoryEdits()) showMemoryList();
   });
-  el("memoryDetail").querySelectorAll("[data-memory-save]").forEach((button) => {
-    button.addEventListener("click", () => { void saveMemoryEditor(button.dataset.memorySave); });
-  });
-  el("memoryDetail").querySelectorAll("[data-memory-delete]").forEach((button) => {
-    button.addEventListener("click", () => { void deleteMemoryFromEditor(button.dataset.memoryDelete); });
-  });
-  el("memoryDetail").querySelectorAll("[data-memory-editor]").forEach((editor) => {
-    editor.addEventListener("input", () => syncMemoryEditorDirty(editor.dataset.memoryEditor));
-    editor.addEventListener("change", () => syncMemoryEditorDirty(editor.dataset.memoryEditor));
-  });
+  wireMemoryEditorEvents(el("memoryDetail"));
 }
 
 function renderMemoryVersion(memory, current) {
@@ -2442,65 +2476,99 @@ function renderMemoryVersion(memory, current) {
     </article>`;
 }
 
-function renderMemoryEditor(memory, current, sourceNote = "") {
+function renderMemoryEditor(memory, current, sourceNote = "", mode = "edit") {
   const baseline = memoryBaseline(memory);
   const status = selectValue(baseline.status, MEMORY_STATUSES, "current");
-  const statusLocked = status === "superseded";
+  const statusLocked = mode !== "add" && status === "superseded";
   const confidence = selectValue(baseline.confidence, MEMORY_CONFIDENCES, "medium");
   const source = selectValue(baseline.source, MEMORY_SOURCES, "model_extracted");
+  const editorId = mode === "add" ? "new" : String(memory.id);
+  const title = mode === "add"
+    ? "New memory"
+    : `#${escapeHtml(memory.id)}${current ? " / Current" : ""}`;
+  const meta = mode === "add"
+    ? "Fact / user-defined"
+    : `${escapeHtml(memory.date_display || "unknown")} / ${escapeHtml(memory.age_label || "unknown age")}`;
   return `
     <article class="memory-version memory-editor-card ${current ? "current" : ""}">
       <div class="memory-version-head">
-        <strong>#${escapeHtml(memory.id)}${current ? " / Current" : ""}</strong>
-        <span>${escapeHtml(memory.date_display || "unknown")} / ${escapeHtml(memory.age_label || "unknown age")}</span>
+        <strong>${title}</strong>
+        <span>${meta}</span>
       </div>
       ${sourceNote}
-      <div id="memoryEditor-${escapeHtml(memory.id)}" class="memory-editor-grid" data-memory-editor="${escapeHtml(memory.id)}">
-        <label class="memory-editor-field wide">
+      <div id="memoryEditor-${escapeHtml(editorId)}" class="memory-editor-grid" data-memory-editor="${escapeHtml(editorId)}">
+        <label class="memory-editor-field wide" title="The fact, correction, or continuity note Pulse should remember.">
           <span>Memory</span>
           <textarea data-field="text" rows="8">${escapeHtml(baseline.text)}</textarea>
         </label>
-        <label class="memory-editor-field">
+        <label class="memory-editor-field" title="Comma-separated labels used for filtering, search hints, and context organization.">
           <span>Tags</span>
           <input data-field="tags" type="text" value="${escapeHtml(baseline.tags)}" placeholder="comma, separated, tags">
         </label>
-        <label class="memory-editor-field">
+        <label class="memory-editor-field" title="1-10. Higher means more likely to be surfaced in context and search.">
           <span>Importance</span>
           <input data-field="importance" type="number" min="1" max="10" value="${escapeHtml(baseline.importance)}">
         </label>
-        <label class="memory-editor-field">
+        <label class="memory-editor-field" title="Optional expiry date for time-sensitive memories. Blank means no expiry.">
           <span>Valid Until</span>
           <input data-field="valid_until" type="text" value="${escapeHtml(baseline.valid_until)}" placeholder="YYYY-MM-DD (optional)">
         </label>
-        <label class="memory-editor-check">
+        <label class="memory-editor-check" title="Marks this memory as something that may go stale and should be verified later.">
           <span>Time-sensitive</span>
           <div class="memory-editor-check-box">
             <input data-field="time_sensitive" type="checkbox" ${baseline.time_sensitive ? "checked" : ""}>
           </div>
         </label>
+        ${mode === "add" ? `
+        <label class="memory-editor-field" title="When this memory became true or happened. Blank uses the current date and time.">
+          <span>Memory Date</span>
+          <input data-field="date" type="text" value="${escapeHtml(baseline.date)}" placeholder="YYYY-MM-DD (blank = now)">
+        </label>` : ""}
+        ${mode === "add" ? `
+        <div class="memory-editor-submit-cell">
+          <button class="modal-btn secondary" type="button" data-memory-add>Add Memory</button>
+        </div>` : ""}
+        ${mode === "add" ? "" : `
         <details class="memory-editor-advanced">
           <summary>Advanced classification</summary>
           <div class="memory-editor-grid advanced-grid">
-        <label class="memory-editor-field">
+        <label class="memory-editor-field" title="How this memory should behave now. Superseded is engine-managed.">
           <span>Status</span>
           <select data-field="status"${statusLocked ? ' disabled title="Superseding is engine-managed and set automatically."' : ""}>${renderOptions(statusLocked ? MEMORY_STATUSES : MEMORY_USER_STATUSES, status)}</select>
         </label>
-        <label class="memory-editor-field">
+        <label class="memory-editor-field" title="How certain this memory is. Low confidence is shown to the companion as a caution.">
           <span>Confidence</span>
           <select data-field="confidence">${renderOptions(MEMORY_CONFIDENCES, confidence)}</select>
         </label>
-        <label class="memory-editor-field">
+        <label class="memory-editor-field" title="Where this memory came from: human, model, import, or Pulse system.">
           <span>Source</span>
           <select data-field="source">${renderOptions(MEMORY_SOURCES, source)}</select>
         </label>
           </div>
-        </details>
+        </details>`}
       </div>
+      ${mode === "add" ? "" : `
       <div class="memory-editor-actions">
         <button class="modal-btn secondary" type="button" data-memory-save="${escapeHtml(memory.id)}">Save Memory</button>
         <button class="modal-btn danger" type="button" data-memory-delete="${escapeHtml(memory.id)}">Delete</button>
-      </div>
+      </div>`}
     </article>`;
+}
+
+function wireMemoryEditorEvents(root) {
+  root.querySelectorAll("[data-memory-save]").forEach((button) => {
+    button.addEventListener("click", () => { void saveMemoryEditor(button.dataset.memorySave); });
+  });
+  root.querySelectorAll("[data-memory-delete]").forEach((button) => {
+    button.addEventListener("click", () => { void deleteMemoryFromEditor(button.dataset.memoryDelete); });
+  });
+  root.querySelectorAll("[data-memory-add]").forEach((button) => {
+    button.addEventListener("click", addMemoryFromEditor);
+  });
+  root.querySelectorAll("[data-memory-editor]").forEach((editor) => {
+    editor.addEventListener("input", () => syncMemoryEditorDirty(editor.dataset.memoryEditor));
+    editor.addEventListener("change", () => syncMemoryEditorDirty(editor.dataset.memoryEditor));
+  });
 }
 
 function memoryIsEditable(memory) {
@@ -2515,8 +2583,25 @@ function memoryBaseline(memory) {
     status: selectValue(memory.status, MEMORY_STATUSES, "current"),
     confidence: selectValue(memory.confidence, MEMORY_CONFIDENCES, "medium"),
     source: selectValue(memory.source, MEMORY_SOURCES, "model_extracted"),
+    date: memory.date_edit || "",
     valid_until: memory.valid_until || "",
     time_sensitive: Boolean(memory.time_sensitive),
+  };
+}
+
+function defaultMemoryDraft() {
+  return {
+    id: "new",
+    text: "",
+    tags: [],
+    type: "fact",
+    importance: 5,
+    status: "current",
+    confidence: "medium",
+    source: "user_defined",
+    date_edit: "",
+    valid_until: "",
+    time_sensitive: false,
   };
 }
 
@@ -2527,9 +2612,10 @@ function memoryCurrentValues(memoryId) {
     text: editor.querySelector('[data-field="text"]').value,
     tags: editor.querySelector('[data-field="tags"]').value,
     importance: editor.querySelector('[data-field="importance"]').value,
-    status: editor.querySelector('[data-field="status"]').value,
-    confidence: editor.querySelector('[data-field="confidence"]').value,
-    source: editor.querySelector('[data-field="source"]').value,
+    date: editor.querySelector('[data-field="date"]')?.value || "",
+    status: editor.querySelector('[data-field="status"]')?.value || "current",
+    confidence: editor.querySelector('[data-field="confidence"]')?.value || "medium",
+    source: editor.querySelector('[data-field="source"]')?.value || "user_defined",
     valid_until: editor.querySelector('[data-field="valid_until"]').value,
     time_sensitive: editor.querySelector('[data-field="time_sensitive"]').checked,
   };
@@ -2558,11 +2644,42 @@ function memoryIsDirty() {
 async function confirmDiscardMemoryEdits() {
   if (!memoryIsDirty()) return true;
   return showConfirm(
-    "Discard unsaved memory edits?",
-    "You have unsaved memory changes. Leaving this view will discard them.",
+    state.memoryDetailId === "__add__" ? "Discard new memory?" : "Discard unsaved memory edits?",
+    state.memoryDetailId === "__add__"
+      ? "This new memory has unsaved content. Leaving this view will discard it."
+      : "You have unsaved memory changes. Leaving this view will discard them.",
     "Discard",
     "secondary"
   );
+}
+
+async function addMemoryFromEditor() {
+  if (!state.current) return;
+  const fields = memoryCurrentValues("new");
+  if (!text(fields.text).trim()) {
+    setMemoryNotice("Memory text is required before adding.");
+    return;
+  }
+  const result = await api().add_memory(state.current.name, fields);
+  if (!result.ok) {
+    setMemoryNotice(result.error || "Could not add memory.", state.memoryUndoStamp);
+    return;
+  }
+  state.memoryUndoStamp = result.undo_stamp || "";
+  const memoryId = result.memory_id || result.memory?.current_id || "new";
+  showAddMemoryForm();
+  setMemoryNotice(
+    result.running
+      ? `Memory #${memoryId} added. Running persona will see it after the next memory search.`
+      : `Memory #${memoryId} added. Its embedding will be repaired when the persona starts or searches memory.`,
+    state.memoryUndoStamp
+  );
+}
+
+async function cancelAddMemory() {
+  if (!(await confirmDiscardMemoryEdits())) return;
+  showMemoryList();
+  await loadMemoryPage(1);
 }
 
 async function saveMemoryEditor(memoryId) {
@@ -2621,7 +2738,9 @@ async function undoMemoryDbEdit() {
     return;
   }
   state.memoryUndoStamp = "";
-  if (state.memoryDetailId) {
+  if (state.memoryDetailId === "__add__") {
+    showAddMemoryForm();
+  } else if (state.memoryDetailId) {
     await openMemoryDetail(state.memoryDetailId);
   } else {
     await loadMemoryPage(1);
