@@ -1418,12 +1418,34 @@ textarea {
   text-align: center;
 }
 
+.tuning-number-row .tuning-inline-input {
+  width: 72px;
+}
+
+.tuning-number-spacer {
+  min-width: 0;
+}
+
 .slider-row {
   display: grid;
   grid-template-columns: 130px 1fr 56px;
   align-items: center;
   gap: 14px;
   padding: 10px 0;
+}
+
+.slider-row.tuning-number-row {
+  grid-template-columns: 130px 72px 1fr;
+  padding: 8px 0;
+}
+
+.tuning-number-row + .tuning-extras {
+  margin-top: 4px;
+}
+
+.tuning-context-row .tuning-inline-label {
+  color: var(--text-secondary);
+  font: 11px/1 var(--mono);
 }
 
 .slider-row + .slider-row {
@@ -2877,6 +2899,14 @@ textarea {
   .slider-row {
     grid-template-columns: 100px 1fr 48px;
     gap: 10px;
+  }
+
+  .slider-row.tuning-number-row {
+    grid-template-columns: 100px 64px 1fr;
+  }
+
+  .tuning-number-row .tuning-inline-input {
+    width: 64px;
   }
 
   .tuning-extras {

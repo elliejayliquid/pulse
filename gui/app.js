@@ -313,11 +313,11 @@ function renderPersonaMenu() {
 function renderTuning(summary) {
   const s = summary || {};
   const sliders = [
-    { label: "Temperature",    key: "temperature",        min: 0, max: 2,    fmt: 2, tip: "How creative vs predictable. 0.7–0.85 is the sweet spot. Above 1.0 gets chaotic fast" },
-    { label: "Max Response",   key: "max_response_tokens", min: 256, max: 32768, fmt: 0, tip: "Max reply length in tokens (~750 words per 1000). 2048–4096 is a good range — too high and replies get rambly" },
-    { label: "Freq Penalty",   key: "frequency_penalty",  min: 0, max: 2,    fmt: 2, tip: "Discourages repeating the same words. 0.3–0.5 works well — above 1.0 causes awkward word avoidance" },
-    { label: "Pres Penalty",   key: "presence_penalty",   min: 0, max: 2,    fmt: 2, tip: "Encourages new topics. 0.1–0.3 is natural — too high and the companion jumps topics mid-thought" },
-    { label: "Top P",          key: "top_p",              min: 0, max: 1,    fmt: 2, tip: "Word choice diversity. 0.95–1.0 is good. Lower values make responses safer but can feel flat" },
+    { label: "Temperature", key: "temperature", min: 0, max: 2, fmt: 2, tip: "How creative vs predictable. 0.7-0.85 is the sweet spot. Above 1.0 gets chaotic fast" },
+    { label: "Max Response", key: "max_response_tokens", min: 256, max: 32768, fmt: 0, tip: "Max reply length in tokens. 2048-4096 is a good range; too high and replies can get rambly" },
+    { label: "Freq Penalty", key: "frequency_penalty", min: 0, max: 2, fmt: 2, tip: "Discourages repeating the same words. 0.3-0.5 works well; above 1.0 can sound awkward" },
+    { label: "Pres Penalty", key: "presence_penalty", min: 0, max: 2, fmt: 2, tip: "Encourages new topics. 0.1-0.3 is natural; too high and the companion jumps topics" },
+    { label: "Top P", key: "top_p", min: 0, max: 1, fmt: 2, tip: "Word choice diversity. 0.95-1.0 is good. Lower values make responses safer but can feel flat" },
   ];
 
   let html = "";
@@ -344,7 +344,12 @@ function renderTuning(summary) {
   const tail = text(s.context_budget?.recent_tail_exchanges, "2");
   const topK = text(s.top_k, "");
 
-  html += `<div class="tuning-extras">
+  html += `<div class="slider-row tuning-number-row" title="Top-K sampler. Local/OpenRouter/Anthropic can use it; OpenAI ignores it. Leave blank to use the provider default. 40 is common; Gemma recommends 64">
+    <span class="slider-label">Top K</span>
+    <input id="tuningTopK" class="tuning-inline-input" type="number" min="0" max="1000" placeholder="default" value="${escapeHtml(topK)}">
+    <span class="tuning-number-spacer" aria-hidden="true"></span>
+  </div>
+  <div class="tuning-extras">
     <label class="check-label-inline" title="Let the model think step-by-step before answering. Uses more tokens but improves quality on complex tasks">
       <input id="tuningReasoning" type="checkbox" ${reasoning ? "checked" : ""}>
       Reasoning
@@ -359,19 +364,15 @@ function renderTuning(summary) {
       <input id="tuningShowReasoning" type="checkbox" ${showR ? "checked" : ""}>
       Show Reasoning
     </label>
-    <label class="tuning-inline-label" style="margin-left:auto" title="How many tool calls the model can chain per turn. Default 8 is good — higher lets it do more autonomously but takes longer">
-      Max Tool Rounds
-      <input id="tuningMaxRounds" class="tuning-inline-input" type="number" min="1" max="32" value="${escapeHtml(rounds)}">
-    </label>
   </div>
-  <div class="tuning-extras">
-    <label class="tuning-inline-label" title="Message pairs kept word-for-word after summarization. 2–4 is good — keeps continuity without eating up context">
+  <div class="tuning-extras tuning-context-row">
+    <label class="tuning-inline-label" title="Message pairs kept word-for-word after summarization. 2-4 is good; keeps continuity without eating up context">
       Recent Tail Exchanges
       <input id="tuningTailExchanges" class="tuning-inline-input" type="number" min="1" max="10" value="${escapeHtml(tail)}">
     </label>
-    <label class="tuning-inline-label" title="Top-K sampler — limits sampling to the K most likely tokens. Local/OpenRouter/Anthropic only (OpenAI ignores it). Leave blank to use the provider default (nothing sent). 40 is common, Gemma recommends 64">
-      Top K
-      <input id="tuningTopK" class="tuning-inline-input" type="number" min="0" max="1000" placeholder="default" value="${escapeHtml(topK)}">
+    <label class="tuning-inline-label" title="How many tool calls the model can chain per turn. Default 8 is good; higher lets it do more autonomously but takes longer">
+      Max Tool Rounds
+      <input id="tuningMaxRounds" class="tuning-inline-input" type="number" min="1" max="32" value="${escapeHtml(rounds)}">
     </label>
   </div>`;
 
@@ -1925,7 +1926,7 @@ function formatDiff(raw) {
 }
 
 function wireTuningControls() {
-  ["tuningMaxRounds", "tuningTailExchanges"].forEach((id) => {
+  ["tuningTopK", "tuningTailExchanges", "tuningMaxRounds"].forEach((id) => {
     const node = el(id);
     if (node) node.addEventListener("input", () => setDirty(hasEditableChanges()));
   });
