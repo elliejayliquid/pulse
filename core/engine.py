@@ -63,6 +63,11 @@ class PulseEngine:
         from core.usage import UsageTracker
         usage_tracker = UsageTracker(config)
 
+        # top_k is an optional sampler (local llama.cpp / OpenRouter / Anthropic).
+        # OpenAI's API rejects it, so it's only forwarded to the clients that
+        # accept it. None unless explicitly configured.
+        top_k = model_config.get("top_k")
+
         if provider_type == "anthropic":
             self.llm = AnthropicClient(
                 endpoint=endpoint,
@@ -70,6 +75,7 @@ class PulseEngine:
                 temperature=model_config.get("temperature", 0.7),
                 max_tokens=model_config.get("max_response_tokens", 1024),
                 top_p=model_config.get("top_p", 1.0),
+                top_k=top_k,
                 api_key=api_key,
                 usage_tracker=usage_tracker,
                 cache_ttl=provider_config.get("cache_ttl", "5m"),
@@ -97,6 +103,7 @@ class PulseEngine:
                 frequency_penalty=model_config.get("frequency_penalty", 0.0),
                 presence_penalty=model_config.get("presence_penalty", 0.0),
                 top_p=model_config.get("top_p", 1.0),
+                top_k=top_k,
                 api_key=api_key,
                 usage_tracker=usage_tracker,
                 reasoning=model_config.get("reasoning", False),

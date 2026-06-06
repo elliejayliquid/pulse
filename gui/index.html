@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Pulse Engine</title>
-  <link rel="stylesheet" href="style.css?v=20260604d">
+  <link rel="stylesheet" href="style.css?v=20260605b">
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
   <meta http-equiv="Pragma" content="no-cache">
   <meta http-equiv="Expires" content="0">
@@ -65,7 +65,7 @@
           <div class="field-grid three">
             <label>Name<input id="identityName" type="text"></label>
             <label>User<input id="identityUser" type="text"></label>
-            <label>Display Model Name<input id="identityModel" type="text"></label>
+            <label title="A friendly label for this companion's model, shown in the UI only. Cosmetic — the real model is set in the Provider section.">Display Model Name<input id="identityModel" type="text"></label>
           </div>
           <label class="block-field">System Prompt<textarea id="systemPrompt"></textarea></label>
           <label class="block-field">Traits<div id="traits" class="chips"></div></label>
@@ -575,6 +575,23 @@
       <div class="modal-actions">
         <button id="secretsSave" class="modal-btn secondary" type="button" disabled>Save</button>
         <button id="secretsCancel" class="modal-btn ghost" type="button">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="newPersonaDialog" class="modal-overlay hidden">
+    <div class="modal-card new-persona-card">
+      <h2 class="modal-title">New Persona</h2>
+      <p class="modal-body">Create a blank persona from the template, then review setup on the normal page.</p>
+      <div id="newPersonaError" class="notice-pill hidden"></div>
+      <div class="new-persona-body">
+        <label>Display Name<input id="newPersonaName" type="text" autocomplete="off" placeholder="Kai"></label>
+        <label>Folder Slug<input id="newPersonaSlug" type="text" autocomplete="off" placeholder="kai"></label>
+        <label>User Name<input id="newPersonaUser" type="text" autocomplete="off" placeholder="Lena"></label>
+      </div>
+      <div class="modal-actions">
+        <button id="newPersonaCreate" class="modal-btn secondary" type="button">Create Persona</button>
+        <button id="newPersonaCancel" class="modal-btn ghost" type="button">Cancel</button>
       </div>
     </div>
   </div>

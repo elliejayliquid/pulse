@@ -26,6 +26,11 @@ const MEMORY_STATUSES = ["current", "historical", "superseded", "archived"];
 const MEMORY_USER_STATUSES = ["current", "historical", "archived"];
 const MEMORY_CONFIDENCES = ["high", "medium", "low"];
 const MEMORY_SOURCES = ["user_defined", "model_extracted", "imported", "system"];
+// Sane API-context default when switching to a cloud provider (local uses its
+// own much smaller Local Server context). Only applied if the user hasn't set
+// a deliberately larger value.
+const CLOUD_DEFAULT_CONTEXT = 128000;
+const LOCALISH_CONTEXT_CEILING = 32768;
 const JOURNAL_ENTRY_TYPES = ["event", "preference", "topic", "tone", "open_thread", "follow_up", "reflection"];
 
 const state = {
@@ -154,6 +159,21 @@ const fallbackApi = {
   },
   async get_prefs() { return {}; },
   async save_prefs() { return { ok: true }; },
+  async create_persona(fields) {
+    return {
+      ok: true,
+      name: fields?.slug || "new_persona",
+      display_name: fields?.display_name || "New Persona",
+      persona: {
+        name: fields?.slug || "new_persona",
+        display_name: fields?.display_name || "New Persona",
+        provider: "local",
+        model: "fallback",
+        is_base: false,
+        running: false,
+      },
+    };
+  },
   async preview_persona_save() { return { ok: false, error: "Run through pywebview to save." }; },
   async save_persona() { return { ok: false, error: "Run through pywebview to save." }; },
   async get_secrets() { return { ok: false, error: "Run through pywebview to edit secrets." }; },
@@ -216,6 +236,7 @@ let memoriesBackdropPointerDown = false;
 let journalBackdropPointerDown = false;
 let coreBackdropPointerDown = false;
 let confirmBackdropPointerDown = false;
+let newPersonaBackdropPointerDown = false;
 
 function setNotice(message, kind = "info", autoHideMs = 0) {
   const box = el("notice");
@@ -283,6 +304,10 @@ function renderPersonaMenu() {
     });
     menu.appendChild(btn);
   });
+  // Nudge brand-new users toward their first companion: glow the "+ New"
+  // button while no real (non-base) persona exists yet.
+  const hasRealPersona = state.personas.some((persona) => !persona.is_base);
+  el("newPersonaBtn").classList.toggle("attention", !hasRealPersona);
 }
 
 function renderTuning(summary) {
@@ -317,6 +342,7 @@ function renderTuning(summary) {
   const showR = s.show_reasoning;
   const rounds = text(s.max_tool_rounds, "default");
   const tail = text(s.context_budget?.recent_tail_exchanges, "2");
+  const topK = text(s.top_k, "");
 
   html += `<div class="tuning-extras">
     <label class="check-label-inline" title="Let the model think step-by-step before answering. Uses more tokens but improves quality on complex tasks">
@@ -342,6 +368,10 @@ function renderTuning(summary) {
     <label class="tuning-inline-label" title="Message pairs kept word-for-word after summarization. 2–4 is good — keeps continuity without eating up context">
       Recent Tail Exchanges
       <input id="tuningTailExchanges" class="tuning-inline-input" type="number" min="1" max="10" value="${escapeHtml(tail)}">
+    </label>
+    <label class="tuning-inline-label" title="Top-K sampler — limits sampling to the K most likely tokens. Local/OpenRouter/Anthropic only (OpenAI ignores it). Leave blank to use the provider default (nothing sent). 40 is common, Gemma recommends 64">
+      Top K
+      <input id="tuningTopK" class="tuning-inline-input" type="number" min="0" max="1000" placeholder="default" value="${escapeHtml(topK)}">
     </label>
   </div>`;
 
@@ -426,6 +456,9 @@ function renderProcessButton(data) {
   const stopping = status.phase === "stopping";
   const keyStatus = currentKeyStatus();
   const missingKey = providerKeyMissing(keyStatus);
+  const summary = data?.summary || state.current?.summary || {};
+  const providerType = summary.provider_type || "local";
+  const missingLocalModel = providerType === "local" && !text(summary.model_file).trim();
 
   if (active || stopping) {
     btn.textContent = stopping ? "Stopping..." : "■ Stop";
@@ -435,10 +468,12 @@ function renderProcessButton(data) {
   } else {
     btn.textContent = "▶ Start";
     btn.className = "hero-start-btn";
-    btn.disabled = isBase || missingKey;
+    btn.disabled = isBase || missingKey || missingLocalModel;
     btn.title = missingKey
       ? `API key missing - set ${providerKeyEnv(keyStatus) || "provider.api_key_env"} in .env to start`
-      : "";
+      : missingLocalModel
+        ? "No local model file set - choose a .gguf in Local Server settings before starting"
+        : "";
   }
 }
 
@@ -1125,6 +1160,23 @@ function syncLocalServerVisibility() {
   el("localServerSection").classList.toggle("hidden", !isLocal);
 }
 
+// When the user switches to a cloud provider, nudge the API Context up to a
+// sane default — but only if it's blank or still at a small/local-ish value,
+// so a deliberately-chosen budget is never overwritten.
+function maybeBumpCloudContext() {
+  if (el("providerType").value === "local") return;
+  const field = el("maxContext");
+  const current = parseInt(field.value, 10);
+  const uncustomized = !field.value.trim() || (Number.isFinite(current) && current <= LOCALISH_CONTEXT_CEILING);
+  if (!uncustomized) return;
+  field.value = String(CLOUD_DEFAULT_CONTEXT);
+  setNotice(
+    "Set API context to 128K for this cloud provider — adjust in the Provider section if you need a different budget.",
+    "info",
+    NOTICE_INFO_MS
+  );
+}
+
 function renderProvider(data) {
   const summary = data.summary || {};
   const tts = summary.tts || {};
@@ -1209,6 +1261,7 @@ function editableSnapshot() {
       frequency_penalty: readSliderValue("frequency_penalty"),
       presence_penalty: readSliderValue("presence_penalty"),
       top_p: readSliderValue("top_p"),
+      top_k: el("tuningTopK")?.value || "",
       reasoning: Boolean(el("tuningReasoning")?.checked),
       reasoning_effort: el("tuningEffort")?.value || "",
       show_reasoning: Boolean(el("tuningShowReasoning")?.checked),
@@ -1350,7 +1403,7 @@ function collectEditableChanges() {
     if (value !== original.model?.[key]) {
       changes.model[key] = ["reasoning", "show_reasoning"].includes(key)
         ? value
-        : ["max_response_tokens", "max_context", "max_tool_rounds"].includes(key)
+        : ["max_response_tokens", "max_context", "max_tool_rounds", "top_k"].includes(key)
           ? numberOrEmpty(value)
           : ["temperature", "frequency_penalty", "presence_penalty", "top_p"].includes(key)
             ? numberOrEmpty(value)
@@ -1405,13 +1458,18 @@ function hasEditableChanges() {
 }
 
 function validateHeartbeatFields() {
+  const randomize = el("hbRandomize").checked;
   const numeric = [
     ["hbInterval", "Heartbeat interval", 1, 1440],
-    ["hbMin", "Heartbeat min interval", 1, 1440],
-    ["hbMax", "Heartbeat max interval", 1, 1440],
     ["hbQuietStart", "Quiet start", 0, 23],
     ["hbQuietEnd", "Quiet end", 0, 23],
   ];
+  // Min/max interval are only used when randomization is on, so only require
+  // and validate them in that case — otherwise they may legitimately be blank.
+  if (randomize) {
+    numeric.push(["hbMin", "Heartbeat min interval", 1, 1440]);
+    numeric.push(["hbMax", "Heartbeat max interval", 1, 1440]);
+  }
   for (const [id, label, min, max] of numeric) {
     const raw = el(id).value;
     if (raw === "") {
@@ -1422,10 +1480,12 @@ function validateHeartbeatFields() {
       return `${label} must be a whole number between ${min} and ${max}.`;
     }
   }
-  const hbMin = el("hbMin").value === "" ? null : Number(el("hbMin").value);
-  const hbMax = el("hbMax").value === "" ? null : Number(el("hbMax").value);
-  if (hbMin !== null && hbMax !== null && hbMin > hbMax) {
-    return "Heartbeat min interval cannot be greater than max interval.";
+  if (randomize) {
+    const hbMin = Number(el("hbMin").value);
+    const hbMax = Number(el("hbMax").value);
+    if (hbMin > hbMax) {
+      return "Heartbeat min interval cannot be greater than max interval.";
+    }
   }
   return "";
 }
@@ -1543,13 +1603,100 @@ async function loadPersona(name) {
   await loadLogs();
 
   if (name === "__base__") {
-    setNotice("You are viewing the base config. Phase 1 is read-only, so nothing can be saved from here yet.");
+    setNotice("This is the base configuration every companion inherits — it can't be started or edited here. Use “+ New” to create a companion of your own.");
   }
 }
 
 async function loadLogs() {
   if (!state.current) return;
   el("logTail").textContent = await api().get_log_tail(state.current.name, 100);
+}
+
+function slugFromDisplayName(value) {
+  return text(value)
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/[-_]{2,}/g, "-")
+    .replace(/^[-_]+|[-_]+$/g, "")
+    .slice(0, 64);
+}
+
+function openNewPersonaDialog() {
+  el("newPersonaName").value = "";
+  el("newPersonaSlug").value = "";
+  el("newPersonaSlug").dataset.autoSlug = "";
+  el("newPersonaUser").value = state.current?.identity?.user_name || state.current?.summary?.user_name || "";
+  el("newPersonaError").classList.add("hidden");
+  el("newPersonaError").textContent = "";
+  el("newPersonaCreate").disabled = false;
+  el("newPersonaDialog").classList.remove("hidden");
+  document.body.classList.add("modal-open");
+  setTimeout(() => el("newPersonaName").focus(), 0);
+}
+
+function closeNewPersonaDialog() {
+  el("newPersonaDialog").classList.add("hidden");
+  document.body.classList.remove("modal-open");
+}
+
+function showNewPersonaError(message) {
+  const box = el("newPersonaError");
+  box.textContent = message;
+  box.classList.remove("hidden");
+}
+
+function syncNewPersonaSlug() {
+  const nameInput = el("newPersonaName");
+  const slugInput = el("newPersonaSlug");
+  const previousAuto = slugInput.dataset.autoSlug || "";
+  const current = slugInput.value.trim();
+  if (current && current !== previousAuto) return;
+  const next = slugFromDisplayName(nameInput.value);
+  slugInput.value = next;
+  slugInput.dataset.autoSlug = next;
+}
+
+async function submitNewPersona() {
+  const displayName = el("newPersonaName").value.trim();
+  const slug = el("newPersonaSlug").value.trim().toLowerCase();
+  const userName = el("newPersonaUser").value.trim();
+  if (!displayName || !slug || !userName) {
+    showNewPersonaError("Display name, slug, and user name are required.");
+    return;
+  }
+  if (state.dirty || hasEditableChanges()) {
+    const ok = await showConfirm(
+      "Discard unsaved edits?",
+      "Creating a persona will switch the page after it succeeds. Unsaved edits on the current persona will be discarded.",
+      "Create persona",
+      "secondary"
+    );
+    if (!ok) return;
+  }
+
+  const button = el("newPersonaCreate");
+  button.disabled = true;
+  showNewPersonaError("Creating persona...");
+  const result = await api().create_persona({
+    display_name: displayName,
+    slug,
+    user_name: userName,
+  });
+  if (!result.ok) {
+    button.disabled = false;
+    showNewPersonaError(result.error || "Could not create persona.");
+    return;
+  }
+
+  closeNewPersonaDialog();
+  state.personas = await api().list_personas();
+  if (result.persona && !state.personas.some((p) => p.name === result.persona.name)) {
+    state.personas.push(result.persona);
+  }
+  renderPersonaMenu();
+  await loadPersona(result.name || slug);
+  setNotice(`Created ${result.display_name || displayName}. Review setup before starting.`, "warning", NOTICE_WARNING_MS);
 }
 
 async function pickFolder(inputId) {
@@ -1632,6 +1779,7 @@ async function saveCurrentPersona() {
   const prepared = await previewCurrentSave();
   if (!prepared.ok) {
     setNotice(prepared.error, "warning");
+    el("notice").scrollIntoView({ behavior: "smooth", block: "center" });
     return { ok: false };
   }
   if (!prepared.preview.has_changes) {
@@ -1653,6 +1801,7 @@ async function saveBeforeStartChoice() {
   const prepared = await previewCurrentSave();
   if (!prepared.ok) {
     setNotice(prepared.error, "warning");
+    el("notice").scrollIntoView({ behavior: "smooth", block: "center" });
     return { ok: false };
   }
   if (!prepared.preview.has_changes) {
@@ -1710,6 +1859,7 @@ async function saveBeforeStopChoice() {
 async function refreshAll() {
   state.prefs = await api().get_prefs();
   state.personas = await api().list_personas();
+  el("newPersonaBtn").disabled = false;
   renderPersonaMenu();
   const preferred = state.prefs.last_persona || state.personas.find((p) => !p.is_base)?.name || "__base__";
   const exists = state.personas.some((p) => p.name === preferred);
@@ -1796,6 +1946,30 @@ function wireEvents() {
       el("personaMenu").classList.add("hidden");
       el("personaPicker").classList.remove("open");
     }
+  });
+  el("newPersonaBtn").addEventListener("click", openNewPersonaDialog);
+  el("newPersonaCancel").addEventListener("click", closeNewPersonaDialog);
+  el("newPersonaCreate").addEventListener("click", submitNewPersona);
+  el("newPersonaName").addEventListener("input", syncNewPersonaSlug);
+  el("newPersonaSlug").addEventListener("input", () => {
+    el("newPersonaSlug").dataset.autoSlug = "";
+  });
+  ["newPersonaName", "newPersonaSlug", "newPersonaUser"].forEach((id) => {
+    el(id).addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        void submitNewPersona();
+      } else if (event.key === "Escape") {
+        closeNewPersonaDialog();
+      }
+    });
+  });
+  el("newPersonaDialog").addEventListener("pointerdown", (event) => {
+    newPersonaBackdropPointerDown = event.target === el("newPersonaDialog");
+  });
+  el("newPersonaDialog").addEventListener("click", (event) => {
+    if (newPersonaBackdropPointerDown && event.target === el("newPersonaDialog")) closeNewPersonaDialog();
+    newPersonaBackdropPointerDown = false;
   });
   el("reloadBtn").addEventListener("click", refreshAll);
   el("openFolderBtn").addEventListener("click", async () => {
@@ -1892,6 +2066,7 @@ function wireEvents() {
     el(id).addEventListener("input", () => setDirty(hasEditableChanges()));
   });
   el("providerType").addEventListener("change", () => {
+    maybeBumpCloudContext();
     syncBaseUrlVisibility();
     syncLocalServerVisibility();
     setDirty(hasEditableChanges());

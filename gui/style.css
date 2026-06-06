@@ -232,6 +232,32 @@ button {
   opacity: 0.45;
 }
 
+/* Empty-state nudge: glow the "+ New" button until the user has a persona.
+   Warm accent glow that breathes, echoing the Continuity icons' drop-shadow. */
+.ghost-btn.attention:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent-hover);
+  animation: new-persona-glow 1.8s ease-in-out infinite;
+}
+
+@keyframes new-persona-glow {
+  0%, 100% {
+    box-shadow: 0 0 8px 1px rgba(249, 115, 22, 0.28);
+    border-color: var(--accent-line);
+  }
+  50% {
+    box-shadow: 0 0 18px 4px rgba(249, 115, 22, 0.6);
+    border-color: var(--accent-hover);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ghost-btn.attention:not(:disabled) {
+    animation: none;
+    box-shadow: 0 0 14px 2px rgba(249, 115, 22, 0.5);
+  }
+}
+
 .primary-btn {
   background: linear-gradient(135deg, var(--accent), #ea580c);
   border: 0;
@@ -1701,6 +1727,16 @@ textarea {
 
 .secrets-card {
   width: min(560px, calc(100vw - 48px));
+}
+
+.new-persona-card {
+  width: min(480px, calc(100vw - 48px));
+}
+
+.new-persona-body {
+  display: grid;
+  gap: 12px;
+  margin: 16px 0;
 }
 
 .secrets-body {

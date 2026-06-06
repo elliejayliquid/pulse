@@ -55,6 +55,7 @@ MODEL_FIELDS = {
     "frequency_penalty": "Frequency Penalty",
     "presence_penalty": "Presence Penalty",
     "top_p": "Top P",
+    "top_k": "Top K",
     "reasoning": "Reasoning",
     "reasoning_effort": "Reasoning Effort",
     "show_reasoning": "Show Reasoning",
@@ -67,6 +68,7 @@ MODEL_LIMITS = {
     "frequency_penalty": (0.0, 2.0),
     "presence_penalty": (0.0, 2.0),
     "top_p": (0.0, 1.0),
+    "top_k": (0, 1000),
     "max_context": (1024, 1048576),
     "max_tool_rounds": (1, 32),
 }
@@ -358,7 +360,7 @@ class ConfigEditor:
             if not isinstance(value, str) or value not in REASONING_EFFORTS:
                 raise ValueError(f"{label} must be one of: low, medium, high, or empty.")
             return value
-        if key in ("max_response_tokens", "max_context", "max_tool_rounds"):
+        if key in ("max_response_tokens", "max_context", "max_tool_rounds", "top_k"):
             if type(value) is not int:
                 raise ValueError(f"{label} must be a whole number.")
             low, high = MODEL_LIMITS[key]

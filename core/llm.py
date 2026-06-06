@@ -279,7 +279,7 @@ class LLMClient:
     def __init__(self, endpoint: str, model_name: str = "default",
                  temperature: float = 0.7, max_tokens: int = 1024,
                  frequency_penalty: float = 0.0, presence_penalty: float = 0.0,
-                 top_p: float = 1.0,
+                 top_p: float = 1.0, top_k: int | None = None,
                  api_key: str = "", usage_tracker=None,
                  reasoning: bool = False, reasoning_effort: str = "",
                  provider_type: str = "local"):
@@ -312,6 +312,11 @@ class LLMClient:
                     self._extra_body["reasoning"] = {"enabled": True}
             else:
                 self._extra_body["reasoning"] = {"effort": "none"}
+
+        # top_k is a llama.cpp / OpenRouter sampler (not part of the base
+        # OpenAI schema), so it rides in extra_body. Only sent when set.
+        if top_k is not None:
+            self._extra_body["top_k"] = top_k
 
         # Captured reasoning content from the most recent call. The engine
         # reads this after each chat()/chat_with_tools() to optionally

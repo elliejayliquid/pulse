@@ -123,6 +123,95 @@ voice_notes: Warm.
         assert api.get_status("demo")["stale"] is True
 
 
+def test_gui_api_create_persona_from_template_initializes_db():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        template_dir = root / "personas" / "_template"
+        (template_dir / "data").mkdir(parents=True)
+        (root / "logs").mkdir()
+        (root / "config.yaml").write_text(
+            """
+provider:
+  type: local
+model:
+  max_context: 16384
+""",
+            encoding="utf-8",
+        )
+        (root / "persona.yaml").write_text("name: Base\nuser_name: User\n", encoding="utf-8")
+        (template_dir / "config.yaml").write_text(
+            "# Persona config overlay\n# Inherits from base.\n",
+            encoding="utf-8",
+        )
+        (template_dir / "persona.yaml").write_text(
+            """name: Your Persona Name
+user_name: Your Name
+model: ""
+
+system_prompt: |
+  You are {name}, a local AI companion living on {user_name}'s machine.
+
+traits:
+  - trait one
+""",
+            encoding="utf-8",
+        )
+
+        api = PulseAPI(root)
+        created = api.create_persona({
+            "display_name": "New Claude",
+            "slug": "new_claude",
+            "user_name": "Lena",
+        })
+        assert created["ok"] is True
+        assert created["name"] == "new_claude"
+        persona_dir = root / "personas" / "new_claude"
+        assert persona_dir.is_dir()
+        assert (persona_dir / "config.yaml").read_text(encoding="utf-8").startswith("# Persona config overlay")
+        assert not (persona_dir / ".env").exists()
+
+        identity = (persona_dir / "persona.yaml").read_text(encoding="utf-8")
+        assert "name: New Claude" in identity
+        assert "user_name: Lena" in identity
+        assert "system_prompt: |" in identity
+        assert "trait one" in identity
+
+        db_path = persona_dir / "data" / "new_claude.db"
+        assert db_path.exists()
+        with closing(sqlite3.connect(db_path)) as conn:
+            tables = {
+                row[0] for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+            assert {"messages", "sessions", "memories", "journal_entries", "identity"}.issubset(tables)
+
+        personas = api.list_personas()
+        assert "new_claude" in [p["name"] for p in personas]
+
+        duplicate = api.create_persona({
+            "display_name": "New Claude",
+            "slug": "new_claude",
+            "user_name": "Lena",
+        })
+        assert duplicate["ok"] is False
+        assert "already exists" in duplicate["error"]
+
+        reserved = api.create_persona({
+            "display_name": "Base",
+            "slug": "__base__",
+            "user_name": "Lena",
+        })
+        assert reserved["ok"] is False
+
+        leading_dot = api.create_persona({
+            "display_name": "Dot",
+            "slug": ".dot",
+            "user_name": "Lena",
+        })
+        assert leading_dot["ok"] is False
+
+
 def test_gui_api_standard_provider_env_fallback():
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -1099,6 +1188,7 @@ channels:
 
 if __name__ == "__main__":
     test_gui_api_read_only_persona_loading()
+    test_gui_api_create_persona_from_template_initializes_db()
     test_gui_api_standard_provider_env_fallback()
     test_gui_api_get_lantern_read_only()
     test_gui_api_lantern_update_and_dim_write_safely()

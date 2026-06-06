@@ -1,5 +1,13 @@
 # Persona config overlay — values here override the base config.yaml.
 # Only include keys you want to change. Everything else inherits from base.
+
+# Telegram is on by default — it's currently the only way to chat with a
+# companion. With no bot token set it stays dormant (the engine skips it),
+# so this is safe until you add a token in the Secrets editor.
+channels:
+  telegram:
+    enabled: true
+
 #
 # Example: to give this persona its own model and data paths:
 #

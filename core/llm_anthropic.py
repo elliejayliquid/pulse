@@ -156,7 +156,7 @@ class AnthropicClient:
     def __init__(self, endpoint: str, model_name: str = "claude-sonnet-4-20250514",
                  temperature: float = 0.7, max_tokens: int = 1024,
                  frequency_penalty: float = 0.0, presence_penalty: float = 0.0,
-                 top_p: float = 1.0,
+                 top_p: float = 1.0, top_k: int | None = None,
                  api_key: str = "", usage_tracker=None,
                  reasoning: bool = False, provider_type: str = "anthropic",
                  cache_ttl: str = "5m"):
@@ -167,6 +167,8 @@ class AnthropicClient:
         # Anthropic recommends altering either temperature or top_p, not both.
         # We only forward top_p when it's been explicitly set (non-default).
         self.top_p = top_p
+        # Anthropic natively supports top_k; only forwarded when explicitly set.
+        self.top_k = top_k
         self._available = None
         self._usage = usage_tracker
         self._provider_name = "anthropic"
@@ -265,6 +267,10 @@ class AnthropicClient:
                 messages=anthropic_msgs,
                 temperature=self.temperature,
             )
+            if self.top_p < 1.0:
+                create_kwargs["top_p"] = self.top_p
+            if self.top_k:
+                create_kwargs["top_k"] = self.top_k
             # Retry loop for transient 500 errors
             response = None
             for attempt in range(3):
@@ -351,6 +357,8 @@ class AnthropicClient:
                 )
                 if self.top_p < 1.0:
                     create_kwargs["top_p"] = self.top_p
+                if self.top_k:
+                    create_kwargs["top_k"] = self.top_k
                 
                 # Retry loop for transient 500 errors
                 response = None
@@ -478,7 +486,9 @@ class AnthropicClient:
             )
             if self.top_p < 1.0:
                 create_kwargs["top_p"] = self.top_p
-            
+            if self.top_k:
+                create_kwargs["top_k"] = self.top_k
+
             # Retry loop for transient 500 errors
             response = None
             for attempt in range(3):

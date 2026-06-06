@@ -25,6 +25,7 @@ import yaml
 
 from gui.backup import BackupManager
 from gui.config_editor import ConfigEditor
+from core.db import PulseDatabase
 from core.journal_mirror import (
     journal_memory_display_text,
     search_summary_is_thin,
@@ -88,6 +89,8 @@ SECRET_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]{1,80}$")
 MEMORY_STATUSES = {"current", "historical", "superseded", "archived"}
 MEMORY_CONFIDENCES = {"high", "medium", "low"}
 MEMORY_SOURCES = {"user_defined", "model_extracted", "imported", "system"}
+PERSONA_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+RESERVED_PERSONA_NAMES = {"__base__", "_template"}
 
 
 SKILL_ICONS = {
@@ -205,6 +208,27 @@ def _connect_sqlite(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
+def _yaml_scalar(value: str) -> str:
+    dumped = yaml.safe_dump({"value": value}, allow_unicode=True, sort_keys=False)
+    return dumped.split(":", 1)[1].strip()
+
+
+def _replace_top_level_scalar(path: Path, key: str, value: str) -> None:
+    replacement = f"{key}: {_yaml_scalar(value)}"
+    lines = path.read_text(encoding="utf-8").splitlines()
+    replaced = False
+    for index, line in enumerate(lines):
+        if re.match(rf"^{re.escape(key)}\s*:", line):
+            lines[index] = replacement
+            replaced = True
+            break
+    if not replaced:
+        lines.insert(0, replacement)
+    tmp = path.with_name(f"{path.name}.tmp")
+    tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+
+
 class PulseAPI:
     """Backend bridge called from JS as window.pywebview.api.*."""
 
@@ -280,17 +304,100 @@ class PulseAPI:
         except (FileNotFoundError, ValueError, OSError) as e:
             return {"ok": False, "error": str(e)}
 
-    def create_persona(self, name: str) -> dict:
-        return {
-            "ok": False,
-            "error": "Persona creation is planned for a later safe-write phase.",
-        }
+    def create_persona(self, fields: Any) -> dict:
+        created_dir: Path | None = None
+        try:
+            cleaned = self._clean_new_persona_fields(fields)
+            slug = cleaned["slug"]
+            persona_dir = self.personas_dir / slug
+            template_dir = self.personas_dir / "_template"
+
+            if not template_dir.is_dir():
+                raise FileNotFoundError("Persona template not found: personas/_template")
+            if persona_dir.exists():
+                raise ValueError(f"Persona already exists: {slug}")
+
+            self.personas_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(template_dir, persona_dir)
+            created_dir = persona_dir
+
+            identity_path = persona_dir / "persona.yaml"
+            if not identity_path.exists():
+                raise FileNotFoundError("Template is missing persona.yaml")
+            _replace_top_level_scalar(identity_path, "name", cleaned["display_name"])
+            _replace_top_level_scalar(identity_path, "user_name", cleaned["user_name"])
+
+            db_path = self._persona_database_path(slug)
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+            db = PulseDatabase(db_path)
+            db.close()
+
+            summary = self._persona_summary(slug)
+            return {
+                "ok": True,
+                "persona": summary,
+                "name": slug,
+                "display_name": cleaned["display_name"],
+                "db_path": _safe_rel(db_path, self.root),
+            }
+        except (FileNotFoundError, ValueError, OSError, yaml.YAMLError) as e:
+            if created_dir is not None:
+                try:
+                    resolved = created_dir.resolve()
+                    personas_root = self.personas_dir.resolve()
+                    if resolved.parent == personas_root and resolved.name not in RESERVED_PERSONA_NAMES:
+                        shutil.rmtree(resolved)
+                except OSError:
+                    pass
+            return {"ok": False, "error": str(e)}
 
     def delete_persona(self, name: str) -> dict:
         return {
             "ok": False,
             "error": "Persona deletion/archive is planned for a later safe-write phase.",
         }
+
+    def _clean_new_persona_fields(self, fields: Any) -> dict[str, str]:
+        if isinstance(fields, str):
+            payload = {"display_name": fields, "user_name": "Your Name"}
+        elif isinstance(fields, dict):
+            payload = fields
+        else:
+            raise ValueError("Persona details must be an object.")
+
+        display_name = self._clean_short_text(payload.get("display_name") or payload.get("name"), "Display name")
+        user_name = self._clean_short_text(payload.get("user_name") or payload.get("user"), "User name")
+        slug = str(payload.get("slug") or "").strip().lower()
+        if not slug:
+            slug = self._slug_from_display_name(display_name)
+        self._validate_new_persona_slug(slug)
+        return {"display_name": display_name, "user_name": user_name, "slug": slug}
+
+    def _clean_short_text(self, value: Any, label: str) -> str:
+        if not isinstance(value, str):
+            raise ValueError(f"{label} is required.")
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError(f"{label} is required.")
+        if "\x00" in cleaned or "\r" in cleaned or "\n" in cleaned:
+            raise ValueError(f"{label} must be a single line.")
+        if len(cleaned) > 120:
+            raise ValueError(f"{label} is too long.")
+        return cleaned
+
+    def _slug_from_display_name(self, display_name: str) -> str:
+        slug = re.sub(r"[^a-z0-9_-]+", "-", display_name.lower()).strip("-_")
+        slug = re.sub(r"[-_]{2,}", "-", slug)
+        return slug or "persona"
+
+    def _validate_new_persona_slug(self, slug: str) -> None:
+        if not PERSONA_SLUG_RE.match(slug):
+            raise ValueError("Slug must start with a lowercase letter or number and use only lowercase letters, numbers, hyphens, or underscores.")
+        if slug in RESERVED_PERSONA_NAMES:
+            raise ValueError(f"Reserved persona name: {slug}")
+        persona_dir = self.personas_dir / slug
+        if persona_dir.exists():
+            raise ValueError(f"Persona already exists: {slug}")
 
     # Backups
 
@@ -2795,6 +2902,7 @@ class PulseAPI:
             "frequency_penalty": model_cfg.get("frequency_penalty", ""),
             "presence_penalty": model_cfg.get("presence_penalty", ""),
             "top_p": model_cfg.get("top_p", ""),
+            "top_k": model_cfg.get("top_k", ""),
             "reasoning": model_cfg.get("reasoning", False),
             "reasoning_effort": model_cfg.get("reasoning_effort", ""),
             "show_reasoning": model_cfg.get("show_reasoning", False),

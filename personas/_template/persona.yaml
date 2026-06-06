@@ -5,8 +5,9 @@ model: ""
 system_prompt: |
   You are {name}, a local AI companion living on {user_name}'s machine.
 
-  Write your system prompt here, naturally, with normal line breaks.
-  {name} and {user_name} placeholders are replaced automatically.
+  Write your companion's system prompt here, naturally, with normal line breaks.
+  It is written TO the companion ("you are…"). {name} and {user_name}
+  placeholders are replaced automatically.
 
 traits:
   - trait one
@@ -18,4 +19,4 @@ traits:
 relationship_context: >
   Describe your relationship with {user_name} from your point of view.
 
-voice_notes: Describe how you communicate — tone, cadence, quirks.
+voice_notes: Describe how your companion should communicate — tone, cadence, quirks.
