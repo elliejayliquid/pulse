@@ -1761,6 +1761,27 @@ textarea {
   margin: 16px 0;
 }
 
+.new-persona-import-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-secondary);
+  font: 12px/1 var(--body);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.new-persona-import-toggle input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+}
+
+.new-persona-import-fields {
+  display: grid;
+  gap: 6px;
+}
+
 .secrets-body {
   display: flex;
   flex-direction: column;

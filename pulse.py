@@ -73,6 +73,12 @@ def _setup_persona_logging(persona_name: str):
 
 logger = logging.getLogger("pulse")
 
+PROVIDER_KEY_ENV = {
+    "openai": "OPENAI_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+}
+
 # Silence noisy HTTP request logs (httpx logs every Telegram poll)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
@@ -275,7 +281,7 @@ async def main(config_path: str, persona_name: str | None = None):
         endpoint = server.endpoint
     else:
         # Cloud API — resolve endpoint and key, no server needed
-        api_key_env = provider_config.get("api_key_env", "")
+        api_key_env = provider_config.get("api_key_env", "") or PROVIDER_KEY_ENV.get(provider_type, "")
         api_key = os.getenv(api_key_env, "") if api_key_env else ""
         if not api_key:
             logger.error(

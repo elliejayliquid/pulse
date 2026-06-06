@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Pulse Engine</title>
-  <link rel="stylesheet" href="style.css?v=20260605c">
+  <link rel="stylesheet" href="style.css?v=20260606a">
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
   <meta http-equiv="Pragma" content="no-cache">
   <meta http-equiv="Expires" content="0">
@@ -69,6 +69,7 @@
           </div>
           <label class="block-field">System Prompt<textarea id="systemPrompt"></textarea></label>
           <label class="block-field">Traits<div id="traits" class="chips"></div></label>
+          <label class="block-field">Relationship Context<textarea id="relationshipContext"></textarea></label>
           <label class="block-field">Voice Notes<textarea id="voiceNotes"></textarea></label>
         </div>
       </section>
@@ -588,6 +589,17 @@
         <label>Display Name<input id="newPersonaName" type="text" autocomplete="off" placeholder="Kai"></label>
         <label>Folder Slug<input id="newPersonaSlug" type="text" autocomplete="off" placeholder="kai"></label>
         <label>User Name<input id="newPersonaUser" type="text" autocomplete="off" placeholder="Lena"></label>
+        <label class="new-persona-import-toggle">
+          <input id="newPersonaImportEnabled" type="checkbox">
+          Import OpenRouter transcript
+        </label>
+        <div id="newPersonaImportFields" class="new-persona-import-fields hidden">
+          <label>OpenRouter JSON</label>
+          <div class="sample-input-row">
+            <input id="newPersonaImportPath" type="text" autocomplete="off" placeholder="scratch/OpenRouter Chat.json">
+            <button id="newPersonaImportPicker" class="icon-btn" type="button" title="Choose OpenRouter export">📁</button>
+          </div>
+        </div>
       </div>
       <div class="modal-actions">
         <button id="newPersonaCreate" class="modal-btn secondary" type="button">Create Persona</button>

@@ -17,6 +17,7 @@ IDENTITY_FIELDS = {
     "user_name": "User Name",
     "model": "Display Model Name",
     "system_prompt": "System Prompt",
+    "relationship_context": "Relationship Context",
     "voice_notes": "Voice Notes",
     "traits": "Traits",
 }

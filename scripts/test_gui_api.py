@@ -212,6 +212,124 @@ traits:
         assert leading_dot["ok"] is False
 
 
+def test_gui_api_import_openrouter_chat_visible_messages_only():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        template_dir = root / "personas" / "_template"
+        (template_dir / "data").mkdir(parents=True)
+        (root / "logs").mkdir()
+        (root / "config.yaml").write_text("provider:\n  type: local\n", encoding="utf-8")
+        (root / "persona.yaml").write_text("name: Base\nuser_name: User\n", encoding="utf-8")
+        (template_dir / "config.yaml").write_text("", encoding="utf-8")
+        (template_dir / "persona.yaml").write_text(
+            "name: Your Persona Name\nuser_name: Your Name\nsystem_prompt: Hi.\n",
+            encoding="utf-8",
+        )
+
+        export_path = root / "openrouter.json"
+        export_path.write_text(json.dumps({
+            "version": "orpg.3.0",
+            "title": "Hi.",
+            "messages": {
+                "u1": {
+                    "type": "user",
+                    "createdAt": "2026-06-03T01:02:03.000Z",
+                    "items": [{"id": "item-u1", "type": "message"}],
+                },
+                "a1": {
+                    "type": "assistant",
+                    "createdAt": "2026-06-03T01:03:04.000Z",
+                    "items": [
+                        {"id": "rs-a1", "type": "reasoning"},
+                        {"id": "msg-a1", "type": "message"},
+                    ],
+                },
+                "u2": {
+                    "type": "user",
+                    "items": [{"id": "item-u2", "type": "message"}],
+                },
+            },
+            "items": {
+                "item-u1": {
+                    "messageId": "u1",
+                    "data": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "Hi Claude."}],
+                    },
+                },
+                "rs-a1": {
+                    "messageId": "a1",
+                    "data": {
+                        "type": "reasoning",
+                        "content": [{"type": "reasoning_text", "text": "Private duplicated thought. Private duplicated thought."}],
+                    },
+                },
+                "msg-a1": {
+                    "messageId": "a1",
+                    "data": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Hello Lena."}],
+                    },
+                },
+                "item-u2": {
+                    "messageId": "u2",
+                    "data": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "One more thing."}],
+                    },
+                },
+            },
+        }), encoding="utf-8")
+
+        api = PulseAPI(root)
+        created = api.create_persona({
+            "display_name": "Claude",
+            "slug": "claude",
+            "user_name": "Lena",
+        })
+        assert created["ok"] is True
+
+        imported = api.import_openrouter_chat("claude", "openrouter.json")
+        assert imported["ok"] is True
+        assert imported["title"] == "Hi."
+        assert imported["imported_messages"] == 3
+        assert imported["skipped_reasoning"] == 1
+        assert imported["session_id"].startswith("openrouter_20260603_010203")
+
+        db_path = root / "personas" / "claude" / "data" / "claude.db"
+        with closing(sqlite3.connect(db_path)) as conn:
+            session = conn.execute(
+                "SELECT id, title FROM sessions WHERE id = ?",
+                (imported["session_id"],),
+            ).fetchone()
+            assert session[1] == "Hi."
+            rows = conn.execute(
+                "SELECT role, content, timestamp FROM messages WHERE session_id = ? ORDER BY timestamp, id",
+                (imported["session_id"],),
+            ).fetchall()
+            assert [(row[0], row[1]) for row in rows] == [
+                ("user", "Hi Claude."),
+                ("assistant", "Hello Lena."),
+                ("user", "One more thing."),
+            ]
+            assert rows[0][2] == "2026-06-03T01:02:03+00:00"
+            assert rows[2][2] == "2026-06-03T01:03:04.000001+00:00"
+            assert "Private duplicated thought" not in "\n".join(row[1] for row in rows)
+
+        imported_again = api.import_openrouter_chat("claude", str(export_path))
+        assert imported_again["ok"] is True
+        assert imported_again["session_id"].endswith("_2")
+
+        bad_path = root / "bad.json"
+        bad_path.write_text(json.dumps({"version": "not-orpg"}), encoding="utf-8")
+        rejected = api.import_openrouter_chat("claude", str(bad_path))
+        assert rejected["ok"] is False
+        assert "Unsupported" in rejected["error"]
+
+
 def test_gui_api_standard_provider_env_fallback():
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -1155,8 +1273,10 @@ channels:
         api = PulseAPI(root)
         secrets = api.get_secrets("demo")
         by_key = {item["key"]: item for item in secrets["secrets"]}
+        assert {"OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "TELEGRAM_BOT_TOKEN"}.issubset(by_key)
         assert by_key["OPENROUTER_API_KEY"]["source"] == "inherited"
         assert by_key["OPENROUTER_API_KEY"]["masked"].endswith("uter")
+        assert by_key["ANTHROPIC_API_KEY"]["source"] == "missing"
         assert by_key["TELEGRAM_BOT_TOKEN"]["source"] == "persona"
         assert by_key["TELEGRAM_BOT_TOKEN"]["masked"].endswith("gram")
         assert "root-openrouter" not in str(secrets)
@@ -1189,6 +1309,7 @@ channels:
 if __name__ == "__main__":
     test_gui_api_read_only_persona_loading()
     test_gui_api_create_persona_from_template_initializes_db()
+    test_gui_api_import_openrouter_chat_visible_messages_only()
     test_gui_api_standard_provider_env_fallback()
     test_gui_api_get_lantern_read_only()
     test_gui_api_lantern_update_and_dim_write_safely()

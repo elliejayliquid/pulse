@@ -74,6 +74,7 @@ const fallbackApi = {
         model: name === "__base__" ? "" : "Grok 4.2",
         system_prompt: "pywebview is not connected. Run python pulse_gui.py for live project data.",
         traits: ["read-only", "mock data"],
+        relationship_context: "",
         voice_notes: "",
       },
       summary: {
@@ -174,6 +175,8 @@ const fallbackApi = {
       },
     };
   },
+  async import_openrouter_chat() { return { ok: false, error: "Run through pywebview to import OpenRouter chats." }; },
+  async pick_openrouter_export() { return { ok: false, error: "Run through pywebview to pick files." }; },
   async preview_persona_save() { return { ok: false, error: "Run through pywebview to save." }; },
   async save_persona() { return { ok: false, error: "Run through pywebview to save." }; },
   async get_secrets() { return { ok: false, error: "Run through pywebview to edit secrets." }; },
@@ -227,6 +230,10 @@ function api() {
 
 function el(id) {
   return document.getElementById(id);
+}
+
+function fieldValue(id) {
+  return el(id)?.value || "";
 }
 
 let noticeTimer = null;
@@ -753,6 +760,20 @@ function secretInputPlaceholder(secret) {
   return secretPlaceholder(secret.key);
 }
 
+function selectedSecretKeys(data) {
+  const providerType = selectedProviderType({ provider_type: data.provider_type });
+  const keys = ["TELEGRAM_BOT_TOKEN"];
+  const expectedKey = EXPECTED_ENV_VARS[providerType];
+  if (expectedKey) {
+    keys.unshift(expectedKey);
+  } else if (providerType === "custom") {
+    const standardKeys = new Set(Object.values(EXPECTED_ENV_VARS).concat("TELEGRAM_BOT_TOKEN"));
+    const customSecret = (data.secrets || []).find((secret) => !standardKeys.has(secret.key));
+    if (customSecret) keys.unshift(customSecret.key);
+  }
+  return new Set(keys);
+}
+
 function updateSecretsSaveState() {
   const dirty = Array.from(state.secretsRows.values()).some((row) => row.dirty);
   el("secretsSave").disabled = !dirty;
@@ -813,10 +834,14 @@ async function copySecretToPersona(row, input) {
 function renderSecretsModal(data) {
   const body = el("secretsBody");
   state.secretsRows = new Map();
-  el("secretsTitle").textContent = `${providerDisplayName({ provider_type: data.provider_type })} Keys`;
+  const providerType = selectedProviderType({ provider_type: data.provider_type });
+  el("secretsTitle").textContent = providerType === "local"
+    ? "Persona Keys"
+    : `${providerDisplayName({ provider_type: providerType })} Keys`;
   body.innerHTML = "";
 
-  (data.secrets || []).forEach((secret) => {
+  const visibleKeys = selectedSecretKeys(data);
+  (data.secrets || []).filter((secret) => visibleKeys.has(secret.key)).forEach((secret) => {
     const rowState = {
       key: secret.key,
       source: secret.source,
@@ -968,11 +993,23 @@ async function saveSecrets() {
 function renderIdentity(data) {
   const identity = data.identity || {};
   const summary = data.summary || {};
-  el("identityName").value = text(identity.name);
-  el("identityUser").value = text(identity.user_name);
-  el("identityModel").value = text(identity.model || summary.model_display);
-  el("systemPrompt").value = text(identity.system_prompt);
-  el("voiceNotes").value = text(identity.voice_notes || identity.relationship_context);
+  const fields = {
+    identityName: text(identity.name),
+    identityUser: text(identity.user_name),
+    identityModel: text(identity.model || summary.model_display),
+    systemPrompt: text(identity.system_prompt),
+    relationshipContext: text(identity.relationship_context),
+    voiceNotes: text(identity.voice_notes),
+  };
+  Object.entries(fields).forEach(([id, value]) => {
+    const field = el(id);
+    if (!field) return;
+    field.value = value;
+    if (field.tagName === "TEXTAREA") {
+      field.scrollTop = 0;
+      field.setSelectionRange(0, 0);
+    }
+  });
   state.currentTraits = Array.isArray(identity.traits) ? [...identity.traits] : [];
   renderTraits();
 }
@@ -1244,6 +1281,7 @@ function editableSnapshot() {
       user_name: el("identityUser").value,
       model: el("identityModel").value,
       system_prompt: el("systemPrompt").value,
+      relationship_context: fieldValue("relationshipContext"),
       voice_notes: el("voiceNotes").value,
       traits: [...state.currentTraits],
     },
@@ -1310,6 +1348,7 @@ function setEditableState(data) {
     "identityUser",
     "identityModel",
     "systemPrompt",
+    "relationshipContext",
     "voiceNotes",
     "providerModel",
     "providerBaseUrl",
@@ -1333,10 +1372,12 @@ function setEditableState(data) {
     "tuningMaxRounds",
     "tuningTailExchanges",
   ].forEach((id) => {
-    el(id).readOnly = !editable;
+    const field = el(id);
+    if (field) field.readOnly = !editable;
   });
   ["providerType", "lsFlashAttn", "tuningReasoning", "tuningEffort", "tuningShowReasoning", "hbDebug"].forEach((id) => {
-    el(id).disabled = !editable;
+    const field = el(id);
+    if (field) field.disabled = !editable;
   });
   el("ttsSample").readOnly = true;
   el("hbRandomize").disabled = !editable;
@@ -1628,6 +1669,9 @@ function openNewPersonaDialog() {
   el("newPersonaSlug").value = "";
   el("newPersonaSlug").dataset.autoSlug = "";
   el("newPersonaUser").value = state.current?.identity?.user_name || state.current?.summary?.user_name || "";
+  el("newPersonaImportEnabled").checked = false;
+  el("newPersonaImportPath").value = "";
+  el("newPersonaImportFields").classList.add("hidden");
   el("newPersonaError").classList.add("hidden");
   el("newPersonaError").textContent = "";
   el("newPersonaCreate").disabled = false;
@@ -1662,8 +1706,13 @@ async function submitNewPersona() {
   const displayName = el("newPersonaName").value.trim();
   const slug = el("newPersonaSlug").value.trim().toLowerCase();
   const userName = el("newPersonaUser").value.trim();
+  const importPath = el("newPersonaImportEnabled").checked ? el("newPersonaImportPath").value.trim() : "";
   if (!displayName || !slug || !userName) {
     showNewPersonaError("Display name, slug, and user name are required.");
+    return;
+  }
+  if (el("newPersonaImportEnabled").checked && !importPath) {
+    showNewPersonaError("Choose an OpenRouter JSON export or turn import off.");
     return;
   }
   if (state.dirty || hasEditableChanges()) {
@@ -1690,6 +1739,12 @@ async function submitNewPersona() {
     return;
   }
 
+  let importResult = null;
+  if (importPath) {
+    showNewPersonaError("Persona created. Importing transcript...");
+    importResult = await api().import_openrouter_chat(result.name || slug, importPath);
+  }
+
   closeNewPersonaDialog();
   state.personas = await api().list_personas();
   if (result.persona && !state.personas.some((p) => p.name === result.persona.name)) {
@@ -1697,7 +1752,17 @@ async function submitNewPersona() {
   }
   renderPersonaMenu();
   await loadPersona(result.name || slug);
-  setNotice(`Created ${result.display_name || displayName}. Review setup before starting.`, "warning", NOTICE_WARNING_MS);
+  if (importResult && !importResult.ok) {
+    setNotice(`Created ${result.display_name || displayName}, but import failed: ${importResult.error || "unknown error"}`, "warning", NOTICE_WARNING_MS);
+  } else if (importResult) {
+    setNotice(
+      `Created ${result.display_name || displayName}. Imported ${importResult.imported_messages} messages; skipped ${importResult.skipped_reasoning} reasoning blocks. Review setup before starting.`,
+      "warning",
+      NOTICE_WARNING_MS
+    );
+  } else {
+    setNotice(`Created ${result.display_name || displayName}. Review setup before starting.`, "warning", NOTICE_WARNING_MS);
+  }
 }
 
 async function pickFolder(inputId) {
@@ -1955,7 +2020,20 @@ function wireEvents() {
   el("newPersonaSlug").addEventListener("input", () => {
     el("newPersonaSlug").dataset.autoSlug = "";
   });
-  ["newPersonaName", "newPersonaSlug", "newPersonaUser"].forEach((id) => {
+  el("newPersonaImportEnabled").addEventListener("change", () => {
+    el("newPersonaImportFields").classList.toggle("hidden", !el("newPersonaImportEnabled").checked);
+  });
+  el("newPersonaImportPicker").addEventListener("click", async () => {
+    const result = await api().pick_openrouter_export(el("newPersonaImportPath").value || "");
+    if (result?.ok && result.path) {
+      el("newPersonaImportPath").value = result.path;
+      el("newPersonaImportEnabled").checked = true;
+      el("newPersonaImportFields").classList.remove("hidden");
+    } else if (result && !result.ok && result.error) {
+      showNewPersonaError(result.error);
+    }
+  });
+  ["newPersonaName", "newPersonaSlug", "newPersonaUser", "newPersonaImportPath"].forEach((id) => {
     el(id).addEventListener("keydown", (event) => {
       if (event.key === "Enter") {
         event.preventDefault();
@@ -2043,6 +2121,7 @@ function wireEvents() {
     "identityUser",
     "identityModel",
     "systemPrompt",
+    "relationshipContext",
     "voiceNotes",
     "providerModel",
     "providerBaseUrl",
@@ -2064,7 +2143,7 @@ function wireEvents() {
     "hbQuietStart",
     "hbQuietEnd",
   ].forEach((id) => {
-    el(id).addEventListener("input", () => setDirty(hasEditableChanges()));
+    el(id)?.addEventListener("input", () => setDirty(hasEditableChanges()));
   });
   el("providerType").addEventListener("change", () => {
     maybeBumpCloudContext();

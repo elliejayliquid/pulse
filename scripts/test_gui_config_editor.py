@@ -33,6 +33,9 @@ traits:
 system_prompt: |
   Keep this block.
 
+relationship_context: >
+  Old relationship context.
+
 voice_notes: |
   Old voice notes.
 """,
@@ -115,8 +118,9 @@ channels:
                 "user_name": "Lena Updated",
                 "model": "New Model",
                 "system_prompt": "Keep this updated block.\nStay kind.",
+                "relationship_context": "",
                 "traits": ["playful", "patient", "Playful", ""],
-                "voice_notes": "Line one.\nLine two.",
+                "voice_notes": "",
             },
             "tts": {
                 "voice_description": "New voice",
@@ -192,8 +196,10 @@ channels:
         assert "system_prompt: |" in persona_text
         assert "  Keep this updated block." in persona_text
         assert "  Stay kind." in persona_text
-        assert "voice_notes: |" in persona_text
-        assert "  Line one." in persona_text
+        assert 'relationship_context: ""' in persona_text
+        assert 'voice_notes: ""' in persona_text
+        assert "Old relationship context" not in persona_text
+        assert "Old voice notes" not in persona_text
 
         config_text = (persona_dir / "config.yaml").read_text(encoding="utf-8")
         assert "# Persona config overlay" in config_text

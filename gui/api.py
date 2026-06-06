@@ -25,6 +25,7 @@ import yaml
 
 from gui.backup import BackupManager
 from gui.config_editor import ConfigEditor
+from gui.openrouter_import import parse_openrouter_chat
 from core.db import PulseDatabase
 from core.journal_mirror import (
     journal_memory_display_text,
@@ -357,6 +358,44 @@ class PulseAPI:
             "error": "Persona deletion/archive is planned for a later safe-write phase.",
         }
 
+    def import_openrouter_chat(self, persona: str, path: str) -> dict:
+        validation = self._validate_persona_for_db_write(persona)
+        if not validation["ok"]:
+            return validation
+        if self._persona_is_running(persona):
+            return {"ok": False, "error": "Stop this persona before importing conversation history."}
+        try:
+            export_path = Path(path).expanduser()
+            if not export_path.is_absolute():
+                export_path = (self.root / export_path).resolve()
+            if not export_path.is_file():
+                raise FileNotFoundError("OpenRouter export file not found.")
+            parsed = parse_openrouter_chat(export_path)
+            db_path = self._persona_database_path(persona)
+            db = PulseDatabase(db_path)
+            try:
+                session_id = self._unique_session_id(db, parsed.session_id)
+                db.create_session(session_id, parsed.title)
+                for message in parsed.messages:
+                    db.save_message(
+                        session_id,
+                        message.role,
+                        message.content,
+                        timestamp=message.timestamp,
+                    )
+            finally:
+                db.close()
+            return {
+                "ok": True,
+                "session_id": session_id,
+                "title": parsed.title,
+                "imported_messages": len(parsed.messages),
+                "skipped_reasoning": parsed.skipped_reasoning,
+                "path": str(export_path),
+            }
+        except (FileNotFoundError, ValueError, OSError, sqlite3.Error, json.JSONDecodeError) as e:
+            return {"ok": False, "error": str(e)}
+
     def _clean_new_persona_fields(self, fields: Any) -> dict[str, str]:
         if isinstance(fields, str):
             payload = {"display_name": fields, "user_name": "Your Name"}
@@ -398,6 +437,14 @@ class PulseAPI:
         persona_dir = self.personas_dir / slug
         if persona_dir.exists():
             raise ValueError(f"Persona already exists: {slug}")
+
+    def _unique_session_id(self, db: PulseDatabase, base_id: str) -> str:
+        candidate = base_id
+        index = 2
+        while db.conn.execute("SELECT 1 FROM sessions WHERE id = ?", (candidate,)).fetchone():
+            candidate = f"{base_id}_{index}"
+            index += 1
+        return candidate
 
     # Backups
 
@@ -595,6 +642,41 @@ class PulseAPI:
         except ValueError as e:
             return {"ok": False, "error": str(e)}
 
+    def pick_openrouter_export(self, current_path: str = "") -> dict:
+        if not self._window:
+            return {"ok": False, "error": "File dialog requires pywebview."}
+        start_dir = str(self.root)
+        if current_path:
+            candidate = Path(current_path).expanduser()
+            if not candidate.is_absolute():
+                candidate = self.root / candidate
+            if candidate.is_file():
+                start_dir = str(candidate.parent)
+            elif candidate.parent.is_dir():
+                start_dir = str(candidate.parent)
+        try:
+            import webview
+            result = self._window.create_file_dialog(
+                webview.OPEN_DIALOG,
+                directory=start_dir,
+                allow_multiple=False,
+                file_types=(
+                    "OpenRouter JSON (*.json)",
+                    "All Files (*.*)",
+                ),
+            )
+        except Exception as e:
+            return {"ok": False, "error": f"File dialog failed: {e}"}
+        if not result:
+            return {"ok": False}
+        chosen = Path(result[0] if isinstance(result, (list, tuple)) else result)
+        if not chosen.is_file():
+            return {"ok": False, "error": "Selected file does not exist."}
+        try:
+            return {"ok": True, "path": chosen.resolve().relative_to(self.root).as_posix()}
+        except ValueError:
+            return {"ok": True, "path": str(chosen)}
+
     # Secrets/status/logs
 
     def _merged_config_for(self, persona: str) -> dict:
@@ -608,8 +690,8 @@ class PulseAPI:
         provider = config.get("provider", {})
         provider_type = provider.get("type", "local")
         api_key_env = provider.get("api_key_env", "") or PROVIDER_KEY_MAP.get(provider_type, "")
-        keys = []
-        if provider_type != "local" and api_key_env:
+        keys = list(PROVIDER_KEY_MAP.values())
+        if provider_type not in PROVIDER_KEY_MAP and provider_type != "local" and api_key_env:
             keys.append(api_key_env)
         keys.append("TELEGRAM_BOT_TOKEN")
         unique = []
