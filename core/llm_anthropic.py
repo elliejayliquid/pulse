@@ -190,6 +190,23 @@ class AnthropicClient:
         # etc.) instead of a generic "LLM didn't respond" message.
         self.last_error: str = ""
 
+    def _create_kwargs(self, *, system, messages, tools=None) -> dict:
+        """Build Anthropic request kwargs without deprecated sampler params.
+
+        Newer Claude models reject some generation controls such as
+        temperature. Keep native Anthropic calls conservative: max_tokens is
+        required, while model-specific tuning stays out of the request.
+        """
+        kwargs = {
+            "model": self.model_name,
+            "max_tokens": self.max_tokens,
+            "system": system,
+            "messages": messages,
+        }
+        if tools:
+            kwargs["tools"] = tools
+        return kwargs
+
     def _track(self, response):
         """Log token usage from an Anthropic API response."""
         if self._usage and hasattr(response, "usage") and response.usage:
@@ -260,17 +277,10 @@ class AnthropicClient:
         try:
             system_parts, anthropic_msgs = _convert_messages(messages)
 
-            create_kwargs = dict(
-                model=self.model_name,
-                max_tokens=self.max_tokens,
+            create_kwargs = self._create_kwargs(
                 system=self._build_system_blocks(system_parts),
                 messages=anthropic_msgs,
-                temperature=self.temperature,
             )
-            if self.top_p < 1.0:
-                create_kwargs["top_p"] = self.top_p
-            if self.top_k:
-                create_kwargs["top_k"] = self.top_k
             # Retry loop for transient 500 errors
             response = None
             for attempt in range(3):
@@ -347,18 +357,11 @@ class AnthropicClient:
 
         for round_num in range(effective_max):
             try:
-                create_kwargs = dict(
-                    model=self.model_name,
-                    max_tokens=self.max_tokens,
+                create_kwargs = self._create_kwargs(
                     system=system_blocks,
                     messages=anthropic_msgs,
                     tools=anthropic_tools if anthropic_tools else None,
-                    temperature=self.temperature,
                 )
-                if self.top_p < 1.0:
-                    create_kwargs["top_p"] = self.top_p
-                if self.top_k:
-                    create_kwargs["top_k"] = self.top_k
                 
                 # Retry loop for transient 500 errors
                 response = None
@@ -477,17 +480,10 @@ class AnthropicClient:
         logger.warning(f"Tool loop ended after {round_num + 1} rounds (mode={loop_mode})")
 
         try:
-            create_kwargs = dict(
-                model=self.model_name,
-                max_tokens=self.max_tokens,
+            create_kwargs = self._create_kwargs(
                 system=system_blocks,
                 messages=anthropic_msgs,
-                temperature=self.temperature,
             )
-            if self.top_p < 1.0:
-                create_kwargs["top_p"] = self.top_p
-            if self.top_k:
-                create_kwargs["top_k"] = self.top_k
 
             # Retry loop for transient 500 errors
             response = None

@@ -18,7 +18,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from core.llm import LLMClient, PulseResponse
-from core.llm_anthropic import AnthropicClient
+try:
+    from core.llm_anthropic import AnthropicClient
+except ImportError:
+    AnthropicClient = None
 from core.llm_openai import OpenAIResponsesClient
 from core.context import ContextManager
 from core.scheduler import ScheduleManager
@@ -69,6 +72,8 @@ class PulseEngine:
         top_k = model_config.get("top_k")
 
         if provider_type == "anthropic":
+            if AnthropicClient is None:
+                raise RuntimeError("Anthropic provider selected, but the anthropic package is not installed.")
             self.llm = AnthropicClient(
                 endpoint=endpoint,
                 model_name=model_name,
