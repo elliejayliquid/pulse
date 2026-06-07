@@ -55,6 +55,7 @@ const state = {
   journalDetailId: "",
   journalBaseline: {},
   journalUndoStamp: "",
+  currentSkill: "",
 };
 
 const fallbackApi = {
@@ -143,6 +144,12 @@ const fallbackApi = {
         telegram_set: false,
         telegram_source: "missing",
         telegram_enabled: true,
+      },
+      config: {
+        paths: { lor_data: "data/lor" },
+        channels: {
+          lor: { author_name: "Kai", model_name: "Grok 4.2" },
+        },
       },
       status: {
         running: false,
@@ -242,6 +249,7 @@ let lanternBackdropPointerDown = false;
 let memoriesBackdropPointerDown = false;
 let journalBackdropPointerDown = false;
 let coreBackdropPointerDown = false;
+let skillBackdropPointerDown = false;
 let confirmBackdropPointerDown = false;
 let newPersonaBackdropPointerDown = false;
 
@@ -613,26 +621,141 @@ function renderSkills(skills) {
   }
   const editable = state.current?.name && state.current.name !== "__base__";
   grid.innerHTML = skills.map((skill) => `
-    <button class="skill-card ${skill.enabled ? "on" : ""}" type="button"
-      data-skill="${escapeHtml(skill.name)}" ${editable ? "" : "disabled"}>
+    <div class="skill-card ${skill.enabled ? "on" : ""} ${editable ? "" : "disabled"}"
+      data-skill="${escapeHtml(skill.name)}" role="button"
+      aria-disabled="${editable ? "false" : "true"}" tabindex="${editable ? "0" : "-1"}">
       <div class="skill-icon">${escapeHtml(skill.icon)}</div>
       <div class="skill-info">
         <div class="skill-name">${escapeHtml(skill.label)}</div>
         <div class="skill-state">${skill.enabled ? "Enabled" : "Disabled"}</div>
       </div>
-      <div class="skill-toggle" aria-hidden="true"></div>
-    </button>
+      <button class="skill-toggle" type="button"
+        data-skill-toggle="${escapeHtml(skill.name)}"
+        aria-label="${skill.enabled ? "Disable" : "Enable"} ${escapeHtml(skill.label)}"
+        aria-pressed="${skill.enabled ? "true" : "false"}" ${editable ? "" : "disabled"}></button>
+    </div>
   `).join("");
   grid.querySelectorAll(".skill-card").forEach((card) => {
     card.addEventListener("click", () => {
       if (!editable) return;
-      const skill = state.current.skills.find((item) => item.name === card.dataset.skill);
+      openSkillDialog(card.dataset.skill);
+    });
+    card.addEventListener("keydown", (event) => {
+      if (!editable || (event.key !== "Enter" && event.key !== " ")) return;
+      event.preventDefault();
+      openSkillDialog(card.dataset.skill);
+    });
+  });
+  grid.querySelectorAll(".skill-toggle").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      if (!editable) return;
+      const skill = currentSkill(button.dataset.skillToggle);
       if (!skill) return;
       skill.enabled = !skill.enabled;
       renderSkills(state.current.skills);
       setDirty(hasEditableChanges());
     });
   });
+}
+
+function currentSkill(name) {
+  return state.current?.skills?.find((item) => item.name === name) || null;
+}
+
+function skillLabel(skill) {
+  return skill?.label || (skill?.name || "Skill").replace(/_/g, " ").replace(/\b\w/g, (m) => m.toUpperCase());
+}
+
+function lorDataPath() {
+  return text(state.current?.config?.paths?.lor_data);
+}
+
+function setLorDataPath(value) {
+  state.current.config = state.current.config || {};
+  state.current.config.paths = state.current.config.paths || {};
+  state.current.config.paths.lor_data = value;
+}
+
+function lorAuthorLabel() {
+  const lor = state.current?.config?.channels?.lor || {};
+  return text(lor.author_name || state.current?.identity?.name || state.current?.display_name || state.current?.name, "Companion");
+}
+
+function lorModelLabel() {
+  const lor = state.current?.config?.channels?.lor || {};
+  return text(lor.model_name || state.current?.summary?.provider_model || state.current?.summary?.model_display, "not set");
+}
+
+function renderSkillDialogBody(skill) {
+  if (skill?.name !== "lor") {
+    return `
+      <div class="skill-empty-settings">
+        <strong>No extra settings yet.</strong>
+        <span>Use the switch on the skill card to enable or disable this skill. More settings can live here later.</span>
+      </div>
+    `;
+  }
+
+  return `
+    <div class="skill-setting-block">
+      <label class="sample-path-label">LoR Data Folder
+        <div class="sample-input-row">
+          <input id="skillLorDataPath" type="text" value="${escapeHtml(lorDataPath())}" placeholder="D:\\Claude\\LoR\\lor_data">
+          <button id="skillLorDataPicker" class="icon-btn sample-picker-btn" type="button" title="Choose LoR data folder">📂</button>
+        </div>
+      </label>
+      <p class="field-hint">This is the shared forum folder for this persona. Leave it on the inherited default to share one forum; choose a different folder for a separate Claude/GPT/etc. forum.</p>
+    </div>
+    <div class="skill-setting-summary">
+      <div><span>Author label</span><strong>${escapeHtml(lorAuthorLabel())}</strong></div>
+      <div><span>Model label</span><strong>${escapeHtml(lorModelLabel())}</strong></div>
+    </div>
+  `;
+}
+
+function openSkillDialog(skillName) {
+  if (!state.current || state.current.name === "__base__") return;
+  const skill = currentSkill(skillName);
+  if (!skill) return;
+  state.currentSkill = skillName;
+  el("skillTitle").textContent = skillLabel(skill);
+  el("skillSubtitle").textContent = skill.name === "lor"
+    ? "Configure LoR for this persona. Save from the main footer when you're done."
+    : "Configure this skill for this persona. Save from the main footer when you're done.";
+  el("skillNotice").textContent = "Changes here are staged until you use the main Save button.";
+  el("skillNotice").classList.remove("hidden");
+  el("skillBody").innerHTML = renderSkillDialogBody(skill);
+  bindSkillDialogControls(skill);
+
+  el("skillDialog").classList.remove("hidden");
+  document.body.classList.add("modal-open");
+}
+
+function bindSkillDialogControls(skill) {
+  if (skill?.name !== "lor") return;
+  const pathInput = el("skillLorDataPath");
+  pathInput?.addEventListener("input", () => {
+    setLorDataPath(pathInput.value);
+    setDirty(hasEditableChanges());
+  });
+  el("skillLorDataPicker")?.addEventListener("click", async () => {
+    const result = await api().pick_folder(pathInput.value || "");
+    if (result?.ok && result.path) {
+      pathInput.value = result.path;
+      setLorDataPath(result.path);
+      setDirty(hasEditableChanges());
+    } else if (result && !result.ok && result.error) {
+      el("skillNotice").textContent = result.error;
+      el("skillNotice").classList.remove("hidden");
+    }
+  });
+}
+
+function closeSkillDialog() {
+  el("skillDialog").classList.add("hidden");
+  document.body.classList.remove("modal-open");
+  state.currentSkill = "";
 }
 
 function renderChannelsLegacy(channels) {
@@ -1355,6 +1478,9 @@ function editableSnapshot() {
     channels: Object.fromEntries(
       (state.current?.channels || []).map((channel) => [channel.name, Boolean(channel.enabled)])
     ),
+    paths: {
+      lor_data: lorDataPath(),
+    },
     heartbeat: {
       interval_minutes: el("hbInterval").value,
       interval_min_minutes: el("hbMin").value,
@@ -1438,8 +1564,8 @@ function numberOrEmpty(value) {
 
 function collectEditableChanges() {
   const current = editableSnapshot();
-  const original = state.originalEditable || { identity: {}, provider: {}, server: {}, model: {}, context_budget: {}, tts: {}, skills: {}, channels: {}, heartbeat: {} };
-  const changes = { identity: {}, provider: {}, server: {}, model: {}, context_budget: {}, tts: {}, skills: {}, channels: {}, heartbeat: {} };
+  const original = state.originalEditable || { identity: {}, provider: {}, server: {}, model: {}, context_budget: {}, tts: {}, skills: {}, channels: {}, paths: {}, heartbeat: {} };
+  const changes = { identity: {}, provider: {}, server: {}, model: {}, context_budget: {}, tts: {}, skills: {}, channels: {}, paths: {}, heartbeat: {} };
 
   for (const [key, value] of Object.entries(current.identity)) {
     if (key === "traits") {
@@ -1503,6 +1629,12 @@ function collectEditableChanges() {
     }
   }
 
+  for (const [key, value] of Object.entries(current.paths)) {
+    if (value !== original.paths?.[key]) {
+      changes.paths[key] = value;
+    }
+  }
+
   for (const [key, value] of Object.entries(current.heartbeat)) {
     if (value !== original.heartbeat?.[key]) {
       changes.heartbeat[key] = ["randomize", "debug"].includes(key) ? value : parseHeartbeatNumber(value);
@@ -1522,6 +1654,7 @@ function hasEditableChanges() {
     || Object.keys(changes.tts).length > 0
     || Object.keys(changes.skills).length > 0
     || Object.keys(changes.channels).length > 0
+    || Object.keys(changes.paths).length > 0
     || Object.keys(changes.heartbeat).length > 0;
 }
 
@@ -2135,6 +2268,15 @@ function wireEvents() {
   el("coreDialog").addEventListener("click", (event) => {
     if (coreBackdropPointerDown && event.target === el("coreDialog")) closeCoreDialog();
     coreBackdropPointerDown = false;
+  });
+  el("skillDoneBtn").addEventListener("click", closeSkillDialog);
+  el("skillCloseBtn").addEventListener("click", closeSkillDialog);
+  el("skillDialog").addEventListener("pointerdown", (event) => {
+    skillBackdropPointerDown = event.target === el("skillDialog");
+  });
+  el("skillDialog").addEventListener("click", (event) => {
+    if (skillBackdropPointerDown && event.target === el("skillDialog")) closeSkillDialog();
+    skillBackdropPointerDown = false;
   });
   document.querySelectorAll(".section-header").forEach((header) => {
     header.addEventListener("click", () => header.parentElement.classList.toggle("open"));

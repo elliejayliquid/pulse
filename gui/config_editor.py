@@ -110,6 +110,10 @@ HEARTBEAT_LIMITS = {
 
 CHANNEL_NAMES = {"telegram", "toast", "lor"}
 
+PATH_FIELDS = {
+    "lor_data": "LoR Data Folder",
+}
+
 
 class ConfigEditor:
     """Preview and apply allowlisted persona edits."""
@@ -194,6 +198,7 @@ class ConfigEditor:
         heartbeat = changes.get("heartbeat", {}) or {}
         skills = changes.get("skills", {}) or {}
         channels = changes.get("channels", {}) or {}
+        paths = changes.get("paths", {}) or {}
         if not isinstance(provider, dict):
             raise ValueError("Provider changes must be an object.")
         if not isinstance(server, dict):
@@ -206,6 +211,8 @@ class ConfigEditor:
             raise ValueError("Skills changes must be an object.")
         if not isinstance(channels, dict):
             raise ValueError("Channels changes must be an object.")
+        if not isinstance(paths, dict):
+            raise ValueError("Path changes must be an object.")
         valid_skills = self._editable_skill_names(persona_dir)
         unknown_identity = sorted(set(identity) - set(IDENTITY_FIELDS))
         unknown_tts = sorted(set(tts) - set(TTS_FIELDS))
@@ -216,6 +223,7 @@ class ConfigEditor:
         unknown_heartbeat = sorted(set(heartbeat) - set(HEARTBEAT_FIELDS))
         unknown_skills = sorted(set(skills) - valid_skills)
         unknown_channels = sorted(set(channels) - CHANNEL_NAMES)
+        unknown_paths = sorted(set(paths) - set(PATH_FIELDS))
         if (
             unknown_identity
             or unknown_tts
@@ -226,6 +234,7 @@ class ConfigEditor:
             or unknown_heartbeat
             or unknown_skills
             or unknown_channels
+            or unknown_paths
         ):
             unknown = (
                 unknown_identity
@@ -237,6 +246,7 @@ class ConfigEditor:
                 + [f"heartbeat.{name}" for name in unknown_heartbeat]
                 + [f"skills.{name}" for name in unknown_skills]
                 + [f"channels.{name}" for name in unknown_channels]
+                + [f"paths.{name}" for name in unknown_paths]
             )
             raise ValueError(f"Unsupported field(s): {', '.join(unknown)}")
 
@@ -280,6 +290,10 @@ class ConfigEditor:
             "channels": {
                 key: self._clean_channel_value(key, value)
                 for key, value in channels.items()
+            },
+            "paths": {
+                key: self._clean_text(value, PATH_FIELDS[key])
+                for key, value in paths.items()
             },
         }
 
@@ -441,6 +455,7 @@ class ConfigEditor:
             or changes["heartbeat"]
             or changes["skills"]
             or changes["channels"]
+            or changes["paths"]
         ):
             config_path = persona_dir / "config.yaml"
             original = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
@@ -461,6 +476,8 @@ class ConfigEditor:
                 updated = _set_deep_nested_field(updated, ["skills", key, "enabled"], value)
             for key, value in changes["channels"].items():
                 updated = _set_deep_nested_field(updated, ["channels", key, "enabled"], value)
+            for key, value in changes["paths"].items():
+                updated = _set_nested_field(updated, "paths", key, value)
             rendered.append({"path": config_path, "original": original, "updated": updated})
         return rendered
 

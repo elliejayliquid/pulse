@@ -105,6 +105,9 @@ channels:
     app_name: "Demo"
   telegram:
     enabled: true
+
+paths:
+  lor_data: "data/lor"
 """,
             encoding="utf-8",
         )
@@ -175,6 +178,9 @@ channels:
                 "tts": False,
                 "lantern": False,
             },
+            "paths": {
+                "lor_data": "D:/Claude/LoR/lor_data",
+            },
         }
         preview = api.preview_persona_save("demo", changes)
         assert preview["ok"] is True
@@ -244,6 +250,7 @@ channels:
         assert "lantern:" in config_text
         assert "notes: \"existing config\"" in config_text
         assert "enabled: false" in config_text
+        assert 'lor_data: "D:/Claude/LoR/lor_data"' in config_text
 
         backup_path = root / result["backup"]["path"]
         assert (backup_path / "config.yaml").exists()
@@ -279,6 +286,12 @@ def test_config_editor_rejects_unknown_fields():
         })
         assert result["ok"] is False
         assert "Unsupported field" in result["error"]
+
+        result = api.preview_persona_save("demo", {
+            "paths": {"database": "elsewhere.db"},
+        })
+        assert result["ok"] is False
+        assert "paths.database" in result["error"]
 
         result = api.preview_persona_save("demo", {
             "channels": {"telegram": "false"},

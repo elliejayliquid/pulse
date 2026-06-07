@@ -406,6 +406,30 @@ class TelegramChannel(Channel):
                         return None
         return last_sent
 
+    async def _download_photo_with_retry(self, photo, retries: int = 3) -> bytearray:
+        """Download a Telegram photo with the same patience as outbound sends."""
+        for attempt in range(1, retries + 1):
+            try:
+                file = await photo.get_file(
+                    read_timeout=30,
+                    write_timeout=30,
+                    connect_timeout=15,
+                    pool_timeout=15,
+                )
+                return await file.download_as_bytearray(
+                    read_timeout=60,
+                    write_timeout=60,
+                    connect_timeout=15,
+                    pool_timeout=15,
+                )
+            except Exception as e:
+                if attempt < retries:
+                    logger.warning(f"Photo download attempt {attempt}/{retries} failed ({e}), retrying in 3s...")
+                    await asyncio.sleep(3)
+                else:
+                    logger.error(f"Photo download failed after {retries} attempts: {e}")
+                    raise
+
     async def _send_reasoning(self, message, reasoning: str):
         """Send the model's chain of thought as an expandable blockquote.
 
@@ -1068,8 +1092,7 @@ class TelegramChannel(Channel):
             typing_task = self._start_typing_loop(update.effective_chat)
             try:
                 # Download the photo as bytes
-                file = await photo.get_file()
-                photo_bytes = await file.download_as_bytearray()
+                photo_bytes = await self._download_photo_with_retry(photo)
 
                 # Convert to base64 data URI
                 b64 = base64.b64encode(photo_bytes).decode("utf-8")

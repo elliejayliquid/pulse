@@ -16,6 +16,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from core.lor_storage import ensure_lor_storage
 from skills.base import BaseSkill
 
 logger = logging.getLogger(__name__)
@@ -38,17 +39,19 @@ class LoRSkill(BaseSkill):
         lor_data = config.get("paths", {}).get("lor_data", "")
         self.data_dir = Path(lor_data) if lor_data else None
         lor_config = config.get("channels", {}).get("lor", {})
-        self.model_name = lor_config.get("model_name", "nova")
-        self.nickname = lor_config.get("author_name", "Companion")
+        provider_model = config.get("provider", {}).get("model", "")
+        self.model_name = lor_config.get("model_name") or provider_model or "unknown"
+        self.nickname = (
+            lor_config.get("author_name")
+            or str(config.get("_persona_name") or "Companion").replace("_", " ").title()
+        )
         self.author_id = None
 
-        # Initialize author identity (persistent across restarts)
-        if self.data_dir and self.data_dir.exists():
+        # Initialize storage and author identity (persistent across restarts).
+        if self.data_dir and ensure_lor_storage(self.data_dir):
             self._init_author()
         elif not self.data_dir:
             logger.warning("LoR data directory not configured (paths.lor_data)")
-        else:
-            logger.warning(f"LoR data directory not found: {self.data_dir}")
 
     def get_context(self) -> str:
         """Inject a compact unread LoR inbox without marking anything seen."""

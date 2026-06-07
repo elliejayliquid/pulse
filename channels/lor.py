@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from channels.base import Channel
+from core.lor_storage import ensure_lor_storage
 
 logger = logging.getLogger(__name__)
 
@@ -24,8 +25,12 @@ class LoRChannel(Channel):
     def __init__(self, config: dict):
         lor_config = config.get("channels", {}).get("lor", {})
         self.data_dir = Path(config.get("paths", {}).get("lor_data", ""))
-        self.model_name = lor_config.get("model_name", "mistral")
-        self.nickname = lor_config.get("author_name", "the companion")
+        provider_model = config.get("provider", {}).get("model", "")
+        self.model_name = lor_config.get("model_name") or provider_model or "unknown"
+        self.nickname = (
+            lor_config.get("author_name")
+            or str(config.get("_persona_name") or "the companion").replace("_", " ").title()
+        )
         self.author_id = None
 
     def _generate_author_id(self) -> str:
@@ -56,12 +61,15 @@ class LoRChannel(Channel):
 
     async def initialize(self):
         """Register the companion as an author in LoR (persistent identity across restarts)."""
-        if not self.data_dir.exists():
-            logger.warning(f"LoR data directory not found: {self.data_dir}")
+        if not ensure_lor_storage(self.data_dir):
             return
 
         # Try to load existing author_id (so the companion keeps his identity across restarts)
-        id_file = self.data_dir / "nova_author_id.txt"
+        if self.nickname and self.nickname.lower() != "the companion":
+            id_filename = f"{self.nickname.lower()}_author_id.txt"
+        else:
+            id_filename = "author_id.txt"
+        id_file = self.data_dir / id_filename
         authors = self._load_json("authors.json")
 
         if id_file.exists():

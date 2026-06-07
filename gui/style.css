@@ -1598,12 +1598,14 @@ textarea {
   transition: border-color 140ms ease, background 140ms ease, transform 140ms ease;
 }
 
-.skill-card:hover:not(:disabled) {
+.skill-card:hover:not(.disabled),
+.skill-card:focus-visible {
   border-color: var(--accent);
   transform: translateY(-1px);
+  outline: none;
 }
 
-.skill-card:disabled {
+.skill-card.disabled {
   cursor: default;
   opacity: 0.72;
 }
@@ -1652,11 +1654,13 @@ textarea {
 .skill-toggle {
   width: 30px;
   height: 17px;
+  padding: 0;
   border-radius: 999px;
   background: var(--surface-raised);
   border: 1px solid var(--border);
   position: relative;
   flex-shrink: 0;
+  cursor: pointer;
 }
 
 .skill-toggle::after {
@@ -1671,6 +1675,16 @@ textarea {
   transition: left 140ms ease, background 140ms ease;
 }
 
+.skill-toggle:hover:not(:disabled),
+.skill-toggle:focus-visible {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.skill-toggle:disabled {
+  cursor: default;
+}
+
 .skill-card.on .skill-toggle {
   background: var(--accent);
   border-color: var(--accent);
@@ -1679,6 +1693,55 @@ textarea {
 .skill-card.on .skill-toggle::after {
   left: 15px;
   background: white;
+}
+
+.skill-settings-card {
+  max-width: 640px;
+}
+
+.skill-settings-body {
+  display: grid;
+  gap: 14px;
+  margin: 14px 0 18px;
+}
+
+.skill-setting-block {
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-raised);
+}
+
+.skill-setting-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.skill-setting-summary div,
+.skill-empty-settings {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.skill-setting-summary span,
+.skill-empty-settings span {
+  display: block;
+  color: var(--text-tertiary);
+  font: 10px/1.2 var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 6px;
+}
+
+.skill-setting-summary strong,
+.skill-empty-settings strong {
+  display: block;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text-primary);
 }
 
 .log-tail {
@@ -2868,7 +2931,8 @@ textarea {
 
   .field-grid.three,
   .skills-grid,
-  .runtime-grid {
+  .runtime-grid,
+  .skill-setting-summary {
     grid-template-columns: 1fr;
   }
 
