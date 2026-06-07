@@ -384,7 +384,33 @@ function renderTuning(summary) {
   </div>`;
 
   el("tuningGrid").innerHTML = html;
+  syncTuningProviderHints();
   wireTuningControls();
+}
+
+function syncTuningProviderHints() {
+  const providerType = selectedProviderType(state.current?.key_status || {});
+  const reasoningLabel = el("tuningReasoning")?.closest("label");
+  const effortField = el("tuningEffort");
+  const showLabel = el("tuningShowReasoning")?.closest("label");
+
+  if (providerType === "anthropic") {
+    const hint = "Anthropic thinking summaries are not currently requested or displayed by Pulse. This setting is saved for future support, but Claude API reasoning will not appear yet.";
+    if (reasoningLabel) reasoningLabel.title = hint;
+    if (effortField) effortField.title = "Saved for future Anthropic thinking support. Pulse currently does not send Anthropic adaptive thinking or effort parameters.";
+    if (showLabel) showLabel.title = "Anthropic thinking summaries are not currently displayed by Pulse. For now, Show Reasoning only works with local/OpenRouter/OpenAI paths that expose reasoning.";
+    return;
+  }
+
+  if (reasoningLabel) {
+    reasoningLabel.title = "Let the model think step-by-step before answering. Uses more tokens but improves quality on complex tasks";
+  }
+  if (effortField) {
+    effortField.title = "How hard the model thinks. High gives better answers but is slower and costs more. Some cheap models need this bumped up";
+  }
+  if (showLabel) {
+    showLabel.title = "Show the model's inner monologue in Telegram as an expandable blockquote. Fun for thinking models";
+  }
 }
 
 function renderStatus(status) {
@@ -2149,6 +2175,7 @@ function wireEvents() {
     maybeBumpCloudContext();
     syncBaseUrlVisibility();
     syncLocalServerVisibility();
+    syncTuningProviderHints();
     setDirty(hasEditableChanges());
     renderSecrets(state.current?.key_status || {});
   });
