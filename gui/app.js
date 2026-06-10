@@ -899,6 +899,30 @@ function renderSkillDialogBody(skill) {
     `;
   }
 
+  if (skill?.name === "memory") {
+    return `
+      <div class="skill-setting-stack">
+        <div class="skill-empty-settings">
+          <strong>Memory browsing lives in Continuity</strong>
+          <span>Use Continuity to browse, add, edit, archive, or restore memories. This skill controls whether the companion can use memory tools.</span>
+        </div>
+        <button id="skillOpenMemories" class="subtle-wide-btn" type="button">Open Memories</button>
+      </div>
+    `;
+  }
+
+  if (skill?.name === "journal") {
+    return `
+      <div class="skill-setting-stack">
+        <div class="skill-empty-settings">
+          <strong>Journal browsing lives in Continuity</strong>
+          <span>Use Continuity to browse, edit, resolve, or delete journal entries. This skill controls whether the companion can use journal tools.</span>
+        </div>
+        <button id="skillOpenJournal" class="subtle-wide-btn" type="button">Open Journal</button>
+      </div>
+    `;
+  }
+
   if (skill?.name === "tts") {
     return `
       <div class="skill-setting-stack">
@@ -1014,23 +1038,31 @@ function openSkillDialog(skillName) {
             ? "Browse recent tiny paintings saved by this persona."
             : skill.name === "web_search"
               ? "Check web, image, and page-fetch search tools."
-              : skill.name === "tts"
-                ? "Review voice-message status and jump to voice setup."
-                : skill.name === "sticker"
-                  ? "Check sticker pack readiness for this persona."
-                  : skill.name === "tasks"
-                    ? "Peek at companion-managed tasks."
-                    : "Configure this skill for this persona. Save from the main footer when you're done.";
+              : skill.name === "memory"
+                ? "Jump to the Continuity memory browser."
+                : skill.name === "journal"
+                  ? "Jump to the Continuity journal browser."
+                  : skill.name === "tts"
+                    ? "Review voice-message status and jump to voice setup."
+                    : skill.name === "sticker"
+                      ? "Check sticker pack readiness for this persona."
+                      : skill.name === "tasks"
+                        ? "Peek at companion-managed tasks."
+                        : "Configure this skill for this persona. Save from the main footer when you're done.";
   el("skillNotice").textContent = skill.name === "paint"
     ? "Gallery is read-only here; painting still happens through companion tools."
     : skill.name === "web_search"
       ? "These tools use the network only when the companion calls them."
-      : skill.name === "tts"
-        ? "Voice settings are edited in the TTS Voice section."
-        : skill.name === "sticker"
-          ? "Sticker selection still happens through companion tools."
-          : skill.name === "tasks"
-            ? "Task editing still happens through companion tools."
+      : skill.name === "memory"
+        ? "Memory records are managed in the Continuity section."
+        : skill.name === "journal"
+          ? "Journal records are managed in the Continuity section."
+          : skill.name === "tts"
+            ? "Voice settings are edited in the TTS Voice section."
+            : skill.name === "sticker"
+              ? "Sticker selection still happens through companion tools."
+              : skill.name === "tasks"
+                ? "Task editing still happens through companion tools."
     : "Changes here are staged until you use the main Save button.";
   el("skillNotice").classList.remove("hidden");
   el("skillBody").innerHTML = renderSkillDialogBody(skill);
@@ -1098,6 +1130,16 @@ function bindSkillDialogControls(skill) {
     return;
   }
 
+  if (skill?.name === "memory") {
+    el("skillOpenMemories")?.addEventListener("click", () => openContinuityTarget("browse-memories"));
+    return;
+  }
+
+  if (skill?.name === "journal") {
+    el("skillOpenJournal")?.addEventListener("click", () => openContinuityTarget("browse-journal"));
+    return;
+  }
+
   if (skill?.name !== "lor") return;
   const pathInput = el("skillLorDataPath");
   pathInput?.addEventListener("input", () => {
@@ -1147,6 +1189,14 @@ function openTtsVoiceSection() {
   section.classList.add("open");
   section.scrollIntoView({ behavior: "smooth", block: "start" });
   setTimeout(() => field.focus({ preventScroll: true }), 250);
+}
+
+function openContinuityTarget(action) {
+  closeSkillDialog();
+  const section = el("continuitySection");
+  section?.classList.add("open");
+  section?.scrollIntoView({ behavior: "smooth", block: "start" });
+  setTimeout(() => handleContinuityAction(action), 220);
 }
 
 async function loadGardenSkillPreview() {
