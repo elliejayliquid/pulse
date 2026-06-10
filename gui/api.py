@@ -8,6 +8,7 @@ project.
 from __future__ import annotations
 
 import base64
+import importlib.util
 import json
 import os
 import re
@@ -1091,6 +1092,137 @@ class PulseAPI:
             "total": len(index),
             "items": items,
             "paintings_dir": _safe_rel(paintings_dir, self.root),
+        }
+
+    def get_web_search_status(self, persona: str) -> dict:
+        if not persona or persona == "__base__":
+            return {"ok": False, "error": "Choose a persona first."}
+        persona_dir = self.personas_dir / persona
+        if not persona_dir.is_dir():
+            return {"ok": False, "error": f"Persona not found: {persona}"}
+
+        ddgs_available = importlib.util.find_spec("ddgs") is not None
+        requests_available = importlib.util.find_spec("requests") is not None
+        return {
+            "ok": True,
+            "persona": persona,
+            "ddgs_available": ddgs_available,
+            "requests_available": requests_available,
+            "tools": [
+                {
+                    "name": "web_search",
+                    "label": "Web search",
+                    "status": "ready" if ddgs_available else "missing ddgs",
+                    "description": "Searches DuckDuckGo for current web results.",
+                },
+                {
+                    "name": "image_search",
+                    "label": "Image search",
+                    "status": "ready" if ddgs_available else "missing ddgs",
+                    "description": "Finds image results and queues them for Telegram.",
+                },
+                {
+                    "name": "fetch_url",
+                    "label": "Fetch URL",
+                    "status": "ready" if requests_available else "missing requests",
+                    "description": "Reads a page through Jina Reader with injection filtering.",
+                },
+            ],
+        }
+
+    def get_sticker_summary(self, persona: str) -> dict:
+        if not persona or persona == "__base__":
+            return {"ok": False, "error": "Choose a persona first."}
+        persona_dir = self.personas_dir / persona
+        if not persona_dir.is_dir():
+            return {"ok": False, "error": f"Persona not found: {persona}"}
+
+        db_path = self.root / "stickers" / "stickers.db"
+        if not db_path.exists():
+            return {
+                "ok": True,
+                "persona": persona,
+                "ready": False,
+                "count": 0,
+                "with_embeddings": 0,
+                "packs": [],
+                "db_path": _safe_rel(db_path, self.root),
+            }
+
+        try:
+            with closing(_connect_sqlite(db_path)) as conn:
+                columns = self._table_columns(conn, "stickers")
+                if not columns:
+                    return {"ok": False, "error": "Sticker database has no stickers table."}
+                count = conn.execute("SELECT COUNT(*) FROM stickers").fetchone()[0]
+                with_embeddings = (
+                    conn.execute("SELECT COUNT(*) FROM stickers WHERE embedding IS NOT NULL").fetchone()[0]
+                    if "embedding" in columns else 0
+                )
+                packs = []
+                if "pack_id" in columns:
+                    packs = [
+                        row[0] for row in conn.execute(
+                            "SELECT DISTINCT pack_id FROM stickers WHERE pack_id IS NOT NULL ORDER BY pack_id LIMIT 8"
+                        ).fetchall()
+                    ]
+        except sqlite3.Error as e:
+            return {"ok": False, "error": f"Could not read sticker database: {e}"}
+
+        return {
+            "ok": True,
+            "persona": persona,
+            "ready": count > 0,
+            "count": count,
+            "with_embeddings": with_embeddings,
+            "packs": packs,
+            "db_path": _safe_rel(db_path, self.root),
+        }
+
+    def get_tasks_summary(self, persona: str) -> dict:
+        if not persona or persona == "__base__":
+            return {"ok": False, "error": "Choose a persona first."}
+        persona_dir = self.personas_dir / persona
+        if not persona_dir.is_dir():
+            return {"ok": False, "error": f"Persona not found: {persona}"}
+
+        db_path = self._persona_database_path(persona)
+        pending = completed = 0
+        recent: list[dict] = []
+
+        if db_path.exists():
+            try:
+                with closing(_connect_sqlite(db_path)) as conn:
+                    conn.row_factory = sqlite3.Row
+                    if self._table_columns(conn, "tasks"):
+                        pending = conn.execute(
+                            "SELECT COUNT(*) FROM tasks WHERE completed = 0"
+                        ).fetchone()[0]
+                        completed = conn.execute(
+                            "SELECT COUNT(*) FROM tasks WHERE completed = 1"
+                        ).fetchone()[0]
+                        recent = [
+                            self._format_task_summary(row)
+                            for row in conn.execute(
+                                """
+                                SELECT id, description, list, completed, created_at
+                                FROM tasks
+                                WHERE completed = 0
+                                ORDER BY id DESC
+                                LIMIT 5
+                                """
+                            ).fetchall()
+                        ]
+            except sqlite3.Error as e:
+                return {"ok": False, "error": f"Could not read tasks: {e}"}
+
+        return {
+            "ok": True,
+            "persona": persona,
+            "pending": pending,
+            "completed": completed,
+            "recent": recent,
+            "db_path": _safe_rel(db_path, self.root),
         }
 
     def list_memories(self, persona: str, view: str = "active",
@@ -3082,6 +3214,18 @@ class PulseAPI:
             "true_path": _safe_rel(true_path, self.root) if true_path else "",
             "tooltip": self._painting_tooltip(title, caption, entry),
             "persona": persona,
+        }
+
+    def _format_task_summary(self, row: sqlite3.Row) -> dict:
+        description = str(row["description"] or "")
+        short = description[:96] + ("..." if len(description) > 96 else "")
+        return {
+            "id": row["id"],
+            "description": description,
+            "short_description": short,
+            "list": row["list"] or "Daily",
+            "completed": bool(row["completed"]),
+            "created_at": row["created_at"] or "",
         }
 
     def _resolve_painting_file(self, paintings_dir: Path, value: Any) -> Path | None:

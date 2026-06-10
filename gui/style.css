@@ -1941,6 +1941,102 @@ textarea {
   -webkit-line-clamp: 2;
 }
 
+.skill-tool-card {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.skill-tool-list {
+  display: grid;
+  gap: 8px;
+}
+
+.skill-tool-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  transition: border-color 140ms ease, background 140ms ease;
+}
+
+.skill-tool-row:hover {
+  border-color: var(--accent);
+  background: var(--surface-raised);
+}
+
+.skill-tool-row div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.skill-tool-row strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+  font: 700 12px/1.2 var(--body);
+}
+
+.skill-tool-row span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-tertiary);
+  font-size: 11px;
+}
+
+.skill-tool-row b {
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-tertiary);
+  font: 700 10px/1 var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.skill-tool-row b.ready {
+  border-color: rgba(34, 197, 94, 0.32);
+  background: rgba(34, 197, 94, 0.1);
+  color: #4ade80;
+}
+
+.skill-tool-row b.warn {
+  border-color: rgba(245, 158, 11, 0.34);
+  background: rgba(245, 158, 11, 0.1);
+  color: #fbbf24;
+}
+
+.subtle-wide-btn {
+  width: 100%;
+  min-height: 48px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text-primary);
+  font-weight: 700;
+  cursor: pointer;
+  transition: border-color 140ms ease, background 140ms ease, transform 140ms ease;
+}
+
+.subtle-wide-btn:hover {
+  border-color: var(--accent);
+  background: var(--surface-raised);
+  transform: translateY(-1px);
+}
+
 .log-tail {
   max-height: 320px;
   margin: 0;
@@ -3132,7 +3228,8 @@ textarea {
   .skills-grid,
   .runtime-grid,
   .skill-setting-grid,
-  .skill-setting-summary {
+  .skill-setting-summary,
+  .skill-tool-row {
     grid-template-columns: 1fr;
   }
 

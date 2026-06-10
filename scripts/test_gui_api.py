@@ -225,6 +225,77 @@ def test_gui_api_paint_gallery_reads_recent_index_safely():
         assert "test art" in result["items"][0]["tooltip"]
 
 
+def test_gui_api_skill_status_summaries_are_read_only():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        persona_dir = root / "personas" / "demo"
+        data_dir = persona_dir / "data"
+        stickers_dir = root / "stickers"
+        data_dir.mkdir(parents=True)
+        stickers_dir.mkdir()
+        (root / "config.yaml").write_text("provider:\n  type: local\n", encoding="utf-8")
+        (root / "persona.yaml").write_text("name: Base\n", encoding="utf-8")
+        (persona_dir / "config.yaml").write_text("", encoding="utf-8")
+        (persona_dir / "persona.yaml").write_text("name: Demo\n", encoding="utf-8")
+
+        db_path = data_dir / "demo.db"
+        with closing(sqlite3.connect(db_path)) as conn:
+            conn.execute(
+                """
+                CREATE TABLE tasks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    description TEXT NOT NULL,
+                    list TEXT NOT NULL DEFAULT 'Daily',
+                    completed INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    completed_at TEXT
+                )
+                """
+            )
+            conn.execute("INSERT INTO tasks (description, list) VALUES (?, ?)", ("Check the importer", "Pulse"))
+            conn.execute("INSERT INTO tasks (description, completed) VALUES (?, 1)", ("Done thing",))
+            conn.commit()
+
+        with closing(sqlite3.connect(stickers_dir / "stickers.db")) as conn:
+            conn.execute(
+                """
+                CREATE TABLE stickers (
+                    id INTEGER PRIMARY KEY,
+                    pack_id TEXT,
+                    file_id TEXT,
+                    keywords TEXT,
+                    description TEXT,
+                    embedding BLOB,
+                    image_path TEXT
+                )
+                """
+            )
+            conn.execute(
+                "INSERT INTO stickers (pack_id, file_id, keywords, description, embedding) VALUES (?, ?, ?, ?, ?)",
+                ("cherry", "file-id", "hug,warm", "Warm hug", b"1234"),
+            )
+            conn.commit()
+
+        api = PulseAPI(root)
+        web = api.get_web_search_status("demo")
+        assert web["ok"] is True
+        assert {tool["name"] for tool in web["tools"]} == {"web_search", "image_search", "fetch_url"}
+
+        stickers = api.get_sticker_summary("demo")
+        assert stickers["ok"] is True
+        assert stickers["ready"] is True
+        assert stickers["count"] == 1
+        assert stickers["with_embeddings"] == 1
+        assert stickers["packs"] == ["cherry"]
+
+        tasks = api.get_tasks_summary("demo")
+        assert tasks["ok"] is True
+        assert tasks["pending"] == 1
+        assert tasks["completed"] == 1
+        assert tasks["recent"][0]["list"] == "Pulse"
+        assert "importer" in tasks["recent"][0]["short_description"]
+
+
 def test_gui_api_create_persona_from_template_initializes_db():
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -1412,6 +1483,7 @@ if __name__ == "__main__":
     test_gui_api_read_only_persona_loading()
     test_gui_api_garden_summary_reads_grid_and_memory_tooltips()
     test_gui_api_paint_gallery_reads_recent_index_safely()
+    test_gui_api_skill_status_summaries_are_read_only()
     test_gui_api_create_persona_from_template_initializes_db()
     test_gui_api_import_openrouter_chat_visible_messages_only()
     test_gui_api_standard_provider_env_fallback()

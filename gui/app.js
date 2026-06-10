@@ -221,6 +221,20 @@ const fallbackApi = {
     return { ok: true, width: 12, height: 8, plant_count: 0, wilted_count: 0, needs_water_count: 0, plants: [], grid };
   },
   async get_paint_gallery() { return { ok: true, total: 0, items: [], paintings_dir: "" }; },
+  async get_web_search_status() {
+    return {
+      ok: true,
+      ddgs_available: false,
+      requests_available: false,
+      tools: [
+        { label: "Web search", status: "pywebview only", description: "Searches DuckDuckGo for current web results." },
+        { label: "Image search", status: "pywebview only", description: "Finds image results." },
+        { label: "Fetch URL", status: "pywebview only", description: "Reads a page through Jina Reader." },
+      ],
+    };
+  },
+  async get_sticker_summary() { return { ok: true, ready: false, count: 0, with_embeddings: 0, packs: [] }; },
+  async get_tasks_summary() { return { ok: true, pending: 0, completed: 0, recent: [] }; },
   async list_memories() { return { ok: false, error: "Run through pywebview to browse memories." }; },
   async get_memory_detail() { return { ok: false, error: "Run through pywebview to inspect memories." }; },
   async add_memory() { return { ok: false, error: "Run through pywebview to add memories." }; },
@@ -758,6 +772,23 @@ function setDevTickField(key, value) {
   devTickConfig()[key] = value;
 }
 
+function ttsSkillMode() {
+  const tts = state.current?.config?.tts || {};
+  const hasDescription = Boolean(text(tts.voice_description).trim());
+  const hasSample = Boolean(text(tts.voice_sample).trim());
+  const hasSampleText = Boolean(text(tts.voice_sample_text).trim());
+  if (hasSample && hasSampleText) return "Clone mode";
+  if (hasDescription) return "Design mode";
+  return "Not configured";
+}
+
+function ttsSkillDescription() {
+  const mode = ttsSkillMode();
+  if (mode === "Clone mode") return "Reference audio and transcript are set.";
+  if (mode === "Design mode") return "Voice description is set; samples will vary slightly.";
+  return "Add a voice description, or choose a reference sample in the TTS section.";
+}
+
 function renderSkillDialogBody(skill) {
   if (skill?.name === "dev") {
     return `
@@ -837,6 +868,69 @@ function renderSkillDialogBody(skill) {
     `;
   }
 
+  if (skill?.name === "web_search") {
+    return `
+      <div class="skill-setting-stack">
+        <div id="skillWebStatus" class="skill-tool-panel">
+          <div class="skill-empty-settings">
+            <strong>Loading web tools</strong>
+            <span>Checking local dependencies...</span>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  if (skill?.name === "tts") {
+    return `
+      <div class="skill-setting-stack">
+        <div class="skill-setting-summary">
+          <div><span>Mode</span><strong>${escapeHtml(ttsSkillMode())}</strong></div>
+          <div><span>Tool</span><strong>speak</strong></div>
+        </div>
+        <div class="skill-empty-settings">
+          <strong>${escapeHtml(ttsSkillDescription())}</strong>
+          <span>Voice setup stays in the TTS Voice section so the big text fields only live in one place.</span>
+        </div>
+        <button id="skillOpenTtsSection" class="subtle-wide-btn" type="button">Open TTS Voice Section</button>
+      </div>
+    `;
+  }
+
+  if (skill?.name === "sticker") {
+    return `
+      <div class="skill-setting-stack">
+        <div id="skillStickerSummary" class="skill-tool-panel">
+          <div class="skill-empty-settings">
+            <strong>Loading stickers</strong>
+            <span>Checking the sticker database...</span>
+          </div>
+        </div>
+        <div class="skill-empty-settings">
+          <strong>Companion-sent for now</strong>
+          <span>Stickers are selected by mood or situation through companion tools.</span>
+        </div>
+      </div>
+    `;
+  }
+
+  if (skill?.name === "tasks") {
+    return `
+      <div class="skill-setting-stack">
+        <div id="skillTasksSummary" class="skill-tool-panel">
+          <div class="skill-empty-settings">
+            <strong>Loading tasks</strong>
+            <span>Reading the current task list...</span>
+          </div>
+        </div>
+        <div class="skill-empty-settings">
+          <strong>Companion-managed for now</strong>
+          <span>Adding, completing, and deleting tasks still happens through companion tools.</span>
+        </div>
+      </div>
+    `;
+  }
+
   if (skill?.name !== "lor") {
     return `
       <div class="skill-empty-settings">
@@ -896,9 +990,25 @@ function openSkillDialog(skillName) {
           ? "Configure garden context and peek at the current grid."
           : skill.name === "paint"
             ? "Browse recent tiny paintings saved by this persona."
-            : "Configure this skill for this persona. Save from the main footer when you're done.";
+            : skill.name === "web_search"
+              ? "Check web, image, and page-fetch search tools."
+              : skill.name === "tts"
+                ? "Review voice-message status and jump to voice setup."
+                : skill.name === "sticker"
+                  ? "Check sticker pack readiness for this persona."
+                  : skill.name === "tasks"
+                    ? "Peek at companion-managed tasks."
+                    : "Configure this skill for this persona. Save from the main footer when you're done.";
   el("skillNotice").textContent = skill.name === "paint"
     ? "Gallery is read-only here; painting still happens through companion tools."
+    : skill.name === "web_search"
+      ? "These tools use the network only when the companion calls them."
+      : skill.name === "tts"
+        ? "Voice settings are edited in the TTS Voice section."
+        : skill.name === "sticker"
+          ? "Sticker selection still happens through companion tools."
+          : skill.name === "tasks"
+            ? "Task editing still happens through companion tools."
     : "Changes here are staged until you use the main Save button.";
   el("skillNotice").classList.remove("hidden");
   el("skillBody").innerHTML = renderSkillDialogBody(skill);
@@ -910,6 +1020,12 @@ function openSkillDialog(skillName) {
     loadGardenSkillPreview();
   } else if (skill.name === "paint") {
     loadPaintSkillGallery();
+  } else if (skill.name === "web_search") {
+    loadWebSearchSkillStatus();
+  } else if (skill.name === "sticker") {
+    loadStickerSkillSummary();
+  } else if (skill.name === "tasks") {
+    loadTasksSkillSummary();
   }
 }
 
@@ -948,6 +1064,14 @@ function bindSkillDialogControls(skill) {
     el("skillGardenContextInject")?.addEventListener("change", (event) => {
       setSkillContextInjected("garden", event.target.checked);
       setDirty(hasEditableChanges());
+    });
+    return;
+  }
+
+  if (skill?.name === "tts") {
+    el("skillOpenTtsSection")?.addEventListener("click", () => {
+      closeSkillDialog();
+      openTtsVoiceSection();
     });
     return;
   }
@@ -992,6 +1116,15 @@ function closeSkillDialog() {
   el("skillDialog").classList.add("hidden");
   document.body.classList.remove("modal-open");
   state.currentSkill = "";
+}
+
+function openTtsVoiceSection() {
+  const field = el("ttsVoice");
+  const section = field?.closest(".section");
+  if (!section) return;
+  section.classList.add("open");
+  section.scrollIntoView({ behavior: "smooth", block: "start" });
+  setTimeout(() => field.focus({ preventScroll: true }), 250);
 }
 
 async function loadGardenSkillPreview() {
@@ -1104,6 +1237,129 @@ function renderPaintSkillGallery(data) {
       <div class="skill-paint-grid">
         ${cards}
       </div>
+    </div>
+  `;
+}
+
+async function loadWebSearchSkillStatus() {
+  const node = el("skillWebStatus");
+  if (!node || !state.current || state.current.name === "__base__") return;
+  node.innerHTML = loadingSkillPanel("Loading web tools", "Checking local dependencies...");
+  const result = await api().get_web_search_status(state.current.name);
+  if (!node.isConnected || state.currentSkill !== "web_search") return;
+  if (!result.ok) {
+    node.innerHTML = loadingSkillPanel("Web status unavailable", result.error || "Could not check web tools.");
+    return;
+  }
+  node.innerHTML = renderWebSearchSkillStatus(result);
+}
+
+function renderWebSearchSkillStatus(data) {
+  const tools = data.tools || [];
+  const rows = tools.map((tool) => `
+    <div class="skill-tool-row">
+      <div>
+        <strong>${escapeHtml(tool.label || tool.name || "Tool")}</strong>
+        <span>${escapeHtml(tool.description || "")}</span>
+      </div>
+      <b class="${String(tool.status || "").startsWith("ready") ? "ready" : "warn"}">${escapeHtml(tool.status || "unknown")}</b>
+    </div>
+  `).join("");
+  const overall = data.ddgs_available && data.requests_available
+    ? "All web helpers ready"
+    : "Some helpers need packages";
+  return `
+    <div class="skill-tool-card">
+      <div class="skill-garden-head">
+        <span>Tool status</span>
+        <strong>${escapeHtml(overall)}</strong>
+      </div>
+      <div class="skill-tool-list">${rows}</div>
+    </div>
+  `;
+}
+
+async function loadStickerSkillSummary() {
+  const node = el("skillStickerSummary");
+  if (!node || !state.current || state.current.name === "__base__") return;
+  node.innerHTML = loadingSkillPanel("Loading stickers", "Checking the sticker database...");
+  const result = await api().get_sticker_summary(state.current.name);
+  if (!node.isConnected || state.currentSkill !== "sticker") return;
+  if (!result.ok) {
+    node.innerHTML = loadingSkillPanel("Sticker status unavailable", result.error || "Could not read stickers.");
+    return;
+  }
+  node.innerHTML = renderStickerSkillSummary(result);
+}
+
+function renderStickerSkillSummary(data) {
+  const packText = (data.packs || []).length ? data.packs.join(", ") : "No packs listed";
+  return `
+    <div class="skill-tool-card">
+      <div class="skill-garden-head">
+        <span>Sticker database</span>
+        <strong>${data.ready ? "Ready" : "Not built"}</strong>
+      </div>
+      <div class="skill-setting-summary">
+        <div><span>Stickers</span><strong>${escapeHtml(String(data.count || 0))}</strong></div>
+        <div><span>Embeddings</span><strong>${escapeHtml(String(data.with_embeddings || 0))}</strong></div>
+      </div>
+      <div class="skill-empty-settings">
+        <strong>${escapeHtml(packText)}</strong>
+        <span>Available packs</span>
+      </div>
+    </div>
+  `;
+}
+
+async function loadTasksSkillSummary() {
+  const node = el("skillTasksSummary");
+  if (!node || !state.current || state.current.name === "__base__") return;
+  node.innerHTML = loadingSkillPanel("Loading tasks", "Reading the current task list...");
+  const result = await api().get_tasks_summary(state.current.name);
+  if (!node.isConnected || state.currentSkill !== "tasks") return;
+  if (!result.ok) {
+    node.innerHTML = loadingSkillPanel("Task summary unavailable", result.error || "Could not read tasks.");
+    return;
+  }
+  node.innerHTML = renderTasksSkillSummary(result);
+}
+
+function renderTasksSkillSummary(data) {
+  const recent = data.recent || [];
+  const rows = recent.length ? recent.map((task) => `
+    <div class="skill-tool-row">
+      <div>
+        <strong>#${escapeHtml(String(task.id))} · ${escapeHtml(task.list || "Daily")}</strong>
+        <span>${escapeHtml(task.short_description || task.description || "")}</span>
+      </div>
+    </div>
+  `).join("") : `
+    <div class="skill-empty-settings">
+      <strong>No pending tasks</strong>
+      <span>When this persona tracks tasks, they will appear here.</span>
+    </div>
+  `;
+  return `
+    <div class="skill-tool-card">
+      <div class="skill-garden-head">
+        <span>Task list</span>
+        <strong>${escapeHtml(String(data.pending || 0))} pending</strong>
+      </div>
+      <div class="skill-setting-summary">
+        <div><span>Pending</span><strong>${escapeHtml(String(data.pending || 0))}</strong></div>
+        <div><span>Completed</span><strong>${escapeHtml(String(data.completed || 0))}</strong></div>
+      </div>
+      <div class="skill-tool-list">${rows}</div>
+    </div>
+  `;
+}
+
+function loadingSkillPanel(title, message) {
+  return `
+    <div class="skill-empty-settings">
+      <strong>${escapeHtml(title)}</strong>
+      <span>${escapeHtml(message)}</span>
     </div>
   `;
 }
