@@ -148,8 +148,9 @@ const fallbackApi = {
       config: {
         paths: { lor_data: "data/lor" },
         channels: {
-          lor: { author_name: "Kai", model_name: "Grok 4.2" },
+          lor: { author_name: "Kai", model_name: "Grok 4.2", context_initial_lookback_hours: 72 },
         },
+        context: { inject_skills: ["lantern"] },
       },
       status: {
         running: false,
@@ -677,14 +678,56 @@ function setLorDataPath(value) {
   state.current.config.paths.lor_data = value;
 }
 
-function lorAuthorLabel() {
-  const lor = state.current?.config?.channels?.lor || {};
-  return text(lor.author_name || state.current?.identity?.name || state.current?.display_name || state.current?.name, "Companion");
+function lorConfig() {
+  state.current.config = state.current.config || {};
+  state.current.config.channels = state.current.config.channels || {};
+  state.current.config.channels.lor = state.current.config.channels.lor || {};
+  return state.current.config.channels.lor;
 }
 
-function lorModelLabel() {
+function lorAuthorValue() {
   const lor = state.current?.config?.channels?.lor || {};
-  return text(lor.model_name || state.current?.summary?.provider_model || state.current?.summary?.model_display, "not set");
+  return text(lor.author_name);
+}
+
+function lorAuthorFallback() {
+  return text(state.current?.identity?.name || state.current?.display_name || state.current?.name, "Companion");
+}
+
+function lorModelValue() {
+  const lor = state.current?.config?.channels?.lor || {};
+  return text(lor.model_name);
+}
+
+function lorModelFallback() {
+  return text(state.current?.summary?.provider_model || state.current?.summary?.model_display, "not set");
+}
+
+function lorLookbackHours() {
+  const lor = state.current?.config?.channels?.lor || {};
+  return lor.context_initial_lookback_hours ?? 72;
+}
+
+function setLorChannelField(key, value) {
+  const lor = lorConfig();
+  lor[key] = value;
+}
+
+function contextInjectSkills() {
+  const skills = state.current?.config?.context?.inject_skills;
+  return Array.isArray(skills) ? [...skills] : [];
+}
+
+function skillContextInjected(skillName) {
+  return contextInjectSkills().includes(skillName);
+}
+
+function setSkillContextInjected(skillName, enabled) {
+  state.current.config = state.current.config || {};
+  state.current.config.context = state.current.config.context || {};
+  const current = contextInjectSkills().filter((name) => name !== skillName);
+  if (enabled) current.push(skillName);
+  state.current.config.context.inject_skills = current;
 }
 
 function renderSkillDialogBody(skill) {
@@ -699,17 +742,34 @@ function renderSkillDialogBody(skill) {
 
   return `
     <div class="skill-setting-block">
-      <label class="sample-path-label">LoR Data Folder
+      <label class="sample-path-label" title="Shared forum folder for this persona. Use the same folder to share one forum, or a different folder for separate forums.">LoR Data Folder
         <div class="sample-input-row">
           <input id="skillLorDataPath" type="text" value="${escapeHtml(lorDataPath())}" placeholder="D:\\Claude\\LoR\\lor_data">
           <button id="skillLorDataPicker" class="icon-btn sample-picker-btn" type="button" title="Choose LoR data folder">📂</button>
         </div>
       </label>
-      <p class="field-hint">This is the shared forum folder for this persona. Leave it on the inherited default to share one forum; choose a different folder for a separate Claude/GPT/etc. forum.</p>
+      <p class="field-hint">Shared forum storage for this persona.</p>
+    </div>
+    <div class="skill-setting-grid">
+      <label class="sample-path-label" title="Shown as this persona's name on LoR posts. Blank falls back to the persona name.">Author Name
+        <input id="skillLorAuthor" type="text" value="${escapeHtml(lorAuthorValue())}" placeholder="${escapeHtml(lorAuthorFallback())}">
+      </label>
+      <label class="sample-path-label" title="Shown beside the author on LoR. Blank falls back to the provider model.">Model Name
+        <input id="skillLorModel" type="text" value="${escapeHtml(lorModelValue())}" placeholder="${escapeHtml(lorModelFallback())}">
+      </label>
+    </div>
+    <div class="skill-setting-stack">
+      <label class="sample-path-label" title="Hours of recent LoR activity to surface the first time this persona has no saved inbox cursor.">Initial Inbox Lookback
+        <input id="skillLorLookback" type="number" min="1" max="8760" step="1" value="${escapeHtml(String(lorLookbackHours()))}">
+      </label>
+      <label class="check-row skill-setting-check" title="Lets the model see unread LoR posts/replies in prompt context without calling a tool. Takes effect after restart.">
+        <span>Inject unread inbox into context</span>
+        <input id="skillLorContextInject" type="checkbox" ${skillContextInjected("lor") ? "checked" : ""}>
+      </label>
     </div>
     <div class="skill-setting-summary">
-      <div><span>Author label</span><strong>${escapeHtml(lorAuthorLabel())}</strong></div>
-      <div><span>Model label</span><strong>${escapeHtml(lorModelLabel())}</strong></div>
+      <div><span>Effective author</span><strong>${escapeHtml(lorAuthorValue() || lorAuthorFallback())}</strong></div>
+      <div><span>Effective model</span><strong>${escapeHtml(lorModelValue() || lorModelFallback())}</strong></div>
     </div>
   `;
 }
@@ -721,7 +781,7 @@ function openSkillDialog(skillName) {
   state.currentSkill = skillName;
   el("skillTitle").textContent = skillLabel(skill);
   el("skillSubtitle").textContent = skill.name === "lor"
-    ? "Configure LoR for this persona. Save from the main footer when you're done."
+    ? "Configure this persona's forum identity and inbox behavior."
     : "Configure this skill for this persona. Save from the main footer when you're done.";
   el("skillNotice").textContent = "Changes here are staged until you use the main Save button.";
   el("skillNotice").classList.remove("hidden");
@@ -737,6 +797,23 @@ function bindSkillDialogControls(skill) {
   const pathInput = el("skillLorDataPath");
   pathInput?.addEventListener("input", () => {
     setLorDataPath(pathInput.value);
+    setDirty(hasEditableChanges());
+  });
+  el("skillLorAuthor")?.addEventListener("input", (event) => {
+    setLorChannelField("author_name", event.target.value);
+    setDirty(hasEditableChanges());
+  });
+  el("skillLorModel")?.addEventListener("input", (event) => {
+    setLorChannelField("model_name", event.target.value);
+    setDirty(hasEditableChanges());
+  });
+  el("skillLorLookback")?.addEventListener("input", (event) => {
+    const raw = event.target.value;
+    setLorChannelField("context_initial_lookback_hours", raw === "" ? "" : Number(raw));
+    setDirty(hasEditableChanges());
+  });
+  el("skillLorContextInject")?.addEventListener("change", (event) => {
+    setSkillContextInjected("lor", event.target.checked);
     setDirty(hasEditableChanges());
   });
   el("skillLorDataPicker")?.addEventListener("click", async () => {
@@ -1476,10 +1553,24 @@ function editableSnapshot() {
       (state.current?.skills || []).map((skill) => [skill.name, Boolean(skill.enabled)])
     ),
     channels: Object.fromEntries(
-      (state.current?.channels || []).map((channel) => [channel.name, Boolean(channel.enabled)])
+      (state.current?.channels || []).map((channel) => {
+        if (channel.name !== "lor") {
+          return [channel.name, Boolean(channel.enabled)];
+        }
+        const lor = state.current?.config?.channels?.lor || {};
+        return [channel.name, {
+          enabled: Boolean(channel.enabled),
+          author_name: text(lor.author_name),
+          model_name: text(lor.model_name),
+          context_initial_lookback_hours: lor.context_initial_lookback_hours ?? 72,
+        }];
+      })
     ),
     paths: {
       lor_data: lorDataPath(),
+    },
+    context: {
+      inject_skills: contextInjectSkills(),
     },
     heartbeat: {
       interval_minutes: el("hbInterval").value,
@@ -1564,8 +1655,8 @@ function numberOrEmpty(value) {
 
 function collectEditableChanges() {
   const current = editableSnapshot();
-  const original = state.originalEditable || { identity: {}, provider: {}, server: {}, model: {}, context_budget: {}, tts: {}, skills: {}, channels: {}, paths: {}, heartbeat: {} };
-  const changes = { identity: {}, provider: {}, server: {}, model: {}, context_budget: {}, tts: {}, skills: {}, channels: {}, paths: {}, heartbeat: {} };
+  const original = state.originalEditable || { identity: {}, provider: {}, server: {}, model: {}, context_budget: {}, tts: {}, skills: {}, channels: {}, paths: {}, context: {}, heartbeat: {} };
+  const changes = { identity: {}, provider: {}, server: {}, model: {}, context_budget: {}, tts: {}, skills: {}, channels: {}, paths: {}, context: {}, heartbeat: {} };
 
   for (const [key, value] of Object.entries(current.identity)) {
     if (key === "traits") {
@@ -1624,7 +1715,18 @@ function collectEditableChanges() {
   }
 
   for (const [key, value] of Object.entries(current.channels)) {
-    if (value !== original.channels?.[key]) {
+    const originalValue = original.channels?.[key];
+    if (typeof value === "object" && value !== null) {
+      const channelChanges = {};
+      for (const [field, fieldValue] of Object.entries(value)) {
+        if (fieldValue !== originalValue?.[field]) {
+          channelChanges[field] = fieldValue;
+        }
+      }
+      if (Object.keys(channelChanges).length > 0) {
+        changes.channels[key] = channelChanges;
+      }
+    } else if (value !== originalValue) {
       changes.channels[key] = value;
     }
   }
@@ -1632,6 +1734,13 @@ function collectEditableChanges() {
   for (const [key, value] of Object.entries(current.paths)) {
     if (value !== original.paths?.[key]) {
       changes.paths[key] = value;
+    }
+  }
+
+  for (const [key, value] of Object.entries(current.context)) {
+    const originalValue = original.context?.[key] || [];
+    if (JSON.stringify(value) !== JSON.stringify(originalValue)) {
+      changes.context[key] = value;
     }
   }
 
@@ -1655,6 +1764,7 @@ function hasEditableChanges() {
     || Object.keys(changes.skills).length > 0
     || Object.keys(changes.channels).length > 0
     || Object.keys(changes.paths).length > 0
+    || Object.keys(changes.context).length > 0
     || Object.keys(changes.heartbeat).length > 0;
 }
 

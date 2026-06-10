@@ -101,6 +101,8 @@ channels:
   lor:
     enabled: true
     author_name: "Demo"
+    model_name: "old/model"
+    context_initial_lookback_hours: 72
   toast:
     app_name: "Demo"
   telegram:
@@ -108,6 +110,10 @@ channels:
 
 paths:
   lor_data: "data/lor"
+
+context:
+  inject_skills:
+    - lantern
 """,
             encoding="utf-8",
         )
@@ -173,6 +179,11 @@ paths:
             "channels": {
                 "telegram": False,
                 "toast": False,
+                "lor": {
+                    "author_name": "Demo LoR",
+                    "model_name": "demo/model",
+                    "context_initial_lookback_hours": 168,
+                },
             },
             "skills": {
                 "tts": False,
@@ -180,6 +191,9 @@ paths:
             },
             "paths": {
                 "lor_data": "D:/Claude/LoR/lor_data",
+            },
+            "context": {
+                "inject_skills": ["lantern", "lor"],
             },
         }
         preview = api.preview_persona_save("demo", changes)
@@ -245,12 +259,14 @@ paths:
         assert 'interval_minutes: "45"' not in config_text
         assert "telegram:\n    enabled: false" in config_text
         assert "toast:\n    app_name: \"Demo\"\n    enabled: false" in config_text
+        assert 'lor:\n    enabled: true\n    author_name: "Demo LoR"\n    model_name: "demo/model"\n    context_initial_lookback_hours: 168' in config_text
         assert 'enabled: "false"' not in config_text
         assert "tts:\n    enabled: false\n    voice: \"warm\"" in config_text
         assert "lantern:" in config_text
         assert "notes: \"existing config\"" in config_text
         assert "enabled: false" in config_text
         assert 'lor_data: "D:/Claude/LoR/lor_data"' in config_text
+        assert 'context:\n  inject_skills:\n    - "lantern"\n    - "lor"' in config_text
 
         backup_path = root / result["backup"]["path"]
         assert (backup_path / "config.yaml").exists()
@@ -298,6 +314,29 @@ def test_config_editor_rejects_unknown_fields():
         })
         assert result["ok"] is False
         assert "true or false" in result["error"]
+
+        result = api.preview_persona_save("demo", {
+            "channels": {"lor": {"unknown": "value"}},
+        })
+        assert result["ok"] is False
+        assert "channels.lor.unknown" in result["error"]
+
+        result = api.preview_persona_save("demo", {
+            "channels": {"lor": {"context_initial_lookback_hours": 0}},
+        })
+        assert result["ok"] is False
+        assert "between 1 and 8760" in result["error"]
+
+        result = api.preview_persona_save("demo", {
+            "context": {"inject_skills": ["tts"]},
+        })
+        assert result["ok"] is True
+
+        result = api.preview_persona_save("demo", {
+            "context": {"inject_skills": ["not_a_skill"]},
+        })
+        assert result["ok"] is False
+        assert "Unknown context injection skill" in result["error"]
 
         result = api.preview_persona_save("demo", {
             "skills": {"definitely_not_a_skill": True},

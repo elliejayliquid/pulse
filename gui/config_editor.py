@@ -110,6 +110,17 @@ HEARTBEAT_LIMITS = {
 
 CHANNEL_NAMES = {"telegram", "toast", "lor"}
 
+LOR_CHANNEL_FIELDS = {
+    "enabled": "LoR Channel",
+    "author_name": "LoR Author Name",
+    "model_name": "LoR Model Name",
+    "context_initial_lookback_hours": "LoR Initial Lookback Hours",
+}
+
+CONTEXT_FIELDS = {
+    "inject_skills": "Context Injection Skills",
+}
+
 PATH_FIELDS = {
     "lor_data": "LoR Data Folder",
 }
@@ -198,6 +209,7 @@ class ConfigEditor:
         heartbeat = changes.get("heartbeat", {}) or {}
         skills = changes.get("skills", {}) or {}
         channels = changes.get("channels", {}) or {}
+        context = changes.get("context", {}) or {}
         paths = changes.get("paths", {}) or {}
         if not isinstance(provider, dict):
             raise ValueError("Provider changes must be an object.")
@@ -211,6 +223,8 @@ class ConfigEditor:
             raise ValueError("Skills changes must be an object.")
         if not isinstance(channels, dict):
             raise ValueError("Channels changes must be an object.")
+        if not isinstance(context, dict):
+            raise ValueError("Context changes must be an object.")
         if not isinstance(paths, dict):
             raise ValueError("Path changes must be an object.")
         valid_skills = self._editable_skill_names(persona_dir)
@@ -223,6 +237,7 @@ class ConfigEditor:
         unknown_heartbeat = sorted(set(heartbeat) - set(HEARTBEAT_FIELDS))
         unknown_skills = sorted(set(skills) - valid_skills)
         unknown_channels = sorted(set(channels) - CHANNEL_NAMES)
+        unknown_context = sorted(set(context) - set(CONTEXT_FIELDS))
         unknown_paths = sorted(set(paths) - set(PATH_FIELDS))
         if (
             unknown_identity
@@ -234,6 +249,7 @@ class ConfigEditor:
             or unknown_heartbeat
             or unknown_skills
             or unknown_channels
+            or unknown_context
             or unknown_paths
         ):
             unknown = (
@@ -246,6 +262,7 @@ class ConfigEditor:
                 + [f"heartbeat.{name}" for name in unknown_heartbeat]
                 + [f"skills.{name}" for name in unknown_skills]
                 + [f"channels.{name}" for name in unknown_channels]
+                + [f"context.{name}" for name in unknown_context]
                 + [f"paths.{name}" for name in unknown_paths]
             )
             raise ValueError(f"Unsupported field(s): {', '.join(unknown)}")
@@ -290,6 +307,10 @@ class ConfigEditor:
             "channels": {
                 key: self._clean_channel_value(key, value)
                 for key, value in channels.items()
+            },
+            "context": {
+                key: self._clean_context_value(key, value, valid_skills)
+                for key, value in context.items()
             },
             "paths": {
                 key: self._clean_text(value, PATH_FIELDS[key])
@@ -412,10 +433,57 @@ class ConfigEditor:
             raise ValueError(f"{label} must be between {low} and {high}.")
         return value
 
-    def _clean_channel_value(self, key: str, value: Any) -> bool:
-        if type(value) is not bool:
+    def _clean_channel_value(self, key: str, value: Any) -> dict[str, Any]:
+        if type(value) is bool:
+            return {"enabled": value}
+        if not isinstance(value, dict):
             raise ValueError(f"{key.title()} channel must be true or false.")
-        return value
+
+        allowed = {"enabled"}
+        if key == "lor":
+            allowed = set(LOR_CHANNEL_FIELDS)
+        unknown = sorted(set(value) - allowed)
+        if unknown:
+            raise ValueError(
+                "Unsupported field(s): "
+                + ", ".join(f"channels.{key}.{field}" for field in unknown)
+            )
+
+        cleaned: dict[str, Any] = {}
+        for field, raw in value.items():
+            if field == "enabled":
+                if type(raw) is not bool:
+                    raise ValueError(f"{key.title()} channel must be true or false.")
+                cleaned[field] = raw
+            elif field in ("author_name", "model_name"):
+                cleaned[field] = self._clean_text(raw, LOR_CHANNEL_FIELDS[field])
+            elif field == "context_initial_lookback_hours":
+                if type(raw) is not int:
+                    raise ValueError("LoR Initial Lookback Hours must be a whole number.")
+                if not 1 <= raw <= 8760:
+                    raise ValueError("LoR Initial Lookback Hours must be between 1 and 8760.")
+                cleaned[field] = raw
+        return cleaned
+
+    def _clean_context_value(self, key: str, value: Any, valid_skills: set[str]) -> list[str]:
+        if key != "inject_skills":
+            raise ValueError(f"Unsupported field: context.{key}")
+        if not isinstance(value, list):
+            raise ValueError("Context Injection Skills must be a list.")
+        cleaned = []
+        seen = set()
+        for item in value:
+            if not isinstance(item, str):
+                raise ValueError("Context Injection Skills must contain skill names.")
+            name = item.strip()
+            if not name:
+                continue
+            if name not in valid_skills:
+                raise ValueError(f"Unknown context injection skill: {name}")
+            if name not in seen:
+                seen.add(name)
+                cleaned.append(name)
+        return cleaned
 
     def _clean_skill_value(self, key: str, value: Any) -> bool:
         if type(value) is not bool:
@@ -455,6 +523,7 @@ class ConfigEditor:
             or changes["heartbeat"]
             or changes["skills"]
             or changes["channels"]
+            or changes["context"]
             or changes["paths"]
         ):
             config_path = persona_dir / "config.yaml"
@@ -474,8 +543,11 @@ class ConfigEditor:
                 updated = _set_nested_field(updated, "heartbeat", key, value)
             for key, value in changes["skills"].items():
                 updated = _set_deep_nested_field(updated, ["skills", key, "enabled"], value)
-            for key, value in changes["channels"].items():
-                updated = _set_deep_nested_field(updated, ["channels", key, "enabled"], value)
+            for key, fields in changes["channels"].items():
+                for field, value in fields.items():
+                    updated = _set_deep_nested_field(updated, ["channels", key, field], value)
+            for key, value in changes["context"].items():
+                updated = _set_nested_field(updated, "context", key, value)
             for key, value in changes["paths"].items():
                 updated = _set_nested_field(updated, "paths", key, value)
             rendered.append({"path": config_path, "original": original, "updated": updated})

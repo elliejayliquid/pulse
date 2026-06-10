@@ -1712,6 +1712,47 @@ textarea {
   background: var(--surface-raised);
 }
 
+.skill-setting-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.skill-setting-grid > label {
+  min-width: 0;
+}
+
+.skill-setting-stack {
+  display: grid;
+  gap: 12px;
+}
+
+.skill-setting-check {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  min-height: 100%;
+  padding: 13px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.skill-setting-check span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.skill-setting-check input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
 .skill-setting-summary {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2932,6 +2973,7 @@ textarea {
   .field-grid.three,
   .skills-grid,
   .runtime-grid,
+  .skill-setting-grid,
   .skill-setting-summary {
     grid-template-columns: 1fr;
   }
