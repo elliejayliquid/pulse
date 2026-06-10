@@ -1785,6 +1785,74 @@ textarea {
   color: var(--text-primary);
 }
 
+.skill-garden-card {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.skill-garden-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.skill-garden-head span {
+  color: var(--text-tertiary);
+  font: 10px/1.2 var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.skill-garden-head strong {
+  color: var(--text-secondary);
+  font: 11px/1.2 var(--body);
+}
+
+.skill-garden-grid {
+  display: grid;
+  gap: 4px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+}
+
+.skill-garden-row {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.skill-garden-plot {
+  display: grid;
+  place-items: center;
+  min-width: 0;
+  aspect-ratio: 1;
+  border: 1px solid rgba(249, 115, 22, 0.14);
+  border-radius: 5px;
+  background: rgba(249, 115, 22, 0.06);
+  color: var(--accent-hover);
+  font: 13px/1 var(--body);
+  transition: border-color 140ms ease, background 140ms ease, transform 140ms ease;
+}
+
+.skill-garden-plot.empty {
+  border-color: rgba(255, 255, 255, 0.05);
+  background: transparent;
+  color: rgba(255, 255, 255, 0.2);
+}
+
+.skill-garden-plot.planted:hover {
+  border-color: var(--accent);
+  background: var(--surface-raised);
+  transform: translateY(-1px);
+}
+
 .log-tail {
   max-height: 320px;
   margin: 0;

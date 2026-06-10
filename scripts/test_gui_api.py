@@ -123,6 +123,63 @@ voice_notes: Warm.
         assert api.get_status("demo")["stale"] is True
 
 
+def test_gui_api_garden_summary_reads_grid_and_memory_tooltips():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        persona_dir = root / "personas" / "demo"
+        data_dir = persona_dir / "data"
+        data_dir.mkdir(parents=True)
+        (root / "config.yaml").write_text("provider:\n  type: local\n", encoding="utf-8")
+        (root / "persona.yaml").write_text("name: Base\n", encoding="utf-8")
+        (persona_dir / "config.yaml").write_text("", encoding="utf-8")
+        (persona_dir / "persona.yaml").write_text("name: Demo\n", encoding="utf-8")
+
+        db_path = data_dir / "demo.db"
+        with closing(sqlite3.connect(db_path)) as conn:
+            conn.execute("CREATE TABLE memories (id INTEGER PRIMARY KEY, text TEXT)")
+            conn.execute(
+                """
+                CREATE TABLE garden_plants (
+                    id INTEGER PRIMARY KEY,
+                    x INTEGER NOT NULL,
+                    y INTEGER NOT NULL,
+                    memory_id INTEGER,
+                    species TEXT,
+                    name TEXT,
+                    growth REAL NOT NULL DEFAULT 0.0,
+                    health REAL NOT NULL DEFAULT 1.0,
+                    bloom_emoji TEXT,
+                    planted_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    last_tended TEXT NOT NULL DEFAULT (datetime('now')),
+                    last_watered TEXT
+                )
+                """
+            )
+            conn.execute("INSERT INTO memories (id, text) VALUES (42, ?)", ("Lena loves tiny practical gardens.",))
+            conn.execute(
+                """
+                INSERT INTO garden_plants
+                    (x, y, memory_id, species, name, growth, health, bloom_emoji, last_watered)
+                VALUES
+                    (2, 3, 42, 'personal', 'Sprouty', 1.2, 1.0, NULL, NULL),
+                    (5, 1, NULL, 'wildflower', NULL, 2.4, 0.2, '🌷', datetime('now'))
+                """
+            )
+            conn.commit()
+
+        api = PulseAPI(root)
+        result = api.get_garden_summary("demo")
+        assert result["ok"] is True
+        assert result["plant_count"] == 2
+        assert result["wilted_count"] == 1
+        assert result["needs_water_count"] == 1
+        sprout = result["grid"][3][2]
+        assert sprout["name"] == "Sprouty"
+        assert sprout["stage"] == "Sprout"
+        assert "Lena loves tiny practical gardens" in sprout["tooltip"]
+        assert result["grid"][0][0]["empty"] is True
+
+
 def test_gui_api_create_persona_from_template_initializes_db():
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -1308,6 +1365,7 @@ channels:
 
 if __name__ == "__main__":
     test_gui_api_read_only_persona_loading()
+    test_gui_api_garden_summary_reads_grid_and_memory_tooltips()
     test_gui_api_create_persona_from_template_initializes_db()
     test_gui_api_import_openrouter_chat_visible_messages_only()
     test_gui_api_standard_provider_env_fallback()

@@ -214,6 +214,12 @@ const fallbackApi = {
   async get_lantern() { return { ok: false, error: "Run through pywebview to read lantern." }; },
   async set_lantern() { return { ok: false, error: "Run through pywebview to update lantern." }; },
   async dim_lantern() { return { ok: false, error: "Run through pywebview to dim lantern." }; },
+  async get_garden_summary() {
+    const grid = Array.from({ length: 8 }, (_, y) => (
+      Array.from({ length: 12 }, (_, x) => ({ x, y, emoji: ".", empty: true, tooltip: `Empty plot (${x}, ${y})` }))
+    ));
+    return { ok: true, width: 12, height: 8, plant_count: 0, wilted_count: 0, needs_water_count: 0, plants: [], grid };
+  },
   async list_memories() { return { ok: false, error: "Run through pywebview to browse memories." }; },
   async get_memory_detail() { return { ok: false, error: "Run through pywebview to inspect memories." }; },
   async add_memory() { return { ok: false, error: "Run through pywebview to add memories." }; },
@@ -792,6 +798,27 @@ function renderSkillDialogBody(skill) {
     `;
   }
 
+  if (skill?.name === "garden") {
+    return `
+      <div class="skill-setting-stack">
+        <label class="check-row skill-setting-check" title="Injects a compact garden status into model context on each turn. Takes effect after restart.">
+          <span>Inject garden into context</span>
+          <input id="skillGardenContextInject" type="checkbox" ${skillContextInjected("garden") ? "checked" : ""}>
+        </label>
+        <div id="skillGardenPreview" class="skill-garden-preview">
+          <div class="skill-empty-settings">
+            <strong>Loading garden</strong>
+            <span>Reading the current garden grid...</span>
+          </div>
+        </div>
+        <div class="skill-empty-settings">
+          <strong>Companion-tended for now</strong>
+          <span>Planting, watering, and pruning are still companion tool actions.</span>
+        </div>
+      </div>
+    `;
+  }
+
   if (skill?.name !== "lor") {
     return `
       <div class="skill-empty-settings">
@@ -847,7 +874,9 @@ function openSkillDialog(skillName) {
       ? "Configure autonomous development checks for this persona."
       : skill.name === "lantern"
         ? "Configure how Lantern participates in this persona's context."
-        : "Configure this skill for this persona. Save from the main footer when you're done.";
+        : skill.name === "garden"
+          ? "Configure garden context and peek at the current grid."
+          : "Configure this skill for this persona. Save from the main footer when you're done.";
   el("skillNotice").textContent = "Changes here are staged until you use the main Save button.";
   el("skillNotice").classList.remove("hidden");
   el("skillBody").innerHTML = renderSkillDialogBody(skill);
@@ -855,6 +884,9 @@ function openSkillDialog(skillName) {
 
   el("skillDialog").classList.remove("hidden");
   document.body.classList.add("modal-open");
+  if (skill.name === "garden") {
+    loadGardenSkillPreview();
+  }
 }
 
 function bindSkillDialogControls(skill) {
@@ -883,6 +915,14 @@ function bindSkillDialogControls(skill) {
   if (skill?.name === "lantern") {
     el("skillLanternContextInject")?.addEventListener("change", (event) => {
       setSkillContextInjected("lantern", event.target.checked);
+      setDirty(hasEditableChanges());
+    });
+    return;
+  }
+
+  if (skill?.name === "garden") {
+    el("skillGardenContextInject")?.addEventListener("change", (event) => {
+      setSkillContextInjected("garden", event.target.checked);
       setDirty(hasEditableChanges());
     });
     return;
@@ -928,6 +968,60 @@ function closeSkillDialog() {
   el("skillDialog").classList.add("hidden");
   document.body.classList.remove("modal-open");
   state.currentSkill = "";
+}
+
+async function loadGardenSkillPreview() {
+  const node = el("skillGardenPreview");
+  if (!node || !state.current || state.current.name === "__base__") return;
+  node.innerHTML = `
+    <div class="skill-empty-settings">
+      <strong>Loading garden</strong>
+      <span>Reading the current garden grid...</span>
+    </div>
+  `;
+  const result = await api().get_garden_summary(state.current.name);
+  if (!node.isConnected || state.currentSkill !== "garden") return;
+  if (!result.ok) {
+    node.innerHTML = `
+      <div class="skill-empty-settings">
+        <strong>Garden unavailable</strong>
+        <span>${escapeHtml(result.error || "Could not read garden.")}</span>
+      </div>
+    `;
+    return;
+  }
+  node.innerHTML = renderGardenSkillPreview(result);
+}
+
+function renderGardenSkillPreview(data) {
+  const rows = data.grid || [];
+  const grid = rows.map((row) => `
+    <div class="skill-garden-row">
+      ${(row || []).map((plot) => `
+        <span class="skill-garden-plot ${plot.empty ? "empty" : "planted"}"
+              title="${escapeHtml(plot.tooltip || "")}"
+              aria-label="${escapeHtml(plot.tooltip || "Garden plot")}">${escapeHtml(plot.emoji || ".")}</span>
+      `).join("")}
+    </div>
+  `).join("");
+  const count = Number(data.plant_count || 0);
+  const needsWater = Number(data.needs_water_count || 0);
+  const wilted = Number(data.wilted_count || 0);
+  const stats = count
+    ? `${count} planted · ${needsWater} can water · ${wilted} wilted`
+    : "No plants yet";
+  return `
+    <div class="skill-garden-card">
+      <div class="skill-garden-head">
+        <span>Garden preview</span>
+        <strong>${escapeHtml(stats)}</strong>
+      </div>
+      <div class="skill-garden-grid" role="img" aria-label="Read-only memory garden grid">
+        ${grid}
+      </div>
+      <p class="field-hint">Hover a plant to see its linked memory preview.</p>
+    </div>
+  `;
 }
 
 function renderChannelsLegacy(channels) {

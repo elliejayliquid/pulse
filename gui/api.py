@@ -38,6 +38,13 @@ STATUS_STALE_AFTER_SECONDS = 120
 LANTERN_STALE_HOURS = 24
 LANTERN_EXPIRED_HOURS = 7 * 24
 LANTERN_FIELDS = ("mode", "mood", "focus", "note", "open_thread")
+GARDEN_WIDTH = 12
+GARDEN_HEIGHT = 8
+GARDEN_EMPTY = "."
+GARDEN_SEEDLING = "🌱"
+GARDEN_SPROUT = "🌿"
+GARDEN_SHIMMER = "✨"
+GARDEN_WILTED = "🥀"
 CORE_ANCHOR_TEMPLATES = {
     "_self": {
         "title": "Who I Am",
@@ -991,6 +998,66 @@ class PulseAPI:
             "changed": True,
             "lantern": self.get_lantern(persona),
             "running": self._persona_is_running(persona),
+        }
+
+    def get_garden_summary(self, persona: str) -> dict:
+        if not persona or persona == "__base__":
+            return {"ok": False, "error": "Choose a persona first."}
+        persona_dir = self.personas_dir / persona
+        if not persona_dir.is_dir():
+            return {"ok": False, "error": f"Persona not found: {persona}"}
+
+        db_path = self._persona_database_path(persona)
+        if not db_path.exists():
+            return self._empty_garden_summary(persona, db_path)
+
+        try:
+            with closing(_connect_sqlite(db_path)) as conn:
+                conn.row_factory = sqlite3.Row
+                if not self._table_columns(conn, "garden_plants"):
+                    return self._empty_garden_summary(persona, db_path)
+                has_memories = bool(self._table_columns(conn, "memories"))
+                rows = conn.execute(
+                    """
+                    SELECT g.*, m.text AS memory_text
+                    FROM garden_plants g
+                    LEFT JOIN memories m ON m.id = g.memory_id
+                    ORDER BY g.y ASC, g.x ASC
+                    """
+                    if has_memories else
+                    "SELECT g.*, NULL AS memory_text FROM garden_plants g ORDER BY g.y ASC, g.x ASC"
+                ).fetchall()
+        except (sqlite3.Error, OSError) as e:
+            return {"ok": False, "error": f"Could not read garden: {e}"}
+
+        plants = [self._format_garden_plant(dict(row)) for row in rows]
+        plant_map = {(plant["x"], plant["y"]): plant for plant in plants}
+        grid = [
+            [
+                plant_map.get((x, y)) or {
+                    "x": x,
+                    "y": y,
+                    "emoji": GARDEN_EMPTY,
+                    "empty": True,
+                    "tooltip": f"Empty plot ({x}, {y})",
+                }
+                for x in range(GARDEN_WIDTH)
+            ]
+            for y in range(GARDEN_HEIGHT)
+        ]
+        wilted = sum(1 for plant in plants if plant["stage"] == "Wilted")
+        needs_water = sum(1 for plant in plants if plant["can_water"])
+        return {
+            "ok": True,
+            "persona": persona,
+            "width": GARDEN_WIDTH,
+            "height": GARDEN_HEIGHT,
+            "plant_count": len(plants),
+            "wilted_count": wilted,
+            "needs_water_count": needs_water,
+            "plants": plants,
+            "grid": grid,
+            "db_path": _safe_rel(db_path, self.root),
         }
 
     def list_memories(self, persona: str, view: str = "active",
@@ -2833,6 +2900,108 @@ class PulseAPI:
             "version_count": hist.get("version_count", 1),
             "has_history": hist.get("version_count", 1) > 1,
         }
+
+    def _empty_garden_summary(self, persona: str, db_path: Path) -> dict:
+        return {
+            "ok": True,
+            "persona": persona,
+            "width": GARDEN_WIDTH,
+            "height": GARDEN_HEIGHT,
+            "plant_count": 0,
+            "wilted_count": 0,
+            "needs_water_count": 0,
+            "plants": [],
+            "grid": [
+                [
+                    {
+                        "x": x,
+                        "y": y,
+                        "emoji": GARDEN_EMPTY,
+                        "empty": True,
+                        "tooltip": f"Empty plot ({x}, {y})",
+                    }
+                    for x in range(GARDEN_WIDTH)
+                ]
+                for y in range(GARDEN_HEIGHT)
+            ],
+            "db_path": _safe_rel(db_path, self.root),
+        }
+
+    def _format_garden_plant(self, row: dict) -> dict:
+        x = int(row.get("x") or 0)
+        y = int(row.get("y") or 0)
+        growth = self._safe_float(row.get("growth"), 0.0)
+        health = self._safe_float(row.get("health"), 1.0)
+        stage = self._garden_stage(growth, health)
+        can_water = self._garden_can_water(row.get("last_watered"))
+        memory_text = row.get("memory_text") or ""
+        name = row.get("name") or ""
+        emoji = self._garden_emoji(stage, row.get("bloom_emoji"))
+        return {
+            "x": x,
+            "y": y,
+            "emoji": emoji,
+            "empty": False,
+            "name": name,
+            "species": row.get("species") or "wildflower",
+            "stage": stage,
+            "growth": growth,
+            "health": health,
+            "memory_id": row.get("memory_id"),
+            "memory_preview": memory_text[:180] + ("..." if len(memory_text) > 180 else ""),
+            "can_water": can_water,
+            "tooltip": self._garden_tooltip(x, y, name, stage, row.get("memory_id"), memory_text, can_water),
+        }
+
+    def _garden_stage(self, growth: float, health: float) -> str:
+        if health < 0.3:
+            return "Wilted"
+        if growth < 1.0:
+            return "Seedling"
+        if growth < 1.7:
+            return "Sprout"
+        if growth < 2.0:
+            return "Shimmering"
+        return "Bloomed"
+
+    def _garden_emoji(self, stage: str, bloom_emoji: Any) -> str:
+        if stage == "Wilted":
+            return GARDEN_WILTED
+        if stage == "Seedling":
+            return GARDEN_SEEDLING
+        if stage == "Sprout":
+            return GARDEN_SPROUT
+        if stage == "Shimmering":
+            return GARDEN_SHIMMER
+        return str(bloom_emoji or GARDEN_SHIMMER)
+
+    def _garden_can_water(self, last_watered: Any) -> bool:
+        if not last_watered:
+            return True
+        try:
+            dt = datetime.fromisoformat(str(last_watered).replace(" ", "T"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return (datetime.now(timezone.utc) - dt).total_seconds() > 8 * 3600
+        except (TypeError, ValueError):
+            return True
+
+    def _garden_tooltip(self, x: int, y: int, name: str, stage: str,
+                        memory_id: Any, memory_text: str, can_water: bool) -> str:
+        title = name or f"Plant at ({x}, {y})"
+        lines = [title, f"Stage: {stage}"]
+        if memory_id:
+            lines.append(f"Memory #{memory_id}")
+        if memory_text:
+            lines.append(memory_text[:300] + ("..." if len(memory_text) > 300 else ""))
+        lines.append("Can water now" if can_water else "Recently watered")
+        return "\n".join(lines)
+
+    def _safe_float(self, value: Any, fallback: float) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return fallback
 
     def _read_core_anchor_row(self, db_path: Path, anchor_id: str) -> dict | None:
         if not db_path.exists():
