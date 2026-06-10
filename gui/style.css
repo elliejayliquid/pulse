@@ -2023,12 +2023,14 @@ textarea {
   letter-spacing: 0.08em;
 }
 
+.lantern-state-pill[data-state="fresh"],
 .lantern-state-pill[data-state="current"] {
   border-color: rgba(34, 197, 94, 0.28);
   background: rgba(34, 197, 94, 0.08);
   color: var(--success);
 }
 
+.lantern-state-pill[data-state="aging"],
 .lantern-state-pill[data-state="stale"],
 .lantern-state-pill[data-state="missing"] {
   border-color: rgba(245, 158, 11, 0.28);

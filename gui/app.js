@@ -2714,10 +2714,10 @@ function renderLanternEditor(data) {
     el("lanternStatePill").textContent = "Not set";
     el("lanternStatePill").dataset.state = "missing";
   } else {
-    const stateLabel = data.state === "expired" ? "Expired" : data.state === "stale" ? "Stale" : "Current";
+    const uiState = lanternUiState(data);
     el("lanternSubtitle").textContent = `${persona} · ${data.age_label || "unknown age"} · updated ${data.updated_at_display || data.updated_at || "unknown"}`;
-    el("lanternStatePill").textContent = stateLabel;
-    el("lanternStatePill").dataset.state = data.state || "current";
+    el("lanternStatePill").textContent = uiState.label;
+    el("lanternStatePill").dataset.state = uiState.state;
   }
 
   const fields = data.fields || {};
@@ -2743,9 +2743,21 @@ function renderLanternEditor(data) {
     setLanternLocalNotice("This lantern is expired. Treat it as historical, not current-state context.");
   } else if (data.stale) {
     setLanternLocalNotice("This lantern is older than 24 hours. Verify before treating it as current.");
+  } else if (lanternUiState(data).state === "aging") {
+    setLanternLocalNotice("This lantern is getting old. Verify before leaning on it.");
   } else {
     setLanternLocalNotice("Edit any current-state field, then save.");
   }
+}
+
+function lanternUiState(data) {
+  if (data?.state === "expired" || data?.expired) return { label: "Expired", state: "expired" };
+  if (data?.state === "stale" || data?.stale) return { label: "Stale", state: "stale" };
+  const age = Number(data?.age_hours);
+  if (!Number.isFinite(age)) return { label: "Current", state: "current" };
+  if (age < 6) return { label: "Fresh", state: "fresh" };
+  if (age >= 18) return { label: "Aging", state: "aging" };
+  return { label: "Current", state: "current" };
 }
 
 function hideLanternDialog() {
