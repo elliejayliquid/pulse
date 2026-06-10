@@ -108,6 +108,18 @@ HEARTBEAT_LIMITS = {
     "quiet_hours_end": (0, 23),
 }
 
+DEV_TICK_FIELDS = {
+    "enabled": "Dev Tick",
+    "interval_minutes": "Dev Tick Interval",
+    "schedule_time": "Dev Tick Schedule Time",
+    "max_rounds": "Dev Tick Max Rounds",
+}
+
+DEV_TICK_LIMITS = {
+    "interval_minutes": (1, 10080),
+    "max_rounds": (1, 32),
+}
+
 CHANNEL_NAMES = {"telegram", "toast", "lor"}
 
 LOR_CHANNEL_FIELDS = {
@@ -207,6 +219,7 @@ class ConfigEditor:
         model = changes.get("model", {}) or {}
         context_budget = changes.get("context_budget", {}) or {}
         heartbeat = changes.get("heartbeat", {}) or {}
+        dev_tick = changes.get("dev_tick", {}) or {}
         skills = changes.get("skills", {}) or {}
         channels = changes.get("channels", {}) or {}
         context = changes.get("context", {}) or {}
@@ -219,6 +232,8 @@ class ConfigEditor:
             raise ValueError("Model changes must be an object.")
         if not isinstance(context_budget, dict):
             raise ValueError("Context budget changes must be an object.")
+        if not isinstance(dev_tick, dict):
+            raise ValueError("Dev tick changes must be an object.")
         if not isinstance(skills, dict):
             raise ValueError("Skills changes must be an object.")
         if not isinstance(channels, dict):
@@ -235,6 +250,7 @@ class ConfigEditor:
         unknown_model = sorted(set(model) - set(MODEL_FIELDS))
         unknown_context_budget = sorted(set(context_budget) - set(CONTEXT_BUDGET_FIELDS))
         unknown_heartbeat = sorted(set(heartbeat) - set(HEARTBEAT_FIELDS))
+        unknown_dev_tick = sorted(set(dev_tick) - set(DEV_TICK_FIELDS))
         unknown_skills = sorted(set(skills) - valid_skills)
         unknown_channels = sorted(set(channels) - CHANNEL_NAMES)
         unknown_context = sorted(set(context) - set(CONTEXT_FIELDS))
@@ -247,6 +263,7 @@ class ConfigEditor:
             or unknown_model
             or unknown_context_budget
             or unknown_heartbeat
+            or unknown_dev_tick
             or unknown_skills
             or unknown_channels
             or unknown_context
@@ -260,6 +277,7 @@ class ConfigEditor:
                 + [f"model.{name}" for name in unknown_model]
                 + [f"context_budget.{name}" for name in unknown_context_budget]
                 + [f"heartbeat.{name}" for name in unknown_heartbeat]
+                + [f"dev_tick.{name}" for name in unknown_dev_tick]
                 + [f"skills.{name}" for name in unknown_skills]
                 + [f"channels.{name}" for name in unknown_channels]
                 + [f"context.{name}" for name in unknown_context]
@@ -299,6 +317,10 @@ class ConfigEditor:
             "heartbeat": {
                 key: self._clean_heartbeat_value(key, value)
                 for key, value in heartbeat.items()
+            },
+            "dev_tick": {
+                key: self._clean_dev_tick_value(key, value)
+                for key, value in dev_tick.items()
             },
             "skills": {
                 key: self._clean_skill_value(key, value)
@@ -433,6 +455,29 @@ class ConfigEditor:
             raise ValueError(f"{label} must be between {low} and {high}.")
         return value
 
+    def _clean_dev_tick_value(self, key: str, value: Any) -> int | bool | str:
+        label = DEV_TICK_FIELDS[key]
+        if key == "enabled":
+            if type(value) is not bool:
+                raise ValueError(f"{label} must be true or false.")
+            return value
+        if key == "schedule_time":
+            cleaned = self._clean_text(value, label).strip()
+            if not cleaned:
+                return ""
+            if not re.match(r"^\d{2}:\d{2}$", cleaned):
+                raise ValueError(f"{label} must be empty or use HH:MM.")
+            hour, minute = (int(part) for part in cleaned.split(":"))
+            if not (0 <= hour <= 23 and 0 <= minute <= 59):
+                raise ValueError(f"{label} must be a valid 24-hour time.")
+            return cleaned
+        if type(value) is not int:
+            raise ValueError(f"{label} must be a whole number.")
+        low, high = DEV_TICK_LIMITS[key]
+        if not low <= value <= high:
+            raise ValueError(f"{label} must be between {low} and {high}.")
+        return value
+
     def _clean_channel_value(self, key: str, value: Any) -> dict[str, Any]:
         if type(value) is bool:
             return {"enabled": value}
@@ -521,6 +566,7 @@ class ConfigEditor:
             or changes["model"]
             or changes["context_budget"]
             or changes["heartbeat"]
+            or changes["dev_tick"]
             or changes["skills"]
             or changes["channels"]
             or changes["context"]
@@ -541,6 +587,8 @@ class ConfigEditor:
                 updated = _set_nested_field(updated, "context_budget", key, value)
             for key, value in changes["heartbeat"].items():
                 updated = _set_nested_field(updated, "heartbeat", key, value)
+            for key, value in changes["dev_tick"].items():
+                updated = _set_nested_field(updated, "dev_tick", key, value)
             for key, value in changes["skills"].items():
                 updated = _set_deep_nested_field(updated, ["skills", key, "enabled"], value)
             for key, fields in changes["channels"].items():

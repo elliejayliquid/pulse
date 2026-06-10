@@ -97,6 +97,12 @@ heartbeat:
   quiet_hours_end: 8
   debug: true
 
+dev_tick:
+  enabled: false
+  interval_minutes: 720
+  schedule_time: ""
+  max_rounds: 16
+
 channels:
   lor:
     enabled: true
@@ -175,6 +181,12 @@ context:
                 "quiet_hours_start": 22,
                 "quiet_hours_end": 7,
                 "debug": False,
+            },
+            "dev_tick": {
+                "enabled": True,
+                "interval_minutes": 360,
+                "schedule_time": "20:30",
+                "max_rounds": 12,
             },
             "channels": {
                 "telegram": False,
@@ -256,6 +268,7 @@ context:
         assert "quiet_hours_start: 22" in config_text
         assert "quiet_hours_end: 7" in config_text
         assert "debug: false" in config_text
+        assert "dev_tick:\n  enabled: true\n  interval_minutes: 360\n  schedule_time: \"20:30\"\n  max_rounds: 12" in config_text
         assert 'interval_minutes: "45"' not in config_text
         assert "telegram:\n    enabled: false" in config_text
         assert "toast:\n    app_name: \"Demo\"\n    enabled: false" in config_text
@@ -296,6 +309,41 @@ def test_config_editor_rejects_unknown_fields():
         })
         assert result["ok"] is False
         assert "true or false" in result["error"]
+
+        result = api.preview_persona_save("demo", {
+            "dev_tick": {"enabled": "true"},
+        })
+        assert result["ok"] is False
+        assert "true or false" in result["error"]
+
+        result = api.preview_persona_save("demo", {
+            "dev_tick": {"interval_minutes": 0},
+        })
+        assert result["ok"] is False
+        assert "between 1 and 10080" in result["error"]
+
+        result = api.preview_persona_save("demo", {
+            "dev_tick": {"schedule_time": "25:00"},
+        })
+        assert result["ok"] is False
+        assert "valid 24-hour time" in result["error"]
+
+        result = api.preview_persona_save("demo", {
+            "dev_tick": {"schedule_time": "8pm"},
+        })
+        assert result["ok"] is False
+        assert "HH:MM" in result["error"]
+
+        result = api.preview_persona_save("demo", {
+            "dev_tick": {"schedule_time": ""},
+        })
+        assert result["ok"] is True
+
+        result = api.preview_persona_save("demo", {
+            "dev_tick": {"max_rounds": 33},
+        })
+        assert result["ok"] is False
+        assert "between 1 and 32" in result["error"]
 
         result = api.preview_persona_save("demo", {
             "channels": {"email": True},

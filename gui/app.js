@@ -151,6 +151,12 @@ const fallbackApi = {
           lor: { author_name: "Kai", model_name: "Grok 4.2", context_initial_lookback_hours: 72 },
         },
         context: { inject_skills: ["lantern"] },
+        dev_tick: {
+          enabled: false,
+          interval_minutes: 720,
+          schedule_time: "",
+          max_rounds: 16,
+        },
       },
       status: {
         running: false,
@@ -730,7 +736,47 @@ function setSkillContextInjected(skillName, enabled) {
   state.current.config.context.inject_skills = current;
 }
 
+function devTickConfig() {
+  state.current.config = state.current.config || {};
+  state.current.config.dev_tick = state.current.config.dev_tick || {};
+  return state.current.config.dev_tick;
+}
+
+function devTickValue(key, fallback = "") {
+  const devTick = state.current?.config?.dev_tick || {};
+  return devTick[key] ?? fallback;
+}
+
+function setDevTickField(key, value) {
+  devTickConfig()[key] = value;
+}
+
 function renderSkillDialogBody(skill) {
+  if (skill?.name === "dev") {
+    return `
+      <div class="skill-setting-stack">
+        <label class="check-row skill-setting-check" title="Let this companion periodically inspect Pulse code and suggest improvements. Changes still require human review.">
+          <span>Autonomous dev tick</span>
+          <input id="skillDevTickEnabled" type="checkbox" ${devTickValue("enabled", false) ? "checked" : ""}>
+        </label>
+        <p class="field-hint">Runs only when the persona is restarted with Dev Tick enabled.</p>
+      </div>
+      <div class="skill-setting-grid">
+        <label class="sample-path-label" title="Minutes between autonomous dev checks when no daily schedule time is set.">Interval Minutes
+          <input id="skillDevTickInterval" type="number" min="1" max="10080" step="1" value="${escapeHtml(String(devTickValue("interval_minutes", 720)))}">
+        </label>
+        <label class="sample-path-label" title="Optional local 24-hour time for one daily dev check. Leave blank to use the interval.">Daily Schedule Time
+          <input id="skillDevTickSchedule" type="time" value="${escapeHtml(text(devTickValue("schedule_time", "")))}">
+        </label>
+      </div>
+      <div class="skill-setting-stack">
+        <label class="sample-path-label" title="Maximum tool-calling rounds for one autonomous dev session.">Max Rounds
+          <input id="skillDevTickMaxRounds" type="number" min="1" max="32" step="1" value="${escapeHtml(String(devTickValue("max_rounds", 16)))}">
+        </label>
+      </div>
+    `;
+  }
+
   if (skill?.name !== "lor") {
     return `
       <div class="skill-empty-settings">
@@ -782,7 +828,9 @@ function openSkillDialog(skillName) {
   el("skillTitle").textContent = skillLabel(skill);
   el("skillSubtitle").textContent = skill.name === "lor"
     ? "Configure this persona's forum identity and inbox behavior."
-    : "Configure this skill for this persona. Save from the main footer when you're done.";
+    : skill.name === "dev"
+      ? "Configure autonomous development checks for this persona."
+      : "Configure this skill for this persona. Save from the main footer when you're done.";
   el("skillNotice").textContent = "Changes here are staged until you use the main Save button.";
   el("skillNotice").classList.remove("hidden");
   el("skillBody").innerHTML = renderSkillDialogBody(skill);
@@ -793,6 +841,28 @@ function openSkillDialog(skillName) {
 }
 
 function bindSkillDialogControls(skill) {
+  if (skill?.name === "dev") {
+    el("skillDevTickEnabled")?.addEventListener("change", (event) => {
+      setDevTickField("enabled", event.target.checked);
+      setDirty(hasEditableChanges());
+    });
+    el("skillDevTickInterval")?.addEventListener("input", (event) => {
+      const raw = event.target.value;
+      setDevTickField("interval_minutes", raw === "" ? "" : Number(raw));
+      setDirty(hasEditableChanges());
+    });
+    el("skillDevTickSchedule")?.addEventListener("input", (event) => {
+      setDevTickField("schedule_time", event.target.value);
+      setDirty(hasEditableChanges());
+    });
+    el("skillDevTickMaxRounds")?.addEventListener("input", (event) => {
+      const raw = event.target.value;
+      setDevTickField("max_rounds", raw === "" ? "" : Number(raw));
+      setDirty(hasEditableChanges());
+    });
+    return;
+  }
+
   if (skill?.name !== "lor") return;
   const pathInput = el("skillLorDataPath");
   pathInput?.addEventListener("input", () => {
@@ -1572,6 +1642,12 @@ function editableSnapshot() {
     context: {
       inject_skills: contextInjectSkills(),
     },
+    dev_tick: {
+      enabled: Boolean(devTickValue("enabled", false)),
+      interval_minutes: devTickValue("interval_minutes", 720),
+      schedule_time: text(devTickValue("schedule_time", "")),
+      max_rounds: devTickValue("max_rounds", 16),
+    },
     heartbeat: {
       interval_minutes: el("hbInterval").value,
       interval_min_minutes: el("hbMin").value,
@@ -1655,8 +1731,8 @@ function numberOrEmpty(value) {
 
 function collectEditableChanges() {
   const current = editableSnapshot();
-  const original = state.originalEditable || { identity: {}, provider: {}, server: {}, model: {}, context_budget: {}, tts: {}, skills: {}, channels: {}, paths: {}, context: {}, heartbeat: {} };
-  const changes = { identity: {}, provider: {}, server: {}, model: {}, context_budget: {}, tts: {}, skills: {}, channels: {}, paths: {}, context: {}, heartbeat: {} };
+  const original = state.originalEditable || { identity: {}, provider: {}, server: {}, model: {}, context_budget: {}, tts: {}, skills: {}, channels: {}, paths: {}, context: {}, dev_tick: {}, heartbeat: {} };
+  const changes = { identity: {}, provider: {}, server: {}, model: {}, context_budget: {}, tts: {}, skills: {}, channels: {}, paths: {}, context: {}, dev_tick: {}, heartbeat: {} };
 
   for (const [key, value] of Object.entries(current.identity)) {
     if (key === "traits") {
@@ -1744,6 +1820,12 @@ function collectEditableChanges() {
     }
   }
 
+  for (const [key, value] of Object.entries(current.dev_tick)) {
+    if (value !== original.dev_tick?.[key]) {
+      changes.dev_tick[key] = key === "enabled" ? value : key === "schedule_time" ? value : numberOrEmpty(value);
+    }
+  }
+
   for (const [key, value] of Object.entries(current.heartbeat)) {
     if (value !== original.heartbeat?.[key]) {
       changes.heartbeat[key] = ["randomize", "debug"].includes(key) ? value : parseHeartbeatNumber(value);
@@ -1765,6 +1847,7 @@ function hasEditableChanges() {
     || Object.keys(changes.channels).length > 0
     || Object.keys(changes.paths).length > 0
     || Object.keys(changes.context).length > 0
+    || Object.keys(changes.dev_tick).length > 0
     || Object.keys(changes.heartbeat).length > 0;
 }
 
