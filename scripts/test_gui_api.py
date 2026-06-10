@@ -259,6 +259,16 @@ def test_gui_api_skill_status_summaries_are_read_only():
         with closing(sqlite3.connect(stickers_dir / "stickers.db")) as conn:
             conn.execute(
                 """
+                CREATE TABLE packs (
+                    id INTEGER PRIMARY KEY,
+                    name TEXT UNIQUE NOT NULL,
+                    title TEXT,
+                    added_at TEXT
+                )
+                """
+            )
+            conn.execute(
+                """
                 CREATE TABLE stickers (
                     id INTEGER PRIMARY KEY,
                     pack_id TEXT,
@@ -270,9 +280,10 @@ def test_gui_api_skill_status_summaries_are_read_only():
                 )
                 """
             )
+            conn.execute("INSERT INTO packs (id, name, title) VALUES (1, 'cherry', 'Cherry Pack')")
             conn.execute(
                 "INSERT INTO stickers (pack_id, file_id, keywords, description, embedding) VALUES (?, ?, ?, ?, ?)",
-                ("cherry", "file-id", "hug,warm", "Warm hug", b"1234"),
+                (1, "file-id", "hug,warm", "Warm hug", b"1234"),
             )
             conn.commit()
 
@@ -286,7 +297,7 @@ def test_gui_api_skill_status_summaries_are_read_only():
         assert stickers["ready"] is True
         assert stickers["count"] == 1
         assert stickers["with_embeddings"] == 1
-        assert stickers["packs"] == ["cherry"]
+        assert stickers["packs"] == ["Cherry Pack"]
 
         tasks = api.get_tasks_summary("demo")
         assert tasks["ok"] is True

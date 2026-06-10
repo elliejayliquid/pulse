@@ -1759,6 +1759,10 @@ textarea {
   gap: 10px;
 }
 
+.skill-setting-summary.single {
+  grid-template-columns: 1fr;
+}
+
 .skill-setting-summary div,
 .skill-empty-settings {
   padding: 12px;

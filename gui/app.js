@@ -782,6 +782,24 @@ function ttsSkillMode() {
   return "Not configured";
 }
 
+function ttsSkillModel() {
+  const engine = state.current?.summary?.tts_engine || {};
+  const mode = ttsSkillMode();
+  if (mode === "Clone mode") return engine.clone_model || "Qwen3-TTS clone model";
+  if (mode === "Design mode") return engine.design_model || "Qwen3-TTS VoiceDesign";
+  return engine.design_model || "Qwen3-TTS VoiceDesign";
+}
+
+function ttsSkillBackend() {
+  const engine = state.current?.summary?.tts_engine || {};
+  return engine.engine || "Qwen3-TTS";
+}
+
+function ttsSkillBackendNote() {
+  const engine = state.current?.summary?.tts_engine || {};
+  return engine.backend_note || "Uses faster-qwen3-tts when installed; otherwise falls back to upstream qwen_tts.";
+}
+
 function ttsSkillDescription() {
   const mode = ttsSkillMode();
   if (mode === "Clone mode") return "Reference audio and transcript are set.";
@@ -888,9 +906,13 @@ function renderSkillDialogBody(skill) {
           <div><span>Mode</span><strong>${escapeHtml(ttsSkillMode())}</strong></div>
           <div><span>Tool</span><strong>speak</strong></div>
         </div>
+        <div class="skill-setting-summary">
+          <div><span>Active model</span><strong>${escapeHtml(ttsSkillModel())}</strong></div>
+          <div><span>Backend</span><strong>${escapeHtml(ttsSkillBackend())}</strong></div>
+        </div>
         <div class="skill-empty-settings">
           <strong>${escapeHtml(ttsSkillDescription())}</strong>
-          <span>Voice setup stays in the TTS Voice section so the big text fields only live in one place.</span>
+          <span>${escapeHtml(ttsSkillBackendNote())} Model choice is fixed for now; future versions may expose more TTS backends here.</span>
         </div>
         <button id="skillOpenTtsSection" class="subtle-wide-btn" type="button">Open TTS Voice Section</button>
       </div>
@@ -1304,9 +1326,8 @@ function renderStickerSkillSummary(data) {
         <div><span>Stickers</span><strong>${escapeHtml(String(data.count || 0))}</strong></div>
         <div><span>Embeddings</span><strong>${escapeHtml(String(data.with_embeddings || 0))}</strong></div>
       </div>
-      <div class="skill-empty-settings">
-        <strong>${escapeHtml(packText)}</strong>
-        <span>Available packs</span>
+      <div class="skill-setting-summary single">
+        <div><span>Available packs</span><strong>${escapeHtml(packText)}</strong></div>
       </div>
     </div>
   `;

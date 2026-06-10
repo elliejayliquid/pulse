@@ -1160,9 +1160,24 @@ class PulseAPI:
                     if "embedding" in columns else 0
                 )
                 packs = []
-                if "pack_id" in columns:
+                pack_columns = self._table_columns(conn, "packs")
+                if "pack_id" in columns and pack_columns:
+                    label_expr = "COALESCE(p.title, p.name)"
                     packs = [
                         row[0] for row in conn.execute(
+                            f"""
+                            SELECT DISTINCT {label_expr} AS label
+                            FROM stickers s
+                            JOIN packs p ON p.id = s.pack_id
+                            WHERE s.pack_id IS NOT NULL
+                            ORDER BY label
+                            LIMIT 8
+                            """
+                        ).fetchall()
+                    ]
+                elif "pack_id" in columns:
+                    packs = [
+                        str(row[0]) for row in conn.execute(
                             "SELECT DISTINCT pack_id FROM stickers WHERE pack_id IS NOT NULL ORDER BY pack_id LIMIT 8"
                         ).fetchall()
                     ]
@@ -3388,6 +3403,7 @@ class PulseAPI:
         model_display = identity_model or provider_model or Path(model_file).name or "not configured"
         provider_max_context = provider.get("max_context", "")
         local_max_context = model_cfg.get("max_context", "")
+        tts_engine = self._tts_engine_summary()
         return {
             "display_name": identity.get("name") or ("Base Config" if name == "__base__" else name.title()),
             "user_name": identity.get("user_name", ""),
@@ -3422,6 +3438,15 @@ class PulseAPI:
             "context_budget": config.get("context_budget", {}),
             "heartbeat": config.get("heartbeat", {}),
             "tts": config.get("tts", {}),
+            "tts_engine": tts_engine,
+        }
+
+    def _tts_engine_summary(self) -> dict:
+        return {
+            "engine": "Qwen3-TTS",
+            "design_model": "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+            "clone_model": "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+            "backend_note": "Uses faster-qwen3-tts when installed; otherwise falls back to upstream qwen_tts.",
         }
 
     def _list_skills(self, config: dict) -> list[dict]:
