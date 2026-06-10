@@ -55,6 +55,10 @@ const state = {
   journalDetailId: "",
   journalBaseline: {},
   journalUndoStamp: "",
+  taskBaselines: {},
+  taskDrafts: [],
+  taskOriginals: [],
+  taskUndoStamp: "",
   currentSkill: "",
 };
 
@@ -235,6 +239,11 @@ const fallbackApi = {
   },
   async get_sticker_summary() { return { ok: true, ready: false, count: 0, with_embeddings: 0, packs: [] }; },
   async get_tasks_summary() { return { ok: true, pending: 0, completed: 0, recent: [] }; },
+  async list_tasks() { return { ok: true, tasks: [] }; },
+  async add_task() { return { ok: false, error: "Run through pywebview to add tasks." }; },
+  async update_task() { return { ok: false, error: "Run through pywebview to edit tasks." }; },
+  async delete_task() { return { ok: false, error: "Run through pywebview to delete tasks." }; },
+  async save_tasks() { return { ok: false, error: "Run through pywebview to save tasks." }; },
   async list_memories() { return { ok: false, error: "Run through pywebview to browse memories." }; },
   async get_memory_detail() { return { ok: false, error: "Run through pywebview to inspect memories." }; },
   async add_memory() { return { ok: false, error: "Run through pywebview to add memories." }; },
@@ -969,9 +978,11 @@ function renderSkillDialogBody(skill) {
             <span>Reading the current task list...</span>
           </div>
         </div>
-        <div class="skill-empty-settings">
-          <strong>Companion-managed for now</strong>
-          <span>Adding, completing, and deleting tasks still happens through companion tools.</span>
+        <div id="skillTasksEditor" class="skill-tool-panel">
+          <div class="skill-empty-settings">
+            <strong>Loading task editor</strong>
+            <span>Preparing editable checklist...</span>
+          </div>
         </div>
       </div>
     `;
@@ -1025,6 +1036,7 @@ function openSkillDialog(skillName) {
   const skill = currentSkill(skillName);
   if (!skill) return;
   state.currentSkill = skillName;
+  resetSkillDialogActions();
   el("skillTitle").textContent = skillLabel(skill);
   el("skillSubtitle").textContent = skill.name === "lor"
     ? "Configure this persona's forum identity and inbox behavior."
@@ -1047,7 +1059,7 @@ function openSkillDialog(skillName) {
                     : skill.name === "sticker"
                       ? "Check sticker pack readiness for this persona."
                       : skill.name === "tasks"
-                        ? "Peek at companion-managed tasks."
+                        ? "Manage DB-backed checklist tasks."
                         : "Configure this skill for this persona. Save from the main footer when you're done.";
   el("skillNotice").textContent = skill.name === "paint"
     ? "Gallery is read-only here; painting still happens through companion tools."
@@ -1062,7 +1074,7 @@ function openSkillDialog(skillName) {
             : skill.name === "sticker"
               ? "Sticker selection still happens through companion tools."
               : skill.name === "tasks"
-                ? "Task editing still happens through companion tools."
+                ? "Task changes are staged here until you press Save."
     : "Changes here are staged until you use the main Save button.";
   el("skillNotice").classList.remove("hidden");
   el("skillBody").innerHTML = renderSkillDialogBody(skill);
@@ -1079,7 +1091,10 @@ function openSkillDialog(skillName) {
   } else if (skill.name === "sticker") {
     loadStickerSkillSummary();
   } else if (skill.name === "tasks") {
+    state.taskUndoStamp = "";
     loadTasksSkillSummary();
+    loadTasksSkillEditor();
+    syncTaskSaveButton();
   }
 }
 
@@ -1180,6 +1195,38 @@ function closeSkillDialog() {
   el("skillDialog").classList.add("hidden");
   document.body.classList.remove("modal-open");
   state.currentSkill = "";
+  resetSkillDialogActions();
+}
+
+function resetSkillDialogActions() {
+  const done = el("skillDoneBtn");
+  if (done) {
+    done.textContent = "Done";
+    done.disabled = false;
+  }
+  const close = el("skillCloseBtn");
+  if (close) close.textContent = "Close";
+}
+
+async function handleSkillDone() {
+  if (state.currentSkill === "tasks") {
+    await saveTaskDrafts();
+    return;
+  }
+  closeSkillDialog();
+}
+
+async function handleSkillClose() {
+  if (state.currentSkill === "tasks" && taskDraftDirty()) {
+    const ok = await showConfirm(
+      "Discard task changes?",
+      "Task changes are staged in this window. Closing now will discard unsaved edits.",
+      "Discard",
+      "secondary"
+    );
+    if (!ok) return;
+  }
+  closeSkillDialog();
 }
 
 function openTtsVoiceSection() {
@@ -1387,23 +1434,32 @@ async function loadTasksSkillSummary() {
   const node = el("skillTasksSummary");
   if (!node || !state.current || state.current.name === "__base__") return;
   node.innerHTML = loadingSkillPanel("Loading tasks", "Reading the current task list...");
-  const result = await api().get_tasks_summary(state.current.name);
+  const result = await api().list_tasks(state.current.name, true);
   if (!node.isConnected || state.currentSkill !== "tasks") return;
   if (!result.ok) {
     node.innerHTML = loadingSkillPanel("Task summary unavailable", result.error || "Could not read tasks.");
     return;
   }
-  node.innerHTML = renderTasksSkillSummary(result);
+  const tasks = result.tasks || [];
+  state.taskOriginals = tasks.map(normalizeTaskDraft);
+  state.taskDrafts = tasks.map(normalizeTaskDraft);
+  renderTaskDraftPanels();
+  syncTaskSaveButton();
 }
 
 function renderTasksSkillSummary(data) {
   const recent = data.recent || [];
   const rows = recent.length ? recent.map((task) => `
-    <div class="skill-tool-row">
+    <div class="skill-tool-row task-summary-row">
+      <label class="task-quick-check" title="Mark complete">
+        <input type="checkbox" data-task-quick-toggle="${escapeHtml(taskDraftKey(task))}" data-completed="${task.completed ? "1" : "0"}">
+        <span aria-hidden="true"></span>
+      </label>
       <div>
-        <strong>#${escapeHtml(String(task.id))} · ${escapeHtml(task.list || "Daily")}</strong>
+        <strong>${escapeHtml(task.list || "Daily")}</strong>
         <span>${escapeHtml(task.short_description || task.description || "")}</span>
       </div>
+      <button class="task-delete-mini" type="button" data-task-quick-delete="${escapeHtml(taskDraftKey(task))}" title="Delete task">×</button>
     </div>
   `).join("") : `
     <div class="skill-empty-settings">
@@ -1421,9 +1477,223 @@ function renderTasksSkillSummary(data) {
         <div><span>Pending</span><strong>${escapeHtml(String(data.pending || 0))}</strong></div>
         <div><span>Completed</span><strong>${escapeHtml(String(data.completed || 0))}</strong></div>
       </div>
-      <div class="skill-tool-list">${rows}</div>
+      <div class="skill-tool-list task-list-scroll">${rows}</div>
     </div>
   `;
+}
+
+function renderTaskDraftPanels() {
+  const node = el("skillTasksSummary");
+  if (!node) return;
+  const pendingTasks = state.taskDrafts.filter((task) => !task.completed && !task.deleted);
+  const completedCount = state.taskDrafts.filter((task) => task.completed && !task.deleted).length;
+  node.innerHTML = renderTasksSkillSummary({
+    pending: pendingTasks.length,
+    completed: completedCount,
+    recent: pendingTasks,
+  });
+  wireTasksSkillSummaryControls(node);
+  syncTaskSaveButton();
+}
+
+function normalizeTaskDraft(task) {
+  return {
+    id: task.id ?? null,
+    temp_id: task.temp_id || "",
+    description: task.description || "",
+    short_description: task.short_description || task.description || "",
+    list: task.list || "Daily",
+    completed: Boolean(task.completed),
+    deleted: Boolean(task.deleted),
+  };
+}
+
+function taskDraftKey(task) {
+  return task.id !== null && task.id !== undefined && task.id !== ""
+    ? `id:${task.id}`
+    : `tmp:${task.temp_id || ""}`;
+}
+
+function findTaskDraft(key) {
+  return state.taskDrafts.find((task) => taskDraftKey(task) === key);
+}
+
+function taskDraftPayload(tasks) {
+  return tasks
+    .filter((task) => !task.deleted)
+    .map((task) => {
+      const payload = {
+        description: task.description || "",
+        list: task.list || "Daily",
+        completed: Boolean(task.completed),
+      };
+      if (task.id !== null && task.id !== undefined && task.id !== "") {
+        payload.id = Number(task.id);
+      }
+      return payload;
+    });
+}
+
+function taskDraftDirty() {
+  return JSON.stringify(taskDraftPayload(state.taskDrafts)) !== JSON.stringify(taskDraftPayload(state.taskOriginals));
+}
+
+function syncTaskSaveButton() {
+  const save = el("skillDoneBtn");
+  if (!save || state.currentSkill !== "tasks") return;
+  save.textContent = "Save";
+  save.disabled = !taskDraftDirty();
+}
+
+async function loadTasksSkillEditor() {
+  const node = el("skillTasksEditor");
+  if (!node || !state.current || state.current.name === "__base__") return;
+  node.innerHTML = renderTasksSkillEditor();
+  wireTasksSkillEditor(node);
+}
+
+function renderTasksSkillEditor() {
+  return `
+    <div class="skill-tool-card task-editor-card">
+      <div class="skill-garden-head">
+        <span>Add task</span>
+        <strong>Staged until Save</strong>
+      </div>
+      <div id="skillTaskNotice" class="notice-pill task-local-notice hidden"></div>
+      <div class="task-add-row">
+        <label class="task-editor-field wide" title="Add a new checklist item for this persona.">
+          <span>New Task</span>
+          <input id="taskNewDescription" type="text" placeholder="What should this persona track?">
+        </label>
+        <label class="task-editor-field" title="Optional list name. Daily is the default.">
+          <span>List Name</span>
+          <input id="taskNewList" type="text" value="Daily">
+        </label>
+        <button id="taskAddBtn" class="subtle-wide-btn task-add-btn" type="button">Add</button>
+      </div>
+      <p class="task-editor-hint">List name is a free-text category, not a dropdown. Use names like Daily, Pulse, Home, or leave Daily.</p>
+    </div>`;
+}
+
+function wireTasksSkillEditor(root) {
+  root.querySelector("#taskAddBtn")?.addEventListener("click", () => { void addTaskFromSkillEditor(); });
+  ["taskNewDescription", "taskNewList"].forEach((id) => {
+    root.querySelector(`#${id}`)?.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" || event.shiftKey || event.ctrlKey || event.metaKey || event.altKey) return;
+      event.preventDefault();
+      void addTaskFromSkillEditor();
+    });
+  });
+}
+
+function wireTasksSkillSummaryControls(root) {
+  root.querySelectorAll("[data-task-quick-toggle]").forEach((button) => {
+    button.addEventListener("click", () => {
+      void toggleTaskFromSkillEditor(button.dataset.taskQuickToggle, button.dataset.completed === "1");
+    });
+  });
+  root.querySelectorAll("[data-task-quick-delete]").forEach((button) => {
+    button.addEventListener("click", () => { void deleteTaskFromSkillEditor(button.dataset.taskQuickDelete); });
+  });
+}
+
+async function addTaskFromSkillEditor() {
+  if (!state.current) return;
+  const description = el("taskNewDescription")?.value || "";
+  const listName = el("taskNewList")?.value || "Daily";
+  if (!text(description).trim()) {
+    setTaskSkillNotice("Task description is required.");
+    return;
+  }
+  state.taskDrafts.push(normalizeTaskDraft({
+    temp_id: `new-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    description,
+    short_description: description,
+    list: text(listName).trim() || "Daily",
+    completed: false,
+  }));
+  if (el("taskNewDescription")) el("taskNewDescription").value = "";
+  if (el("taskNewList")) el("taskNewList").value = "Daily";
+  renderTaskDraftPanels();
+  setTaskSkillNotice("Task staged. Press Save to write it to the database.");
+}
+
+async function toggleTaskFromSkillEditor(taskKey, completed) {
+  if (!state.current || !taskKey) return;
+  const task = findTaskDraft(taskKey);
+  if (!task) return;
+  task.completed = !completed;
+  renderTaskDraftPanels();
+  setTaskSkillNotice(`Task ${completed ? "reopened" : "completed"} in draft. Press Save to confirm.`);
+}
+
+async function deleteTaskFromSkillEditor(taskKey) {
+  if (!state.current || !taskKey) return;
+  const ok = await showConfirm(
+    "Delete this task?",
+    "This removes the task from the draft. It will not touch the database until you press Save.",
+    "Delete",
+    "danger"
+  );
+  if (!ok) return;
+  const task = findTaskDraft(taskKey);
+  if (!task) return;
+  task.deleted = true;
+  renderTaskDraftPanels();
+  setTaskSkillNotice("Task removed from draft. Press Save to confirm.");
+}
+
+async function saveTaskDrafts() {
+  if (!state.current || state.current.name === "__base__") return false;
+  if (!taskDraftDirty()) {
+    setTaskSkillNotice("No task changes to save.");
+    return false;
+  }
+  const result = await api().save_tasks(state.current.name, taskDraftPayload(state.taskDrafts));
+  if (!result.ok) {
+    setTaskSkillNotice(result.error || "Could not save tasks.", state.taskUndoStamp);
+    return false;
+  }
+  state.taskUndoStamp = result.undo_stamp || "";
+  state.taskOriginals = (result.tasks || []).map(normalizeTaskDraft);
+  state.taskDrafts = (result.tasks || []).map(normalizeTaskDraft);
+  renderTaskDraftPanels();
+  setTaskSkillNotice(
+    result.running
+      ? "Tasks saved. Running persona can see them next time it lists tasks."
+      : "Tasks saved.",
+    state.taskUndoStamp
+  );
+  return true;
+}
+
+async function undoTaskDbEdit() {
+  if (!state.current || !state.taskUndoStamp) return;
+  const stamp = state.taskUndoStamp;
+  const result = await api().restore_db_before_image(state.current.name, stamp);
+  if (!result.ok) {
+    setTaskSkillNotice(result.error || "Could not undo task edit.", stamp);
+    return;
+  }
+  state.taskUndoStamp = "";
+  await refreshTaskSkillPanels();
+  setTaskSkillNotice("Task edit undone.");
+}
+
+async function refreshTaskSkillPanels() {
+  await loadTasksSkillSummary();
+  await loadTasksSkillEditor();
+}
+
+function setTaskSkillNotice(message, undoStamp = "") {
+  const notice = el("skillTaskNotice");
+  if (!notice) return;
+  notice.innerHTML = `
+    <span>${escapeHtml(message || "")}</span>
+    ${undoStamp ? `<button class="notice-undo-btn" type="button">Undo</button>` : ""}`;
+  notice.classList.toggle("hidden", !message);
+  const button = notice.querySelector(".notice-undo-btn");
+  if (button) button.addEventListener("click", () => { void undoTaskDbEdit(); });
 }
 
 function loadingSkillPanel(title, message) {
@@ -2992,13 +3262,13 @@ function wireEvents() {
     if (coreBackdropPointerDown && event.target === el("coreDialog")) closeCoreDialog();
     coreBackdropPointerDown = false;
   });
-  el("skillDoneBtn").addEventListener("click", closeSkillDialog);
-  el("skillCloseBtn").addEventListener("click", closeSkillDialog);
+  el("skillDoneBtn").addEventListener("click", () => { void handleSkillDone(); });
+  el("skillCloseBtn").addEventListener("click", () => { void handleSkillClose(); });
   el("skillDialog").addEventListener("pointerdown", (event) => {
     skillBackdropPointerDown = event.target === el("skillDialog");
   });
   el("skillDialog").addEventListener("click", (event) => {
-    if (skillBackdropPointerDown && event.target === el("skillDialog")) closeSkillDialog();
+    if (skillBackdropPointerDown && event.target === el("skillDialog")) void handleSkillClose();
     skillBackdropPointerDown = false;
   });
   document.querySelectorAll(".section-header").forEach((header) => {

@@ -1959,6 +1959,12 @@ textarea {
   gap: 8px;
 }
 
+.skill-tool-list.task-list-scroll {
+  max-height: 292px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
 .skill-tool-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -2021,6 +2027,140 @@ textarea {
   border-color: rgba(245, 158, 11, 0.34);
   background: rgba(245, 158, 11, 0.1);
   color: #fbbf24;
+}
+
+.task-summary-row {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 10px;
+  padding: 8px 10px;
+  min-height: 54px;
+}
+
+.task-quick-check {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  cursor: pointer;
+}
+
+.task-quick-check input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.task-quick-check span {
+  width: 15px;
+  height: 15px;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  background: var(--surface);
+  transition: border-color 140ms ease, background 140ms ease, box-shadow 140ms ease;
+}
+
+.task-quick-check:hover span {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(249, 115, 22, 0.12);
+}
+
+.task-delete-mini {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-tertiary);
+  font: 700 18px/1 var(--body);
+  cursor: pointer;
+  transition: border-color 140ms ease, background 140ms ease, color 140ms ease;
+}
+
+.task-summary-row strong {
+  font-size: 12px;
+}
+
+.task-summary-row span {
+  font-size: 11px;
+}
+
+.task-delete-mini:hover {
+  border-color: rgba(239, 68, 68, 0.34);
+  background: rgba(239, 68, 68, 0.08);
+  color: var(--danger);
+}
+
+.task-editor-card {
+  gap: 12px;
+}
+
+.task-local-notice {
+  margin: 0;
+}
+
+.task-add-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(96px, 0.35fr);
+  gap: 10px;
+  align-items: end;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+}
+
+.task-add-row .wide {
+  grid-column: 1 / -1;
+}
+
+.task-editor-field {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.task-editor-field span,
+.task-section-label {
+  color: var(--text-tertiary);
+  font: 700 10px/1 var(--mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.task-editor-field input {
+  min-width: 0;
+  min-height: 42px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #101014;
+  color: var(--text-primary);
+  font: 700 13px/1.2 var(--body);
+  outline: none;
+  transition: border-color 140ms ease, background 140ms ease;
+}
+
+.task-editor-field input:focus {
+  border-color: var(--accent);
+  background: #0f0f12;
+}
+
+.task-add-btn {
+  min-width: 96px;
+  min-height: 42px;
+}
+
+.task-editor-hint {
+  margin: -4px 2px 2px;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.skill-empty-settings.compact {
+  padding: 10px;
 }
 
 .subtle-wide-btn {
@@ -3116,6 +3256,11 @@ textarea {
   transition: all 140ms ease;
 }
 
+.modal-btn:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+}
+
 .modal-btn.danger {
   background: rgba(239, 68, 68, 0.1);
   color: var(--danger);
@@ -3233,7 +3378,8 @@ textarea {
   .runtime-grid,
   .skill-setting-grid,
   .skill-setting-summary,
-  .skill-tool-row {
+  .skill-tool-row,
+  .task-add-row {
     grid-template-columns: 1fr;
   }
 

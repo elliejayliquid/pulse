@@ -306,6 +306,44 @@ def test_gui_api_skill_status_summaries_are_read_only():
         assert tasks["recent"][0]["list"] == "Pulse"
         assert "importer" in tasks["recent"][0]["short_description"]
 
+        listed = api.list_tasks("demo")
+        assert listed["ok"] is True
+        assert len(listed["tasks"]) == 2
+
+        added = api.add_task("demo", {"description": "Review the task editor", "list": "GUI"})
+        assert added["ok"] is True
+        task_id = added["task_id"]
+
+        updated = api.update_task("demo", task_id, {"description": "Review the polished task editor"})
+        assert updated["ok"] is True
+        assert updated["task"]["description"] == "Review the polished task editor"
+
+        completed = api.update_task("demo", task_id, {"completed": True})
+        assert completed["ok"] is True
+        assert completed["task"]["completed"] is True
+
+        deleted = api.delete_task("demo", task_id)
+        assert deleted["ok"] is True
+        assert api.restore_db_before_image("demo", deleted["undo_stamp"])["ok"] is True
+        restored = api.get_task("demo", task_id)
+        assert restored["ok"] is True
+        assert restored["task"]["description"] == "Review the polished task editor"
+        assert restored["task"]["completed"] is True
+
+        staged = api.save_tasks("demo", [
+            {"id": 1, "description": "Check the importer after staging", "list": "Pulse", "completed": False},
+            {"description": "A brand new staged task", "list": "GUI", "completed": False},
+        ])
+        assert staged["ok"] is True
+        assert staged["changed"] is True
+        saved_tasks = api.list_tasks("demo")["tasks"]
+        assert len(saved_tasks) == 2
+        assert any(task["description"] == "A brand new staged task" for task in saved_tasks)
+        assert api.restore_db_before_image("demo", staged["undo_stamp"])["ok"] is True
+        undone_tasks = api.list_tasks("demo")["tasks"]
+        assert len(undone_tasks) == 3
+        assert any(task["description"] == "Review the polished task editor" for task in undone_tasks)
+
 
 def test_gui_api_create_persona_from_template_initializes_db():
     with tempfile.TemporaryDirectory() as tmp:

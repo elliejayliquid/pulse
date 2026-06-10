@@ -1240,6 +1240,241 @@ class PulseAPI:
             "db_path": _safe_rel(db_path, self.root),
         }
 
+    def list_tasks(self, persona: str, include_completed: bool = True) -> dict:
+        valid = self._validate_persona_for_db_write(persona)
+        if not valid["ok"]:
+            return valid
+
+        db_path = self._persona_database_path(persona)
+        tasks: list[dict] = []
+
+        try:
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+            with closing(_connect_sqlite(db_path)) as conn:
+                conn.row_factory = sqlite3.Row
+                self._ensure_tasks_table(conn)
+                where = "" if include_completed else "WHERE completed = 0"
+                rows = conn.execute(
+                    f"""
+                    SELECT id, description, list, completed, created_at, completed_at
+                    FROM tasks
+                    {where}
+                    ORDER BY completed ASC, id DESC
+                    """
+                ).fetchall()
+                tasks = [self._format_task(row) for row in rows]
+        except (sqlite3.Error, OSError) as e:
+            return {"ok": False, "error": f"Could not read tasks: {e}"}
+
+        return {
+            "ok": True,
+            "persona": persona,
+            "tasks": tasks,
+            "db_path": _safe_rel(db_path, self.root),
+        }
+
+    def add_task(self, persona: str, fields: dict) -> dict:
+        valid = self._validate_persona_for_db_write(persona)
+        if not valid["ok"]:
+            return valid
+
+        db_path = self._persona_database_path(persona)
+        try:
+            cleaned = self._clean_task_insert(fields or {})
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+            with closing(_connect_sqlite(db_path)) as conn:
+                self._ensure_tasks_table(conn)
+                with conn:
+                    cur = conn.execute(
+                        "INSERT INTO tasks (description, list) VALUES (?, ?)",
+                        (cleaned["description"], cleaned["list"]),
+                    )
+                    task_id = int(cur.lastrowid)
+                stamp = self._write_db_before_image(
+                    persona,
+                    "task-add",
+                    "tasks",
+                    None,
+                    delete_where={"id": task_id},
+                )
+        except (sqlite3.Error, OSError, ValueError) as e:
+            return {"ok": False, "error": f"Could not add task: {e}"}
+
+        return {
+            "ok": True,
+            "changed": True,
+            "task_id": task_id,
+            "undo_stamp": stamp,
+            "running": self._persona_is_running(persona),
+        }
+
+    def update_task(self, persona: str, task_id: int, changes: dict) -> dict:
+        valid = self._validate_persona_for_db_write(persona)
+        if not valid["ok"]:
+            return valid
+        try:
+            task_id = int(task_id)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "Invalid task ID."}
+
+        db_path = self._persona_database_path(persona)
+        if not db_path.exists():
+            return {"ok": False, "error": "Task database not found."}
+
+        try:
+            with closing(_connect_sqlite(db_path)) as conn:
+                conn.row_factory = sqlite3.Row
+                self._ensure_tasks_table(conn)
+                row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+                if not row:
+                    return {"ok": False, "error": f"Task #{task_id} not found."}
+                before = dict(row)
+                cleaned = self._clean_task_update(changes or {}, before)
+                if not cleaned:
+                    task_result = self.get_task(persona, task_id)
+                    return {"ok": True, "changed": False, "task": task_result.get("task")}
+
+                stamp = self._write_db_before_image(persona, "task-update", "tasks", before)
+                assignments = [f"{key} = ?" for key in cleaned]
+                values = list(cleaned.values())
+                values.append(task_id)
+                with conn:
+                    conn.execute(
+                        f"UPDATE tasks SET {', '.join(assignments)} WHERE id = ?",
+                        values,
+                    )
+        except (sqlite3.Error, OSError, ValueError) as e:
+            return {"ok": False, "error": f"Could not update task: {e}"}
+
+        return {
+            "ok": True,
+            "changed": True,
+            "undo_stamp": stamp,
+            "task": self.get_task(persona, task_id).get("task"),
+            "running": self._persona_is_running(persona),
+        }
+
+    def delete_task(self, persona: str, task_id: int) -> dict:
+        valid = self._validate_persona_for_db_write(persona)
+        if not valid["ok"]:
+            return valid
+        try:
+            task_id = int(task_id)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "Invalid task ID."}
+
+        db_path = self._persona_database_path(persona)
+        if not db_path.exists():
+            return {"ok": False, "error": "Task database not found."}
+
+        try:
+            with closing(_connect_sqlite(db_path)) as conn:
+                conn.row_factory = sqlite3.Row
+                self._ensure_tasks_table(conn)
+                row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+                if not row:
+                    return {"ok": False, "error": f"Task #{task_id} not found."}
+                before = dict(row)
+                stamp = self._write_db_before_image(persona, "task-delete", "tasks", before)
+                with conn:
+                    conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+        except (sqlite3.Error, OSError, ValueError) as e:
+            return {"ok": False, "error": f"Could not delete task: {e}"}
+
+        return {
+            "ok": True,
+            "changed": True,
+            "task_id": task_id,
+            "undo_stamp": stamp,
+            "running": self._persona_is_running(persona),
+        }
+
+    def save_tasks(self, persona: str, tasks: list[dict]) -> dict:
+        valid = self._validate_persona_for_db_write(persona)
+        if not valid["ok"]:
+            return valid
+        if not isinstance(tasks, list):
+            return {"ok": False, "error": "Tasks must be a list."}
+
+        db_path = self._persona_database_path(persona)
+        try:
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+            with closing(_connect_sqlite(db_path)) as conn:
+                conn.row_factory = sqlite3.Row
+                self._ensure_tasks_table(conn)
+                before_rows = [
+                    dict(row)
+                    for row in conn.execute(
+                        "SELECT * FROM tasks ORDER BY id"
+                    ).fetchall()
+                ]
+                current = {int(row["id"]): row for row in before_rows if row.get("id") is not None}
+                cleaned = self._clean_task_snapshot(tasks, current)
+                if self._task_snapshots_equal(before_rows, cleaned):
+                    return {"ok": True, "changed": False, "tasks": self.list_tasks(persona).get("tasks", [])}
+
+                stamp = self._write_db_before_image(
+                    persona,
+                    "tasks-save",
+                    "tasks",
+                    before_rows,
+                    delete_where={"__all__": True},
+                )
+                with conn:
+                    conn.execute("DELETE FROM tasks")
+                    for task in cleaned:
+                        columns = ["description", "list", "completed", "created_at", "completed_at"]
+                        values = [
+                            task["description"],
+                            task["list"],
+                            task["completed"],
+                            task["created_at"],
+                            task["completed_at"],
+                        ]
+                        if task.get("id") is not None:
+                            columns.insert(0, "id")
+                            values.insert(0, task["id"])
+                        placeholders = ", ".join("?" for _ in columns)
+                        names = ", ".join(columns)
+                        conn.execute(
+                            f"INSERT INTO tasks ({names}) VALUES ({placeholders})",
+                            values,
+                        )
+        except (sqlite3.Error, OSError, ValueError) as e:
+            return {"ok": False, "error": f"Could not save tasks: {e}"}
+
+        listed = self.list_tasks(persona)
+        return {
+            "ok": True,
+            "changed": True,
+            "undo_stamp": stamp,
+            "tasks": listed.get("tasks", []),
+            "running": self._persona_is_running(persona),
+        }
+
+    def get_task(self, persona: str, task_id: int) -> dict:
+        valid = self._validate_persona_for_db_write(persona)
+        if not valid["ok"]:
+            return valid
+        try:
+            task_id = int(task_id)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "Invalid task ID."}
+
+        db_path = self._persona_database_path(persona)
+        if not db_path.exists():
+            return {"ok": False, "error": "Task database not found."}
+        try:
+            with closing(_connect_sqlite(db_path)) as conn:
+                conn.row_factory = sqlite3.Row
+                self._ensure_tasks_table(conn)
+                row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+                if not row:
+                    return {"ok": False, "error": f"Task #{task_id} not found."}
+                return {"ok": True, "task": self._format_task(row)}
+        except (sqlite3.Error, OSError) as e:
+            return {"ok": False, "error": f"Could not read task: {e}"}
+
     def list_memories(self, persona: str, view: str = "active",
                       kind: str = "fact", page: int = 1,
                       page_size: int = 25) -> dict:
@@ -2705,9 +2940,179 @@ class PulseAPI:
             "ON memories(status, date DESC)"
         )
 
+    def _ensure_tasks_table(self, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tasks (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                description  TEXT NOT NULL,
+                list         TEXT NOT NULL DEFAULT 'Daily',
+                completed    INTEGER NOT NULL DEFAULT 0,
+                created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+                completed_at TEXT
+            )
+            """
+        )
+
+    def _format_task(self, row: sqlite3.Row | dict) -> dict:
+        data = dict(row)
+        return {
+            "id": data.get("id"),
+            "description": data.get("description") or "",
+            "list": data.get("list") or "Daily",
+            "completed": bool(data.get("completed")),
+            "created_at": data.get("created_at") or "",
+            "completed_at": data.get("completed_at") or "",
+            "short_description": self._short_text(data.get("description") or "", 140),
+        }
+
+    def _clean_task_insert(self, fields: dict) -> dict:
+        if not isinstance(fields, dict):
+            raise ValueError("Task fields must be an object.")
+        allowed = {"description", "list"}
+        unknown = set(fields) - allowed
+        if unknown:
+            raise ValueError(f"Unknown task field: {sorted(unknown)[0]}")
+        description = self._clean_db_text(
+            fields.get("description"),
+            "Task description",
+            max_len=2000,
+        )
+        if not description.strip():
+            raise ValueError("Task description cannot be empty.")
+        list_name = self._clean_optional_db_text(
+            fields.get("list", "Daily"),
+            "Task list",
+            max_len=120,
+        ).strip() or "Daily"
+        return {"description": description, "list": list_name}
+
+    def _clean_task_update(self, changes: dict, before: dict) -> dict:
+        if not isinstance(changes, dict):
+            raise ValueError("Task changes must be an object.")
+        allowed = {"description", "list", "completed"}
+        unknown = set(changes) - allowed
+        if unknown:
+            raise ValueError(f"Unknown task field: {sorted(unknown)[0]}")
+
+        cleaned: dict[str, Any] = {}
+        if "description" in changes:
+            description = self._clean_db_text(
+                changes.get("description"),
+                "Task description",
+                max_len=2000,
+            )
+            if not description.strip():
+                raise ValueError("Task description cannot be empty.")
+            if description != (before.get("description") or ""):
+                cleaned["description"] = description
+
+        if "list" in changes:
+            list_name = self._clean_optional_db_text(
+                changes.get("list"),
+                "Task list",
+                max_len=120,
+            ).strip() or "Daily"
+            if list_name != (before.get("list") or "Daily"):
+                cleaned["list"] = list_name
+
+        if "completed" in changes:
+            completed = self._clean_task_bool(changes.get("completed"), "Task completed")
+            before_completed = bool(before.get("completed"))
+            if completed != before_completed:
+                cleaned["completed"] = 1 if completed else 0
+                cleaned["completed_at"] = datetime.now(timezone.utc).isoformat() if completed else None
+
+        return cleaned
+
+    def _clean_task_snapshot(self, tasks: list[dict], current: dict[int, dict]) -> list[dict]:
+        cleaned: list[dict] = []
+        seen_ids: set[int] = set()
+        now = datetime.now(timezone.utc).isoformat()
+        for raw in tasks:
+            if not isinstance(raw, dict):
+                raise ValueError("Task rows must be objects.")
+            description = self._clean_db_text(
+                raw.get("description"),
+                "Task description",
+                max_len=2000,
+            )
+            if not description.strip():
+                raise ValueError("Task description cannot be empty.")
+            list_name = self._clean_optional_db_text(
+                raw.get("list", "Daily"),
+                "Task list",
+                max_len=120,
+            ).strip() or "Daily"
+            completed = self._clean_task_bool(raw.get("completed", False), "Task completed")
+
+            task_id = raw.get("id")
+            existing = None
+            if task_id not in (None, ""):
+                try:
+                    task_id = int(task_id)
+                except (TypeError, ValueError):
+                    raise ValueError("Task ID must be a number.")
+                if task_id <= 0:
+                    raise ValueError("Task ID must be positive.")
+                if task_id in seen_ids:
+                    raise ValueError("Task IDs must be unique.")
+                seen_ids.add(task_id)
+                existing = current.get(task_id)
+            else:
+                task_id = None
+
+            was_completed = bool(existing.get("completed")) if existing else False
+            created_at = existing.get("created_at") if existing else None
+            completed_at = existing.get("completed_at") if existing else None
+            if not created_at:
+                created_at = now
+            if completed and not was_completed:
+                completed_at = now
+            elif not completed:
+                completed_at = None
+
+            cleaned.append({
+                "id": task_id,
+                "description": description,
+                "list": list_name,
+                "completed": 1 if completed else 0,
+                "created_at": created_at,
+                "completed_at": completed_at,
+            })
+        return cleaned
+
+    def _task_snapshots_equal(self, before: list[dict], after: list[dict]) -> bool:
+        def comparable(rows: list[dict]) -> list[dict]:
+            items = [
+                {
+                    "id": row.get("id"),
+                    "description": row.get("description") or "",
+                    "list": row.get("list") or "Daily",
+                    "completed": 1 if bool(row.get("completed")) else 0,
+                }
+                for row in rows
+            ]
+            return sorted(items, key=lambda row: (row["id"] is None, row["id"] or 0))
+        return comparable(before) == comparable(after)
+
+    def _clean_task_bool(self, value: Any, label: str) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, int) and value in (0, 1):
+            return bool(value)
+        raise ValueError(f"{label} must be true or false.")
+
+    @staticmethod
+    def _short_text(value: str, limit: int) -> str:
+        text = " ".join(str(value or "").split())
+        if len(text) <= limit:
+            return text
+        return text[: max(0, limit - 1)].rstrip() + "…"
+
     def _restore_table_before_image(self, conn: sqlite3.Connection,
                                     table: str, before: Any) -> int:
-        allowed_tables = {"memories", "journal_entries", "resident_lanterns", "identity"}
+        allowed_tables = {"memories", "journal_entries", "resident_lanterns", "identity", "tasks"}
         if table not in allowed_tables:
             raise ValueError(f"Unsupported undo table: {table}")
         if before is None:
@@ -2736,11 +3141,16 @@ class PulseAPI:
 
     def _delete_table_rows_for_undo(self, conn: sqlite3.Connection,
                                     table: str, where: dict[str, Any]) -> int:
-        allowed_tables = {"memories", "journal_entries", "resident_lanterns", "identity"}
+        allowed_tables = {"memories", "journal_entries", "resident_lanterns", "identity", "tasks"}
         if table not in allowed_tables:
             raise ValueError(f"Unsupported undo table: {table}")
         if not isinstance(where, dict) or not where:
             return 0
+        if where == {"__all__": True} and table == "tasks":
+            cur = conn.execute(f"DELETE FROM {table}")
+            return cur.rowcount
+        if "__all__" in where:
+            raise ValueError("Whole-table undo is not supported for this table.")
         table_columns = self._table_columns(conn, table)
         conditions = []
         values = []
