@@ -777,6 +777,21 @@ function renderSkillDialogBody(skill) {
     `;
   }
 
+  if (skill?.name === "lantern") {
+    return `
+      <div class="skill-setting-stack">
+        <label class="check-row skill-setting-check" title="Injects the current lantern state into model context on each turn. Takes effect after restart.">
+          <span>Inject lantern into context</span>
+          <input id="skillLanternContextInject" type="checkbox" ${skillContextInjected("lantern") ? "checked" : ""}>
+        </label>
+        <div class="skill-empty-settings">
+          <strong>Lantern content lives in Continuity</strong>
+          <span>Use the Continuity section to view, dim, clear, or update the lantern itself.</span>
+        </div>
+      </div>
+    `;
+  }
+
   if (skill?.name !== "lor") {
     return `
       <div class="skill-empty-settings">
@@ -830,7 +845,9 @@ function openSkillDialog(skillName) {
     ? "Configure this persona's forum identity and inbox behavior."
     : skill.name === "dev"
       ? "Configure autonomous development checks for this persona."
-      : "Configure this skill for this persona. Save from the main footer when you're done.";
+      : skill.name === "lantern"
+        ? "Configure how Lantern participates in this persona's context."
+        : "Configure this skill for this persona. Save from the main footer when you're done.";
   el("skillNotice").textContent = "Changes here are staged until you use the main Save button.";
   el("skillNotice").classList.remove("hidden");
   el("skillBody").innerHTML = renderSkillDialogBody(skill);
@@ -858,6 +875,14 @@ function bindSkillDialogControls(skill) {
     el("skillDevTickMaxRounds")?.addEventListener("input", (event) => {
       const raw = event.target.value;
       setDevTickField("max_rounds", raw === "" ? "" : Number(raw));
+      setDirty(hasEditableChanges());
+    });
+    return;
+  }
+
+  if (skill?.name === "lantern") {
+    el("skillLanternContextInject")?.addEventListener("change", (event) => {
+      setSkillContextInjected("lantern", event.target.checked);
       setDirty(hasEditableChanges());
     });
     return;
