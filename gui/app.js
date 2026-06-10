@@ -220,6 +220,7 @@ const fallbackApi = {
     ));
     return { ok: true, width: 12, height: 8, plant_count: 0, wilted_count: 0, needs_water_count: 0, plants: [], grid };
   },
+  async get_paint_gallery() { return { ok: true, total: 0, items: [], paintings_dir: "" }; },
   async list_memories() { return { ok: false, error: "Run through pywebview to browse memories." }; },
   async get_memory_detail() { return { ok: false, error: "Run through pywebview to inspect memories." }; },
   async add_memory() { return { ok: false, error: "Run through pywebview to add memories." }; },
@@ -819,6 +820,23 @@ function renderSkillDialogBody(skill) {
     `;
   }
 
+  if (skill?.name === "paint") {
+    return `
+      <div class="skill-setting-stack">
+        <div id="skillPaintGallery" class="skill-paint-gallery">
+          <div class="skill-empty-settings">
+            <strong>Loading gallery</strong>
+            <span>Reading recent paintings...</span>
+          </div>
+        </div>
+        <div class="skill-empty-settings">
+          <strong>Companion-painted for now</strong>
+          <span>Starting, editing, and finishing paintings are still companion tool actions.</span>
+        </div>
+      </div>
+    `;
+  }
+
   if (skill?.name !== "lor") {
     return `
       <div class="skill-empty-settings">
@@ -876,8 +894,12 @@ function openSkillDialog(skillName) {
         ? "Configure how Lantern participates in this persona's context."
         : skill.name === "garden"
           ? "Configure garden context and peek at the current grid."
-          : "Configure this skill for this persona. Save from the main footer when you're done.";
-  el("skillNotice").textContent = "Changes here are staged until you use the main Save button.";
+          : skill.name === "paint"
+            ? "Browse recent tiny paintings saved by this persona."
+            : "Configure this skill for this persona. Save from the main footer when you're done.";
+  el("skillNotice").textContent = skill.name === "paint"
+    ? "Gallery is read-only here; painting still happens through companion tools."
+    : "Changes here are staged until you use the main Save button.";
   el("skillNotice").classList.remove("hidden");
   el("skillBody").innerHTML = renderSkillDialogBody(skill);
   bindSkillDialogControls(skill);
@@ -886,6 +908,8 @@ function openSkillDialog(skillName) {
   document.body.classList.add("modal-open");
   if (skill.name === "garden") {
     loadGardenSkillPreview();
+  } else if (skill.name === "paint") {
+    loadPaintSkillGallery();
   }
 }
 
@@ -1020,6 +1044,66 @@ function renderGardenSkillPreview(data) {
         ${grid}
       </div>
       <p class="field-hint">Hover a plant to see its linked memory preview.</p>
+    </div>
+  `;
+}
+
+async function loadPaintSkillGallery() {
+  const node = el("skillPaintGallery");
+  if (!node || !state.current || state.current.name === "__base__") return;
+  node.innerHTML = `
+    <div class="skill-empty-settings">
+      <strong>Loading gallery</strong>
+      <span>Reading recent paintings...</span>
+    </div>
+  `;
+  const result = await api().get_paint_gallery(state.current.name, 24);
+  if (!node.isConnected || state.currentSkill !== "paint") return;
+  if (!result.ok) {
+    node.innerHTML = `
+      <div class="skill-empty-settings">
+        <strong>Gallery unavailable</strong>
+        <span>${escapeHtml(result.error || "Could not read paintings.")}</span>
+      </div>
+    `;
+    return;
+  }
+  node.innerHTML = renderPaintSkillGallery(result);
+}
+
+function renderPaintSkillGallery(data) {
+  const items = data.items || [];
+  if (!items.length) {
+    return `
+      <div class="skill-empty-settings">
+        <strong>No paintings yet</strong>
+        <span>When this persona finishes a painting, it will appear here.</span>
+      </div>
+    `;
+  }
+  const cards = items.map((item) => `
+    <article class="skill-paint-card" title="${escapeHtml(item.tooltip || item.title || "")}">
+      <div class="skill-paint-thumb">
+        ${item.image
+          ? `<img src="${escapeHtml(item.image)}" alt="${escapeHtml(item.title || "Painting")}">`
+          : `<span>?</span>`}
+      </div>
+      <div class="skill-paint-meta">
+        <strong>${escapeHtml(item.title || "Untitled")}</strong>
+        <span>${escapeHtml((item.date || "").slice(0, 10) || "undated")}</span>
+        ${item.caption ? `<p>${escapeHtml(item.caption)}</p>` : ""}
+      </div>
+    </article>
+  `).join("");
+  return `
+    <div class="skill-paint-panel">
+      <div class="skill-garden-head">
+        <span>Recent paintings</span>
+        <strong>${escapeHtml(String(data.total || items.length))} saved</strong>
+      </div>
+      <div class="skill-paint-grid">
+        ${cards}
+      </div>
     </div>
   `;
 }

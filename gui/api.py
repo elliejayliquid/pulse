@@ -1060,6 +1060,39 @@ class PulseAPI:
             "db_path": _safe_rel(db_path, self.root),
         }
 
+    def get_paint_gallery(self, persona: str, limit: int = 12) -> dict:
+        if not persona or persona == "__base__":
+            return {"ok": False, "error": "Choose a persona first."}
+        persona_dir = self.personas_dir / persona
+        if not persona_dir.is_dir():
+            return {"ok": False, "error": f"Persona not found: {persona}"}
+
+        paintings_dir = self._paintings_dir(persona)
+        index_path = paintings_dir / "paintings.json"
+        if not index_path.exists():
+            return self._empty_paint_gallery(persona, paintings_dir)
+
+        try:
+            index = json.loads(index_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as e:
+            return {"ok": False, "error": f"Could not read paintings index: {e}"}
+        if not isinstance(index, list):
+            return {"ok": False, "error": "Paintings index is not a list."}
+
+        limit = max(1, min(int(limit or 12), 24))
+        items = [
+            self._format_painting_entry(persona, paintings_dir, entry)
+            for entry in index[:limit]
+            if isinstance(entry, dict)
+        ]
+        return {
+            "ok": True,
+            "persona": persona,
+            "total": len(index),
+            "items": items,
+            "paintings_dir": _safe_rel(paintings_dir, self.root),
+        }
+
     def list_memories(self, persona: str, view: str = "active",
                       kind: str = "fact", page: int = 1,
                       page_size: int = 25) -> dict:
@@ -3002,6 +3035,90 @@ class PulseAPI:
             return float(value)
         except (TypeError, ValueError):
             return fallback
+
+    def _paintings_dir(self, persona: str) -> Path:
+        config = self._merged_config_for(persona)
+        self._apply_persona_defaults(config, persona)
+        paths = config.get("paths", {})
+        raw_path = paths.get("paintings")
+        if raw_path:
+            path = Path(raw_path)
+            if not path.is_absolute():
+                path = (self.root / path).resolve()
+            return path
+
+        persona_path = Path(paths.get("persona") or self.personas_dir / persona / "persona.yaml")
+        if not persona_path.is_absolute():
+            persona_path = (self.personas_dir / persona / persona_path).resolve()
+        if persona_path.suffix in (".yaml", ".yml", ".json"):
+            persona_path = persona_path.parent
+        return persona_path / "data" / "paintings"
+
+    def _empty_paint_gallery(self, persona: str, paintings_dir: Path) -> dict:
+        return {
+            "ok": True,
+            "persona": persona,
+            "total": 0,
+            "items": [],
+            "paintings_dir": _safe_rel(paintings_dir, self.root),
+        }
+
+    def _format_painting_entry(self, persona: str, paintings_dir: Path, entry: dict) -> dict:
+        title = str(entry.get("title") or entry.get("id") or "Untitled")
+        caption = str(entry.get("caption") or "")
+        image_path = self._resolve_painting_file(paintings_dir, entry.get("upscaled_path") or entry.get("true_path"))
+        true_path = self._resolve_painting_file(paintings_dir, entry.get("true_path"))
+        return {
+            "id": str(entry.get("id") or ""),
+            "title": title,
+            "caption": caption,
+            "date": str(entry.get("date") or ""),
+            "intent": str(entry.get("intent") or ""),
+            "width": entry.get("width") or 16,
+            "height": entry.get("height") or 16,
+            "colors_used": entry.get("colors_used") if isinstance(entry.get("colors_used"), list) else [],
+            "image": self._image_data_uri(image_path),
+            "image_path": _safe_rel(image_path, self.root) if image_path else "",
+            "true_path": _safe_rel(true_path, self.root) if true_path else "",
+            "tooltip": self._painting_tooltip(title, caption, entry),
+            "persona": persona,
+        }
+
+    def _resolve_painting_file(self, paintings_dir: Path, value: Any) -> Path | None:
+        if not value:
+            return None
+        path = Path(str(value))
+        if not path.is_absolute():
+            path = paintings_dir / path
+        try:
+            resolved = path.resolve()
+            resolved.relative_to(paintings_dir.resolve())
+        except (OSError, ValueError):
+            return None
+        if resolved.suffix.lower() != ".png" or not resolved.exists():
+            return None
+        return resolved
+
+    def _image_data_uri(self, path: Path | None) -> str:
+        if not path:
+            return ""
+        try:
+            data = base64.b64encode(path.read_bytes()).decode("ascii")
+        except OSError:
+            return ""
+        return f"data:image/png;base64,{data}"
+
+    def _painting_tooltip(self, title: str, caption: str, entry: dict) -> str:
+        lines = [title]
+        date = str(entry.get("date") or "")
+        if date:
+            lines.append(date[:10])
+        if caption:
+            lines.append(caption)
+        intent = str(entry.get("intent") or "")
+        if intent:
+            lines.append(f"Intent: {intent}")
+        return "\n".join(lines)
 
     def _read_core_anchor_row(self, db_path: Path, anchor_id: str) -> dict | None:
         if not db_path.exists():

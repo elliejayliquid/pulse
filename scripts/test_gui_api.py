@@ -180,6 +180,51 @@ def test_gui_api_garden_summary_reads_grid_and_memory_tooltips():
         assert result["grid"][0][0]["empty"] is True
 
 
+def test_gui_api_paint_gallery_reads_recent_index_safely():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        persona_dir = root / "personas" / "demo"
+        paintings_dir = persona_dir / "data" / "paintings"
+        paintings_dir.mkdir(parents=True)
+        (root / "config.yaml").write_text("provider:\n  type: local\n", encoding="utf-8")
+        (root / "persona.yaml").write_text("name: Base\n", encoding="utf-8")
+        (persona_dir / "config.yaml").write_text("", encoding="utf-8")
+        (persona_dir / "persona.yaml").write_text("name: Demo\n", encoding="utf-8")
+
+        png_bytes = (
+            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+            b"\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00"
+            b"\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\xf8\x0f\x00"
+            b"\x01\x01\x01\x00\x18\xdd\x8d\xb0\x00\x00\x00\x00IEND\xaeB`\x82"
+        )
+        (paintings_dir / "tiny@4x.png").write_bytes(png_bytes)
+        (paintings_dir / "paintings.json").write_text(
+            json.dumps([
+                {
+                    "id": "tiny",
+                    "title": "Tiny Sun",
+                    "caption": "A small warm square.",
+                    "date": "2026-06-10T10:00:00",
+                    "intent": "test art",
+                    "width": 16,
+                    "height": 16,
+                    "upscaled_path": "tiny@4x.png",
+                    "true_path": "../outside.png",
+                }
+            ]),
+            encoding="utf-8",
+        )
+
+        api = PulseAPI(root)
+        result = api.get_paint_gallery("demo")
+        assert result["ok"] is True
+        assert result["total"] == 1
+        assert result["items"][0]["title"] == "Tiny Sun"
+        assert result["items"][0]["image"].startswith("data:image/png;base64,")
+        assert result["items"][0]["true_path"] == ""
+        assert "test art" in result["items"][0]["tooltip"]
+
+
 def test_gui_api_create_persona_from_template_initializes_db():
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -1366,6 +1411,7 @@ channels:
 if __name__ == "__main__":
     test_gui_api_read_only_persona_loading()
     test_gui_api_garden_summary_reads_grid_and_memory_tooltips()
+    test_gui_api_paint_gallery_reads_recent_index_safely()
     test_gui_api_create_persona_from_template_initializes_db()
     test_gui_api_import_openrouter_chat_visible_messages_only()
     test_gui_api_standard_provider_env_fallback()
