@@ -236,8 +236,10 @@ class SkillRegistry:
                     "Load additional tools by describing what you need. "
                     "Available: " + skill_list + ". "
                     "Describe what you want to do and the matching tools "
-                    "will be added. If tools are loaded, call the appropriate "
-                    "loaded tool in this same turn instead of saying you'll do it later."
+                    "will be added. search_tools only loads tools; it does not "
+                    "perform the requested action. If tools are loaded, call the "
+                    "appropriate loaded tool in this same turn before describing "
+                    "any result."
                 ),
                 "parameters": {
                     "type": "object",
@@ -307,9 +309,10 @@ class SkillRegistry:
                 result_parts.append(f"  Workflow: {skill.workflow}")
 
         result_text = (
-            f"Loaded {len(tools)} tools. These tools are available now; "
-            "call the appropriate one next in this same turn instead of saying "
-            "you'll do it later.\n" + "\n".join(result_parts)
+            f"Loaded {len(tools)} tools. These tools are available now. "
+            "No requested action has been performed yet; search_tools only loads tools. "
+            "If you intended to do something, call the appropriate loaded tool now "
+            "in this same turn before describing any result.\n" + "\n".join(result_parts)
         )
         return tools, result_text
 

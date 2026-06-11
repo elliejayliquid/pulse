@@ -152,7 +152,7 @@ class LanternSkill(BaseSkill):
                 f"[Lantern expired] {row['resident_id']}'s lantern was last updated "
                 f"{row['updated_at']} ({self._age_label(row['updated_at'])}). "
                 "It is too old to use as current-state context, so the old mode/mood/focus "
-                "has been withheld. Do not assume it describes Lena or the present moment. "
+                "has been withheld. Do not assume it describes your human or the present moment. "
                 "Re-orient from current time, recent conversation, journal, and tools; then "
                 "use set_lantern with a fresh state or dim_lantern if there is no active thread."
             )
@@ -175,7 +175,7 @@ class LanternSkill(BaseSkill):
             if stale:
                 lines.append(
                     "[Lantern stale] This lantern is older than 24 hours. Treat it as "
-                    "historical orientation only, not proof of what Lena is doing now. "
+                    "historical orientation only, not proof of what your human is doing now. "
                     "Before relying on it, refresh it with set_lantern or dim it."
                 )
             lines.append(

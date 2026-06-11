@@ -253,7 +253,7 @@ class JournalSkill(BaseSkill):
                                     "paragraph. This is what future-you would search for. "
                                     "Different from why_it_mattered: e.g. why_it_mattered="
                                     "'I want to follow up gently tomorrow'; search_summary="
-                                    "'Lena felt overloaded after work; yoga was historical "
+                                    "'Your human felt overloaded after work; yoga was historical "
                                     "context, not current; verify mood before assuming.'"
                                 ),
                             },
