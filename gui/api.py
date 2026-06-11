@@ -28,6 +28,13 @@ from gui.backup import BackupManager
 from gui.config_editor import ConfigEditor
 from gui.openrouter_import import parse_openrouter_chat
 from core.db import PulseDatabase
+from core.scheduler import (
+    ScheduleManager,
+    describe_cron,
+    generate_schedule_id,
+    parse_human_time,
+    parse_recurring_time,
+)
 from core.journal_mirror import (
     journal_memory_display_text,
     search_summary_is_thin,
@@ -1238,6 +1245,174 @@ class PulseAPI:
             "completed": completed,
             "recent": recent,
             "db_path": _safe_rel(db_path, self.root),
+        }
+
+    def list_reminders(self, persona: str, include_completed: bool = False) -> dict:
+        valid = self._validate_persona_for_db_write(persona)
+        if not valid["ok"]:
+            return valid
+
+        try:
+            scheduler, db = self._schedule_manager_for(persona)
+            try:
+                entries = scheduler.list_all() if include_completed else scheduler.list_active()
+                items = [self._format_schedule_entry(entry) for entry in entries]
+                items.sort(
+                    key=lambda item: (
+                        item["completed"],
+                        not item["enabled"],
+                        item["schedule_type"] != "recurring",
+                        item.get("created_at") or "",
+                    ),
+                    reverse=False,
+                )
+            finally:
+                db.close()
+        except (sqlite3.Error, OSError, ValueError) as e:
+            return {"ok": False, "error": f"Could not read reminders: {e}"}
+
+        active = [item for item in items if item["enabled"] and not item["completed"]]
+        completed = [item for item in items if item["completed"]]
+        return {
+            "ok": True,
+            "persona": persona,
+            "items": items,
+            "active_count": len(active),
+            "completed_count": len(completed),
+            "running": self._persona_is_running(persona),
+        }
+
+    def add_reminder(self, persona: str, fields: dict) -> dict:
+        valid = self._validate_persona_for_db_write(persona)
+        if not valid["ok"]:
+            return valid
+
+        try:
+            cleaned = self._clean_schedule_insert(fields or {})
+            scheduler, db = self._schedule_manager_for(persona)
+            try:
+                entry = scheduler.add(
+                    task=cleaned["task"],
+                    created_by="gui",
+                    origin="user",
+                    when=cleaned["when"],
+                    priority=cleaned["priority"],
+                )
+            finally:
+                db.close()
+            was_deduped = bool(entry.pop("_was_deduped", False))
+            stamp = ""
+            if not was_deduped:
+                stamp = self._write_db_before_image(
+                    persona,
+                    "reminder-add",
+                    "schedules",
+                    None,
+                    delete_where={"id": entry["id"]},
+                )
+        except (sqlite3.Error, OSError, ValueError) as e:
+            return {"ok": False, "error": f"Could not add reminder: {e}"}
+
+        return {
+            "ok": True,
+            "changed": not was_deduped,
+            "deduped": was_deduped,
+            "item": self._format_schedule_entry(entry),
+            "undo_stamp": stamp,
+            "running": self._persona_is_running(persona),
+        }
+
+    def delete_reminder(self, persona: str, reminder_id: str) -> dict:
+        valid = self._validate_persona_for_db_write(persona)
+        if not valid["ok"]:
+            return valid
+
+        reminder_id = str(reminder_id or "").strip()
+        if not reminder_id:
+            return {"ok": False, "error": "Reminder ID is required."}
+
+        db_path = self._persona_database_path(persona)
+        if not db_path.exists():
+            return {"ok": False, "error": "Reminder database not found."}
+
+        try:
+            with closing(_connect_sqlite(db_path)) as conn:
+                conn.row_factory = sqlite3.Row
+                row = conn.execute("SELECT * FROM schedules WHERE id = ?", (reminder_id,)).fetchone()
+                if not row:
+                    return {"ok": False, "error": f"Reminder {reminder_id} not found."}
+                before = dict(row)
+                stamp = self._write_db_before_image(persona, "reminder-delete", "schedules", before)
+            scheduler, db = self._schedule_manager_for(persona)
+            try:
+                removed = scheduler.remove(reminder_id)
+                if not removed:
+                    return {"ok": False, "error": f"Reminder {reminder_id} not found."}
+            finally:
+                db.close()
+        except (sqlite3.Error, OSError, ValueError) as e:
+            return {"ok": False, "error": f"Could not delete reminder: {e}"}
+
+        return {
+            "ok": True,
+            "changed": True,
+            "reminder_id": reminder_id,
+            "undo_stamp": stamp,
+            "running": self._persona_is_running(persona),
+        }
+
+    def save_reminders(self, persona: str, reminders: list[dict]) -> dict:
+        valid = self._validate_persona_for_db_write(persona)
+        if not valid["ok"]:
+            return valid
+        if not isinstance(reminders, list):
+            return {"ok": False, "error": "Reminders must be a list."}
+
+        db_path = self._persona_database_path(persona)
+        try:
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+            db = PulseDatabase(db_path)
+            db.close()
+            with closing(_connect_sqlite(db_path)) as conn:
+                conn.row_factory = sqlite3.Row
+                before_rows = [
+                    dict(row)
+                    for row in conn.execute("SELECT * FROM schedules ORDER BY id").fetchall()
+                ]
+                current = {
+                    str(row["id"]): row
+                    for row in before_rows
+                    if row.get("id") is not None
+                }
+                cleaned = self._clean_schedule_snapshot(reminders, before_rows, current)
+                if self._schedule_snapshots_equal(before_rows, cleaned):
+                    return {
+                        "ok": True,
+                        "changed": False,
+                        "items": self.list_reminders(persona, True).get("items", []),
+                    }
+
+                stamp = self._write_db_before_image(
+                    persona,
+                    "reminders-save",
+                    "schedules",
+                    before_rows,
+                    delete_where={"__all__": True},
+                )
+                with conn:
+                    conn.execute("DELETE FROM schedules")
+                    for reminder in cleaned:
+                        self._insert_schedule_row(conn, reminder)
+        except (sqlite3.Error, OSError, ValueError) as e:
+            return {"ok": False, "error": f"Could not save reminders: {e}"}
+
+        listed = self.list_reminders(persona, True)
+        return {
+            "ok": True,
+            "changed": True,
+            "undo_stamp": stamp,
+            "items": listed.get("items", []),
+            "running": self._persona_is_running(persona),
         }
 
     def list_tasks(self, persona: str, include_completed: bool = True) -> dict:
@@ -2954,6 +3129,156 @@ class PulseAPI:
             """
         )
 
+    def _schedule_manager_for(self, persona: str) -> tuple[ScheduleManager, PulseDatabase]:
+        config = self._merged_config_for(persona)
+        self._apply_persona_defaults(config, persona)
+        db = PulseDatabase(self._persona_database_path(persona))
+        config["_db"] = db
+        config["_shared_db"] = db
+        return ScheduleManager(config), db
+
+    def _format_schedule_entry(self, entry: dict) -> dict:
+        stype = entry.get("schedule_type") or "once"
+        cron = entry.get("cron") or ""
+        run_at = entry.get("run_at") or ""
+        completed = bool(entry.get("completed"))
+        if stype == "recurring":
+            when_label = describe_cron(cron) if cron else "recurring"
+        else:
+            when_label = entry.get("run_at_local") or run_at or "unscheduled"
+            if completed:
+                when_label = f"{when_label} (completed)"
+        return {
+            "id": entry.get("id") or "",
+            "task": entry.get("task") or "",
+            "short_task": self._short_text(entry.get("task") or "", 120),
+            "priority": entry.get("priority") or "routine",
+            "origin": entry.get("origin") or "companion",
+            "created_by": entry.get("created_by") or "companion",
+            "created_at": entry.get("created_at") or "",
+            "created_at_local": entry.get("created_at_local") or "",
+            "enabled": bool(entry.get("enabled", True)),
+            "schedule_type": stype,
+            "cron": cron,
+            "run_at": run_at,
+            "run_at_local": entry.get("run_at_local") or "",
+            "last_run": entry.get("last_run") or "",
+            "completed": completed,
+            "when_label": when_label,
+        }
+
+    def _clean_schedule_insert(self, fields: dict) -> dict:
+        if not isinstance(fields, dict):
+            raise ValueError("Reminder fields must be an object.")
+        allowed = {"task", "when", "priority"}
+        unknown = set(fields) - allowed
+        if unknown:
+            raise ValueError(f"Unknown reminder field: {sorted(unknown)[0]}")
+        task = self._clean_db_text(fields.get("task"), "Reminder text", max_len=2000)
+        if not task.strip():
+            raise ValueError("Reminder text cannot be empty.")
+        when = self._clean_db_text(fields.get("when"), "Reminder time", max_len=240)
+        if not when.strip():
+            raise ValueError("Reminder time cannot be empty.")
+        priority = self._clean_optional_db_text(
+            fields.get("priority", "routine"),
+            "Reminder priority",
+            max_len=40,
+        ).strip() or "routine"
+        if priority not in {"urgent", "routine", "creative"}:
+            raise ValueError("Reminder priority must be urgent, routine, or creative.")
+        return {"task": task, "when": when, "priority": priority}
+
+    def _clean_schedule_snapshot(self, reminders: list[dict],
+                                 before_rows: list[dict],
+                                 current: dict[str, dict]) -> list[dict]:
+        kept: list[dict] = []
+        seen: set[str] = set()
+        for reminder in reminders:
+            if not isinstance(reminder, dict):
+                raise ValueError("Each reminder must be an object.")
+            reminder_id = str(reminder.get("id") or "").strip()
+            if reminder_id:
+                row = current.get(reminder_id)
+                if not row:
+                    raise ValueError(f"Reminder {reminder_id} no longer exists.")
+                kept.append(dict(row))
+                seen.add(reminder_id)
+                continue
+            cleaned = self._clean_schedule_insert(reminder)
+            kept.append(self._build_schedule_row(cleaned))
+
+        # Completed one-time reminders are historical state. Keep them even
+        # though the GUI only stages changes to the active reminder list.
+        for row in before_rows:
+            row_id = str(row.get("id") or "")
+            if row_id in seen:
+                continue
+            if row.get("completed"):
+                kept.append(dict(row))
+        return kept
+
+    def _build_schedule_row(self, cleaned: dict) -> dict:
+        now_utc = datetime.now(timezone.utc)
+        now_local = datetime.now()
+        row = {
+            "id": generate_schedule_id(),
+            "task": cleaned["task"],
+            "created_by": "gui",
+            "origin": "user",
+            "priority": cleaned["priority"],
+            "created_at": now_utc.isoformat(),
+            "created_at_local": now_local.strftime("%A %b %d, %I:%M %p"),
+            "enabled": 1,
+            "completed": 0,
+            "last_run": None,
+            "cron": None,
+            "run_at": None,
+            "run_at_local": None,
+        }
+        recurring = parse_recurring_time(cleaned["when"])
+        if recurring:
+            cron, _label = recurring
+            row["schedule_type"] = "recurring"
+            row["cron"] = cron
+            return row
+
+        parsed = parse_human_time(cleaned["when"])
+        if not parsed:
+            raise ValueError(
+                "Cannot create a one-time reminder without a time. "
+                "Use 'in 30 minutes', 'in 2 hours', or 'tomorrow 3pm'."
+            )
+        row["schedule_type"] = "once"
+        row["run_at"] = parsed.isoformat()
+        row["run_at_local"] = parsed.astimezone().strftime("%A %b %d, %I:%M %p")
+        return row
+
+    def _insert_schedule_row(self, conn: sqlite3.Connection, row: dict) -> None:
+        columns = [
+            "id", "task", "created_by", "origin", "priority",
+            "created_at", "created_at_local", "enabled", "schedule_type",
+            "cron", "run_at", "run_at_local", "completed", "last_run",
+        ]
+        conn.execute(
+            f"INSERT INTO schedules ({', '.join(columns)}) "
+            f"VALUES ({', '.join('?' for _ in columns)})",
+            [row.get(column) for column in columns],
+        )
+
+    def _schedule_snapshots_equal(self, before: list[dict], after: list[dict]) -> bool:
+        def normalize(rows: list[dict]) -> list[dict]:
+            columns = [
+                "id", "task", "created_by", "origin", "priority",
+                "created_at", "created_at_local", "enabled", "schedule_type",
+                "cron", "run_at", "run_at_local", "completed", "last_run",
+            ]
+            normalized = []
+            for row in rows:
+                normalized.append({column: row.get(column) for column in columns})
+            return sorted(normalized, key=lambda row: str(row.get("id") or ""))
+        return normalize(before) == normalize(after)
+
     def _format_task(self, row: sqlite3.Row | dict) -> dict:
         data = dict(row)
         return {
@@ -3112,7 +3437,7 @@ class PulseAPI:
 
     def _restore_table_before_image(self, conn: sqlite3.Connection,
                                     table: str, before: Any) -> int:
-        allowed_tables = {"memories", "journal_entries", "resident_lanterns", "identity", "tasks"}
+        allowed_tables = {"memories", "journal_entries", "resident_lanterns", "identity", "tasks", "schedules"}
         if table not in allowed_tables:
             raise ValueError(f"Unsupported undo table: {table}")
         if before is None:
@@ -3141,12 +3466,12 @@ class PulseAPI:
 
     def _delete_table_rows_for_undo(self, conn: sqlite3.Connection,
                                     table: str, where: dict[str, Any]) -> int:
-        allowed_tables = {"memories", "journal_entries", "resident_lanterns", "identity", "tasks"}
+        allowed_tables = {"memories", "journal_entries", "resident_lanterns", "identity", "tasks", "schedules"}
         if table not in allowed_tables:
             raise ValueError(f"Unsupported undo table: {table}")
         if not isinstance(where, dict) or not where:
             return 0
-        if where == {"__all__": True} and table == "tasks":
+        if where == {"__all__": True} and table in {"tasks", "schedules"}:
             cur = conn.execute(f"DELETE FROM {table}")
             return cur.rowcount
         if "__all__" in where:

@@ -59,6 +59,9 @@ const state = {
   taskDrafts: [],
   taskOriginals: [],
   taskUndoStamp: "",
+  scheduleDrafts: [],
+  scheduleOriginals: [],
+  scheduleUndoStamp: "",
   currentSkill: "",
 };
 
@@ -194,6 +197,10 @@ const fallbackApi = {
     };
   },
   async import_openrouter_chat() { return { ok: false, error: "Run through pywebview to import OpenRouter chats." }; },
+  async list_reminders() { return { ok: false, error: "Run through pywebview to manage reminders." }; },
+  async add_reminder() { return { ok: false, error: "Run through pywebview to manage reminders." }; },
+  async delete_reminder() { return { ok: false, error: "Run through pywebview to manage reminders." }; },
+  async save_reminders() { return { ok: false, error: "Run through pywebview to manage reminders." }; },
   async pick_openrouter_export() { return { ok: false, error: "Run through pywebview to pick files." }; },
   async preview_persona_save() { return { ok: false, error: "Run through pywebview to save." }; },
   async save_persona() { return { ok: false, error: "Run through pywebview to save." }; },
@@ -988,6 +995,93 @@ function renderSkillDialogBody(skill) {
     `;
   }
 
+  if (skill?.name === "schedule") {
+    return `
+      <div class="skill-setting-stack">
+        <div id="skillScheduleSummary" class="skill-tool-panel">
+          <div class="skill-empty-settings">
+            <strong>Loading reminders</strong>
+            <span>Reading active scheduled reminders...</span>
+          </div>
+        </div>
+        <div class="skill-tool-card task-editor-card">
+          <div class="skill-garden-head schedule-add-head">
+            <span>Add reminder</span>
+            <div class="schedule-head-actions">
+              <strong>Staged until Save</strong>
+              <div id="skillScheduleNotice" class="schedule-local-status hidden"></div>
+            </div>
+          </div>
+          <div class="task-add-row schedule-add-row">
+            <label class="task-editor-field wide" title="What should this persona remind you about or follow up on?">
+              <span>Reminder</span>
+              <input id="scheduleTaskText" type="text" placeholder="What should happen later?">
+            </label>
+            <label class="task-editor-field" title="Choose whether this is a one-time reminder or a recurring schedule.">
+              <span>Type</span>
+              <select id="scheduleMode">
+                <option value="once">One-time</option>
+                <option value="daily">Daily</option>
+                <option value="weekly">Weekly</option>
+                <option value="monthly">Monthly</option>
+                <option value="yearly">Yearly</option>
+              </select>
+            </label>
+            <label class="task-editor-field" title="Priority shown to the companion when the reminder is due.">
+              <span>Priority</span>
+              <select id="schedulePriority">
+                <option value="routine">Routine</option>
+                <option value="urgent">Urgent</option>
+                <option value="creative">Creative</option>
+              </select>
+            </label>
+            <div class="schedule-detail-block">
+              <div id="scheduleOnceFields" class="schedule-detail-grid">
+                <label class="task-editor-field" title="Local time for the one-time reminder.">
+                  <span>Time</span>
+                  <input id="scheduleOnceTime" type="time">
+                </label>
+                <label class="task-editor-field" title="Local calendar date for the one-time reminder.">
+                  <span>Date</span>
+                  <input id="scheduleDate" type="date">
+                </label>
+              </div>
+              <div id="scheduleRecurringFields" class="schedule-detail-grid hidden">
+                <label class="task-editor-field schedule-time-field" title="Local 24-hour time for the recurring reminder.">
+                  <span>Time</span>
+                  <input id="scheduleTime" type="time">
+                </label>
+                <label id="scheduleWeekdayField" class="task-editor-field hidden" title="Weekly reminder day.">
+                  <span>Day</span>
+                  <select id="scheduleWeekday">
+                    <option value="monday">Monday</option>
+                    <option value="tuesday">Tuesday</option>
+                    <option value="wednesday">Wednesday</option>
+                    <option value="thursday">Thursday</option>
+                    <option value="friday">Friday</option>
+                    <option value="saturday">Saturday</option>
+                    <option value="sunday">Sunday</option>
+                  </select>
+                </label>
+                <label id="scheduleMonthdayField" class="task-editor-field hidden" title="Monthly reminder day.">
+                  <span>Day</span>
+                  <input id="scheduleMonthday" type="number" min="1" max="31" step="1" value="1">
+                </label>
+                <label id="scheduleYearDateField" class="task-editor-field hidden" title="Pick the yearly month and day. The year is ignored.">
+                  <span>Date</span>
+                  <input id="scheduleYearDate" type="date">
+                </label>
+              </div>
+              <p id="schedulePreview" class="schedule-preview">Choose a date and time for this one-time reminder.</p>
+            </div>
+            <button id="scheduleAddBtn" class="subtle-wide-btn task-add-btn schedule-add-btn" type="button">Add Reminder</button>
+          </div>
+          <p class="task-editor-hint">One-time reminders use a calendar date and local time. Recurring reminders repeat daily, weekly, monthly, or yearly.</p>
+        </div>
+      </div>
+    `;
+  }
+
   if (skill?.name !== "lor") {
     return `
       <div class="skill-empty-settings">
@@ -1060,6 +1154,8 @@ function openSkillDialog(skillName) {
                       ? "Check sticker pack readiness for this persona."
                       : skill.name === "tasks"
                         ? "Manage DB-backed checklist tasks."
+                        : skill.name === "schedule"
+                          ? "Manage DB-backed reminders and scheduled follow-ups."
                         : "Configure this skill for this persona. Save from the main footer when you're done.";
   el("skillNotice").textContent = skill.name === "paint"
     ? "Gallery is read-only here; painting still happens through companion tools."
@@ -1075,6 +1171,8 @@ function openSkillDialog(skillName) {
               ? "Sticker selection still happens through companion tools."
               : skill.name === "tasks"
                 ? "Task changes are staged here until you press Save."
+                : skill.name === "schedule"
+                  ? "Reminder changes are staged here until you press Save."
     : "Changes here are staged until you use the main Save button.";
   el("skillNotice").classList.remove("hidden");
   el("skillBody").innerHTML = renderSkillDialogBody(skill);
@@ -1095,6 +1193,12 @@ function openSkillDialog(skillName) {
     loadTasksSkillSummary();
     loadTasksSkillEditor();
     syncTaskSaveButton();
+  } else if (skill.name === "schedule") {
+    state.scheduleUndoStamp = "";
+    state.scheduleOriginals = [];
+    state.scheduleDrafts = [];
+    loadScheduleSkillSummary();
+    syncScheduleSaveButton();
   }
 }
 
@@ -1152,6 +1256,11 @@ function bindSkillDialogControls(skill) {
 
   if (skill?.name === "journal") {
     el("skillOpenJournal")?.addEventListener("click", () => openContinuityTarget("browse-journal"));
+    return;
+  }
+
+  if (skill?.name === "schedule") {
+    wireScheduleSkillEditor();
     return;
   }
 
@@ -1213,6 +1322,10 @@ async function handleSkillDone() {
     await saveTaskDrafts();
     return;
   }
+  if (state.currentSkill === "schedule") {
+    await saveReminderDrafts();
+    return;
+  }
   closeSkillDialog();
 }
 
@@ -1221,6 +1334,15 @@ async function handleSkillClose() {
     const ok = await showConfirm(
       "Discard task changes?",
       "Task changes are staged in this window. Closing now will discard unsaved edits.",
+      "Discard",
+      "secondary"
+    );
+    if (!ok) return;
+  }
+  if (state.currentSkill === "schedule" && scheduleDraftDirty()) {
+    const ok = await showConfirm(
+      "Discard reminder changes?",
+      "Reminder changes are staged in this window. Closing now will discard unsaved edits.",
       "Discard",
       "secondary"
     );
@@ -1428,6 +1550,340 @@ function renderStickerSkillSummary(data) {
       </div>
     </div>
   `;
+}
+
+async function loadScheduleSkillSummary() {
+  const node = el("skillScheduleSummary");
+  if (!node || !state.current || state.current.name === "__base__") return;
+  node.innerHTML = loadingSkillPanel("Loading reminders", "Reading active scheduled reminders...");
+  const result = await api().list_reminders(state.current.name, true);
+  if (!node.isConnected || state.currentSkill !== "schedule") return;
+  if (!result.ok) {
+    node.innerHTML = loadingSkillPanel("Reminder summary unavailable", result.error || "Could not read reminders.");
+    return;
+  }
+  const reminders = result.items || [];
+  state.scheduleOriginals = reminders.map(normalizeScheduleDraft);
+  state.scheduleDrafts = reminders.map(normalizeScheduleDraft);
+  renderScheduleDraftPanels();
+  syncScheduleSaveButton();
+}
+
+function renderScheduleSkillSummary(data) {
+  const items = data.items || [];
+  const active = items.filter((item) => item.enabled && !item.completed);
+  const rows = active.length ? active.map((item) => `
+    <div class="skill-tool-row schedule-summary-row">
+      <div>
+        <strong>${escapeHtml(item.task || "Untitled reminder")}</strong>
+        <span>${escapeHtml(item.when_label || "")}</span>
+      </div>
+      <b class="${item.priority === "urgent" ? "warn" : "ready"}">${escapeHtml(item.priority || "routine")}</b>
+      <button class="task-delete-mini" type="button" data-schedule-delete="${escapeHtml(scheduleDraftKey(item))}" title="Delete reminder">×</button>
+    </div>
+  `).join("") : `
+    <div class="skill-empty-settings">
+      <strong>No active reminders</strong>
+      <span>When this persona schedules reminders, they will appear here.</span>
+    </div>
+  `;
+  return `
+    <div class="skill-tool-card">
+      <div class="skill-garden-head">
+        <span>Reminder list</span>
+        <strong>${escapeHtml(String(data.active_count || active.length || 0))} active</strong>
+      </div>
+      <div class="skill-setting-summary">
+        <div><span>Active</span><strong>${escapeHtml(String(data.active_count || active.length || 0))}</strong></div>
+        <div><span>Completed</span><strong>${escapeHtml(String(data.completed_count || 0))}</strong></div>
+      </div>
+      <div class="skill-tool-list task-list-scroll">${rows}</div>
+    </div>
+  `;
+}
+
+function renderScheduleDraftPanels() {
+  const node = el("skillScheduleSummary");
+  if (!node) return;
+  const active = state.scheduleDrafts.filter((item) => item.enabled && !item.completed && !item.deleted);
+  const completedCount = state.scheduleDrafts.filter((item) => item.completed && !item.deleted).length;
+  node.innerHTML = renderScheduleSkillSummary({
+    active_count: active.length,
+    completed_count: completedCount,
+    items: active,
+  });
+  wireScheduleSummaryControls(node);
+  syncScheduleSaveButton();
+}
+
+function normalizeScheduleDraft(item) {
+  return {
+    id: item.id || "",
+    temp_id: item.temp_id || "",
+    task: item.task || "",
+    short_task: item.short_task || item.task || "",
+    priority: item.priority || "routine",
+    enabled: item.enabled !== false,
+    completed: Boolean(item.completed),
+    schedule_type: item.schedule_type || "once",
+    when_label: item.when_label || "",
+    when: item.when || "",
+    deleted: Boolean(item.deleted),
+  };
+}
+
+function scheduleDraftKey(item) {
+  return item.id ? `id:${item.id}` : `tmp:${item.temp_id || ""}`;
+}
+
+function findScheduleDraft(key) {
+  return state.scheduleDrafts.find((item) => scheduleDraftKey(item) === key);
+}
+
+function scheduleDraftPayload(items) {
+  return items
+    .filter((item) => !item.deleted && item.enabled && !item.completed)
+    .map((item) => {
+      const payload = {
+        task: item.task || "",
+        priority: item.priority || "routine",
+      };
+      if (item.id) {
+        payload.id = item.id;
+      } else {
+        payload.when = item.when || "";
+      }
+      return payload;
+    });
+}
+
+function scheduleDraftDirty() {
+  return JSON.stringify(scheduleDraftPayload(state.scheduleDrafts)) !== JSON.stringify(scheduleDraftPayload(state.scheduleOriginals));
+}
+
+function syncScheduleSaveButton() {
+  const save = el("skillDoneBtn");
+  if (!save || state.currentSkill !== "schedule") return;
+  save.textContent = "Save";
+  save.disabled = !scheduleDraftDirty();
+}
+
+function wireScheduleSummaryControls(root) {
+  root.querySelectorAll("[data-schedule-delete]").forEach((button) => {
+    button.addEventListener("click", () => { void deleteReminderFromSkillEditor(button.dataset.scheduleDelete); });
+  });
+}
+
+function wireScheduleSkillEditor() {
+  el("scheduleMode")?.addEventListener("change", syncScheduleFields);
+  document.querySelectorAll(".schedule-add-btn").forEach((button) => {
+    button.addEventListener("click", () => { void addReminderFromSkillEditor(); });
+  });
+  [
+    "scheduleTaskText",
+    "scheduleDate",
+    "scheduleOnceTime",
+    "scheduleTime",
+    "scheduleMonthday",
+    "scheduleYearDate",
+  ].forEach((id) => {
+    el(id)?.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" || event.shiftKey || event.ctrlKey || event.metaKey || event.altKey) return;
+      event.preventDefault();
+      void addReminderFromSkillEditor();
+    });
+    el(id)?.addEventListener("input", syncSchedulePreview);
+  });
+  ["scheduleWeekday"].forEach((id) => {
+    el(id)?.addEventListener("change", syncSchedulePreview);
+  });
+  syncScheduleFields();
+}
+
+function syncScheduleFields() {
+  const mode = el("scheduleMode")?.value || "once";
+  el("scheduleOnceFields")?.classList.toggle("hidden", mode !== "once");
+  el("scheduleRecurringFields")?.classList.toggle("hidden", mode === "once");
+  el("scheduleWeekdayField")?.classList.toggle("hidden", mode !== "weekly");
+  el("scheduleMonthdayField")?.classList.toggle("hidden", mode !== "monthly");
+  el("scheduleYearDateField")?.classList.toggle("hidden", mode !== "yearly");
+  syncSchedulePreview();
+}
+
+function scheduleWhenFromFields() {
+  const mode = el("scheduleMode")?.value || "once";
+  if (mode === "once") {
+    const dateValue = text(el("scheduleDate")?.value).trim();
+    const timeValue = text(el("scheduleOnceTime")?.value).trim();
+    if (!dateValue || !timeValue) return "";
+    return `${dateValue} ${timeValue}`;
+  }
+  const timeValue = text(el("scheduleTime")?.value).trim();
+  if (!timeValue) return "";
+  if (mode === "daily") return `daily ${timeValue}`;
+  if (mode === "weekly") return `weekly ${el("scheduleWeekday")?.value || "monday"} ${timeValue}`;
+  if (mode === "monthly") return `monthly ${Number(el("scheduleMonthday")?.value || 1)} ${timeValue}`;
+  if (mode === "yearly") {
+    const yearly = scheduleYearMonthDay();
+    if (!yearly) return "";
+    return `yearly ${yearly.monthName} ${yearly.day} ${timeValue}`;
+  }
+  return "";
+}
+
+function scheduleYearMonthDay() {
+  const dateValue = text(el("scheduleYearDate")?.value).trim();
+  if (!dateValue) return null;
+  const parts = dateValue.split("-");
+  if (parts.length < 3) return null;
+  const monthIndex = Number(parts[1]) - 1;
+  const day = Number(parts[2]);
+  const months = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+  if (monthIndex < 0 || monthIndex >= months.length || !day) return null;
+  return {
+    monthName: months[monthIndex],
+    monthLabel: titleCase(months[monthIndex]),
+    day,
+  };
+}
+
+function schedulePreviewText() {
+  const mode = el("scheduleMode")?.value || "once";
+  if (mode === "once") {
+    const dateValue = text(el("scheduleDate")?.value).trim();
+    const timeValue = text(el("scheduleOnceTime")?.value).trim();
+    if (!dateValue && !timeValue) return "Choose a date and time for this one-time reminder.";
+    if (!dateValue) return "Choose a calendar date.";
+    if (!timeValue) return "Choose a local time.";
+    return `Runs once on ${dateValue} at ${timeValue}.`;
+  }
+  const timeValue = text(el("scheduleTime")?.value).trim();
+  if (!timeValue) return "Choose a local time for this recurring reminder.";
+  if (mode === "daily") return `Repeats daily at ${timeValue}.`;
+  if (mode === "weekly") {
+    const day = titleCase(el("scheduleWeekday")?.value || "monday");
+    return `Repeats every ${day} at ${timeValue}.`;
+  }
+  if (mode === "monthly") {
+    const day = Number(el("scheduleMonthday")?.value || 1);
+    return `Repeats monthly on day ${day} at ${timeValue}.`;
+  }
+  const yearly = scheduleYearMonthDay();
+  if (!yearly) return "Choose the yearly month and day. The year is ignored.";
+  return `Repeats every ${yearly.monthLabel} ${yearly.day} at ${timeValue}.`;
+}
+
+function titleCase(value) {
+  const raw = text(value).trim();
+  return raw ? raw.charAt(0).toUpperCase() + raw.slice(1) : "";
+}
+
+function syncSchedulePreview() {
+  const preview = el("schedulePreview");
+  if (preview) preview.textContent = schedulePreviewText();
+}
+
+async function addReminderFromSkillEditor() {
+  if (!state.current) return;
+  const task = text(el("scheduleTaskText")?.value).trim();
+  const when = scheduleWhenFromFields();
+  const priority = el("schedulePriority")?.value || "routine";
+  if (!task) {
+    setScheduleSkillNotice("Reminder text is required.");
+    return;
+  }
+  if (!when) {
+    const mode = el("scheduleMode")?.value || "once";
+    setScheduleSkillNotice(
+      mode === "once"
+        ? "Reminder date and time are required."
+        : mode === "yearly"
+          ? "Reminder time and yearly date are required."
+        : "Reminder time is required."
+    );
+    return;
+  }
+  state.scheduleDrafts.push(normalizeScheduleDraft({
+    temp_id: `new-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    task,
+    short_task: task,
+    priority,
+    enabled: true,
+    completed: false,
+    schedule_type: el("scheduleMode")?.value === "once" ? "once" : "recurring",
+    when,
+    when_label: when,
+  }));
+  if (el("scheduleTaskText")) el("scheduleTaskText").value = "";
+  if (el("scheduleDate")) el("scheduleDate").value = "";
+  if (el("scheduleOnceTime")) el("scheduleOnceTime").value = "";
+  renderScheduleDraftPanels();
+  syncSchedulePreview();
+  setScheduleSkillNotice("Reminder staged. Press Save to write it to the database.");
+}
+
+async function deleteReminderFromSkillEditor(reminderId) {
+  if (!state.current || !reminderId) return;
+  const ok = await showConfirm(
+    "Delete this reminder?",
+    "This removes the reminder from the draft. It will not touch the database until you press Save.",
+    "Delete",
+    "danger"
+  );
+  if (!ok) return;
+  const reminder = findScheduleDraft(reminderId);
+  if (!reminder) return;
+  reminder.deleted = true;
+  renderScheduleDraftPanels();
+  setScheduleSkillNotice("Reminder removed from draft. Press Save to confirm.");
+}
+
+async function saveReminderDrafts() {
+  if (!state.current || state.current.name === "__base__") return false;
+  if (!scheduleDraftDirty()) {
+    setScheduleSkillNotice("No reminder changes to save.");
+    return false;
+  }
+  const result = await api().save_reminders(state.current.name, scheduleDraftPayload(state.scheduleDrafts));
+  if (!result.ok) {
+    setScheduleSkillNotice(result.error || "Could not save reminders.", state.scheduleUndoStamp);
+    return false;
+  }
+  state.scheduleUndoStamp = result.undo_stamp || "";
+  state.scheduleOriginals = (result.items || []).map(normalizeScheduleDraft);
+  state.scheduleDrafts = (result.items || []).map(normalizeScheduleDraft);
+  renderScheduleDraftPanels();
+  setScheduleSkillNotice(
+    result.running
+      ? "Reminders saved. Running persona can see them next time it lists reminders."
+      : "Reminders saved.",
+    state.scheduleUndoStamp
+  );
+  return true;
+}
+
+async function undoScheduleDbEdit() {
+  if (!state.current || !state.scheduleUndoStamp) return;
+  const stamp = state.scheduleUndoStamp;
+  const result = await api().restore_db_before_image(state.current.name, stamp);
+  if (!result.ok) {
+    setScheduleSkillNotice(result.error || "Could not undo reminder edit.", stamp);
+    return;
+  }
+  state.scheduleUndoStamp = "";
+  await loadScheduleSkillSummary();
+  setScheduleSkillNotice("Reminder edit undone.");
+}
+
+function setScheduleSkillNotice(message, undoStamp = "") {
+  const notice = el("skillScheduleNotice");
+  if (!notice) return;
+  notice.innerHTML = `
+    <span>${escapeHtml(message || "")}</span>
+    ${undoStamp ? `<button class="notice-undo-btn" type="button">Undo</button>` : ""}`;
+  notice.classList.toggle("hidden", !message);
+  const button = notice.querySelector(".notice-undo-btn");
+  if (button) button.addEventListener("click", () => { void undoScheduleDbEdit(); });
 }
 
 async function loadTasksSkillSummary() {

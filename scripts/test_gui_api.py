@@ -1528,6 +1528,75 @@ channels:
         assert ".env" in backup["files"]
 
 
+def test_gui_api_scheduler_add_delete_and_undo():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        persona_dir = root / "personas" / "demo"
+        persona_dir.mkdir(parents=True)
+        (root / "config.yaml").write_text("provider:\n  type: local\n", encoding="utf-8")
+        (root / "persona.yaml").write_text("name: Base\n", encoding="utf-8")
+        (persona_dir / "config.yaml").write_text("", encoding="utf-8")
+        (persona_dir / "persona.yaml").write_text("name: Demo\n", encoding="utf-8")
+
+        api = PulseAPI(root)
+        added = api.add_reminder("demo", {
+            "task": "Stretch before bed",
+            "when": "daily 20:00",
+            "priority": "routine",
+        })
+        assert added["ok"] is True
+        assert added["item"]["schedule_type"] == "recurring"
+        assert added["item"]["when_label"] == "daily at 20:00"
+
+        listed = api.list_reminders("demo", include_completed=True)
+        assert listed["ok"] is True
+        assert listed["active_count"] == 1
+        reminder_id = listed["items"][0]["id"]
+
+        deleted = api.delete_reminder("demo", reminder_id)
+        assert deleted["ok"] is True
+        assert api.list_reminders("demo")["active_count"] == 0
+
+        restored_delete = api.restore_db_before_image("demo", deleted["undo_stamp"])
+        assert restored_delete["ok"] is True
+        assert api.list_reminders("demo")["active_count"] == 1
+
+        restored_add = api.restore_db_before_image("demo", added["undo_stamp"])
+        assert restored_add["ok"] is True
+        assert api.list_reminders("demo")["active_count"] == 0
+
+
+def test_gui_api_scheduler_save_snapshot_and_undo():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        persona_dir = root / "personas" / "demo"
+        persona_dir.mkdir(parents=True)
+        (root / "config.yaml").write_text("provider:\n  type: local\n", encoding="utf-8")
+        (root / "persona.yaml").write_text("name: Base\n", encoding="utf-8")
+        (persona_dir / "config.yaml").write_text("", encoding="utf-8")
+        (persona_dir / "persona.yaml").write_text("name: Demo\n", encoding="utf-8")
+
+        api = PulseAPI(root)
+        saved = api.save_reminders("demo", [{
+            "task": "Water the garden",
+            "when": "weekly monday 09:30",
+            "priority": "creative",
+        }])
+        assert saved["ok"] is True
+        assert saved["changed"] is True
+        listed = api.list_reminders("demo", include_completed=True)
+        assert listed["active_count"] == 1
+        assert listed["items"][0]["when_label"] == "weekly on Monday at 09:30"
+
+        cleared = api.save_reminders("demo", [])
+        assert cleared["ok"] is True
+        assert api.list_reminders("demo")["active_count"] == 0
+
+        restored = api.restore_db_before_image("demo", cleared["undo_stamp"])
+        assert restored["ok"] is True
+        assert api.list_reminders("demo")["active_count"] == 1
+
+
 if __name__ == "__main__":
     test_gui_api_read_only_persona_loading()
     test_gui_api_garden_summary_reads_grid_and_memory_tooltips()
@@ -1546,4 +1615,6 @@ if __name__ == "__main__":
     test_gui_api_core_anchor_read_and_write()
     test_gui_api_model_file_path_validation()
     test_gui_api_secrets_preserve_env_and_validate_keys()
+    test_gui_api_scheduler_add_delete_and_undo()
+    test_gui_api_scheduler_save_snapshot_and_undo()
     print("[OK] GUI API")

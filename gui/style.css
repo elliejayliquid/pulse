@@ -1965,6 +1965,10 @@ textarea {
   padding-right: 4px;
 }
 
+#skillScheduleSummary .skill-tool-list.task-list-scroll {
+  max-height: 184px;
+}
+
 .skill-tool-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -2031,6 +2035,13 @@ textarea {
 
 .task-summary-row {
   grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 10px;
+  padding: 8px 10px;
+  min-height: 54px;
+}
+
+.schedule-summary-row {
+  grid-template-columns: minmax(0, 1fr) auto auto;
   gap: 10px;
   padding: 8px 10px;
   min-height: 54px;
@@ -2129,7 +2140,8 @@ textarea {
   text-transform: uppercase;
 }
 
-.task-editor-field input {
+.task-editor-field input,
+.task-editor-field select {
   min-width: 0;
   min-height: 42px;
   padding: 0 12px;
@@ -2142,9 +2154,71 @@ textarea {
   transition: border-color 140ms ease, background 140ms ease;
 }
 
-.task-editor-field input:focus {
+.task-editor-field input:focus,
+.task-editor-field select:focus {
   border-color: var(--accent);
   background: #0f0f12;
+}
+
+.schedule-add-row {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.schedule-detail-block {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 10px;
+  min-height: 96px;
+  align-content: start;
+}
+
+.schedule-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.schedule-time-field {
+  grid-column: 1;
+}
+
+.schedule-add-btn {
+  grid-column: 1 / -1;
+}
+
+.schedule-preview {
+  min-height: 18px;
+  margin: 0 2px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.schedule-add-head {
+  align-items: start;
+  gap: 10px;
+}
+
+.schedule-head-actions {
+  display: grid;
+  justify-items: end;
+  gap: 4px;
+}
+
+.schedule-local-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  color: var(--accent-soft);
+  font: 700 10px/1.25 var(--body);
+}
+
+.schedule-local-status .notice-undo-btn {
+  min-height: 22px;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-size: 10px;
 }
 
 .task-add-btn {
