@@ -55,11 +55,11 @@ class TasksSkill(BaseSkill):
                 "type": "function",
                 "function": {
                     "name": "complete_task",
-                    "description": "Mark a task as completed using its ID. When your human says they finished or done something that matches a task, call this tool to check it off!",
+                    "description": "Mark a pending task as completed using the Pending task number shown by list_tasks. When your human says they finished or done something that matches a task, call this tool to check it off!",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "task_id": {"type": "integer", "description": "The ID of the task to complete."}
+                            "task_id": {"type": "integer", "description": "The Pending task number shown by list_tasks."}
                         },
                         "required": ["task_id"]
                     }
@@ -69,11 +69,11 @@ class TasksSkill(BaseSkill):
                 "type": "function",
                 "function": {
                     "name": "delete_task",
-                    "description": "Delete a single task by ID without marking it as completed. Use this to remove stale, mistaken, or unwanted tasks cleanly.",
+                    "description": "Delete a single pending task by the Pending task number shown by list_tasks without marking it as completed. Use this to remove stale, mistaken, or unwanted tasks cleanly.",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "task_id": {"type": "integer", "description": "The ID of the task to delete."}
+                            "task_id": {"type": "integer", "description": "The Pending task number shown by list_tasks."}
                         },
                         "required": ["task_id"]
                     }
@@ -83,11 +83,11 @@ class TasksSkill(BaseSkill):
                 "type": "function",
                 "function": {
                     "name": "list_tasks",
-                    "description": "List all current tasks, showing their status and IDs. IMPORTANT: Always show the full task list to the user — do not summarize or omit tasks.",
+                    "description": "List current tasks. Pending tasks are numbered for complete_task/delete_task; completed tasks are shown separately for reference. IMPORTANT: Always show the full task list to the user - do not summarize or omit tasks.",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "show_completed": {"type": "boolean", "description": "Whether to include completed tasks."}
+                            "show_completed": {"type": "boolean", "description": "Whether to include completed tasks. Defaults to true."}
                         }
                     }
                 }
@@ -118,48 +118,51 @@ class TasksSkill(BaseSkill):
                 for existing in pending:
                     if self._tasks_similar(description, existing["description"]):
                         return (
-                            f"Similar task already exists: [{existing['id']}] "
+                            f"Similar task already exists: "
                             f"{existing['description']} — not adding duplicate."
                         )
 
-                task_id = db.add_task(description, list_name)
-                return f"Task added: [{task_id}] {description}"
+                db.add_task(description, list_name)
+                return f"Task added: {description}"
 
             elif tool_name == "complete_task":
-                task_id = arguments["task_id"]
-                tasks = db.get_tasks()
-                target = next((t for t in tasks if t["id"] == task_id), None)
+                task_number = arguments["task_id"]
+                pending = db.get_tasks(completed=False)
+                target = self._resolve_visible_task(pending, task_number)
                 if not target:
-                    return f"Task with ID {task_id} not found."
+                    tasks = db.get_tasks()
+                    target = self._resolve_visible_task(tasks, task_number)
+                if not target:
+                    return f"Task number {task_number} not found. Use list_tasks to see current task numbers."
 
                 if target["completed"]:
-                    return f"Task {task_id} is already completed."
+                    return f"Task is already completed: {target['description']}"
 
-                db.complete_task(task_id)
+                db.complete_task(target["id"])
                 return f"Task completed: {target['description']}."
 
             elif tool_name == "delete_task":
-                task_id = arguments["task_id"]
-                tasks = db.get_tasks()
-                target = next((t for t in tasks if t["id"] == task_id), None)
+                task_number = arguments["task_id"]
+                pending = db.get_tasks(completed=False)
+                target = self._resolve_visible_task(pending, task_number)
                 if not target:
-                    return f"Task with ID {task_id} not found."
+                    tasks = db.get_tasks()
+                    target = self._resolve_visible_task(tasks, task_number)
+                if not target:
+                    return f"Task number {task_number} not found. Use list_tasks to see current task numbers."
 
-                db.delete_task(task_id)
-                return f"Task deleted: [{task_id}] {target['description']}."
+                db.delete_task(target["id"])
+                return f"Task deleted: {target['description']}."
 
             elif tool_name == "list_tasks":
-                show_completed = arguments.get("show_completed", False)
-                tasks = db.get_tasks(completed=None if show_completed else False)
+                show_completed = arguments.get("show_completed", True)
+                pending = db.get_tasks(completed=False)
+                completed = db.get_tasks(completed=True) if show_completed else []
 
-                if not tasks:
+                if not pending and not completed:
                     return "The task list is empty."
 
-                output = "Current Tasks:\n"
-                for t in tasks:
-                    status = "[x]" if t["completed"] else "[ ]"
-                    output += f"{t['id']}. {status} {t['description']} ({t['list']})\n"
-                return output
+                return self._format_task_list(pending, completed)
 
             elif tool_name == "clear_tasks":
                 completed = db.get_tasks(completed=True)
@@ -182,7 +185,7 @@ class TasksSkill(BaseSkill):
                     continue
                 if self._tasks_similar(description, existing["description"]):
                     return (
-                        f"Similar task already exists: [{existing['id']}] "
+                        f"Similar task already exists: "
                         f"{existing['description']} — not adding duplicate."
                     )
 
@@ -196,43 +199,44 @@ class TasksSkill(BaseSkill):
             data["tasks"].append(new_task)
             data["next_id"] += 1
             self._write_tasks(data)
-            return f"Task added: [{new_task['id']}] {new_task['description']}"
+            return f"Task added: {new_task['description']}"
 
         elif tool_name == "complete_task":
-            task_id = arguments["task_id"]
-            for task in data["tasks"]:
-                if task["id"] == task_id:
-                    if task["completed"]:
-                        return f"Task {task_id} is already completed."
-                    task["completed"] = True
-                    task["completed_at"] = datetime.now().isoformat()
-                    self._write_tasks(data)
-                    return f"Task completed: {task['description']}."
-            return f"Task with ID {task_id} not found."
+            task_number = arguments["task_id"]
+            pending = [t for t in data["tasks"] if not t["completed"]]
+            task = self._resolve_visible_task(pending, task_number)
+            if not task:
+                task = self._resolve_visible_task(data["tasks"], task_number)
+            if not task:
+                return f"Task number {task_number} not found. Use list_tasks to see current task numbers."
+            if task["completed"]:
+                return f"Task is already completed: {task['description']}"
+            task["completed"] = True
+            task["completed_at"] = datetime.now().isoformat()
+            self._write_tasks(data)
+            return f"Task completed: {task['description']}."
 
         elif tool_name == "delete_task":
-            task_id = arguments["task_id"]
-            for index, task in enumerate(data["tasks"]):
-                if task["id"] == task_id:
-                    removed = data["tasks"].pop(index)
-                    self._write_tasks(data)
-                    return f"Task deleted: [{task_id}] {removed['description']}."
-            return f"Task with ID {task_id} not found."
+            task_number = arguments["task_id"]
+            pending = [t for t in data["tasks"] if not t["completed"]]
+            target = self._resolve_visible_task(pending, task_number)
+            if not target:
+                target = self._resolve_visible_task(data["tasks"], task_number)
+            if not target:
+                return f"Task number {task_number} not found. Use list_tasks to see current task numbers."
+            data["tasks"] = [task for task in data["tasks"] if task["id"] != target["id"]]
+            self._write_tasks(data)
+            return f"Task deleted: {target['description']}."
 
         elif tool_name == "list_tasks":
-            show_completed = arguments.get("show_completed", False)
-            tasks = data["tasks"]
-            if not show_completed:
-                tasks = [t for t in tasks if not t["completed"]]
+            show_completed = arguments.get("show_completed", True)
+            pending = [t for t in data["tasks"] if not t["completed"]]
+            completed = [t for t in data["tasks"] if t["completed"]] if show_completed else []
 
-            if not tasks:
+            if not pending and not completed:
                 return "The task list is empty."
 
-            output = "Current Tasks:\n"
-            for t in tasks:
-                status = "[x]" if t["completed"] else "[ ]"
-                output += f"{t['id']}. {status} {t['description']} ({t['list']})\n"
-            return output
+            return self._format_task_list(pending, completed)
 
         elif tool_name == "clear_tasks":
             before = len(data["tasks"])
@@ -242,6 +246,42 @@ class TasksSkill(BaseSkill):
             return f"Cleared {cleared} completed task(s)."
 
         return f"Unknown tool: {tool_name}"
+
+    @staticmethod
+    def _resolve_visible_task(tasks: list[dict], task_number: int) -> dict | None:
+        """Resolve the 1-based display number from list_tasks.
+
+        If an old caller passes a raw DB/JSON ID that is outside the current
+        display range, fall back to that ID for compatibility.
+        """
+        try:
+            number = int(task_number)
+        except (TypeError, ValueError):
+            return None
+        if number <= 0:
+            return None
+        if number <= len(tasks):
+            return tasks[number - 1]
+        return next((task for task in tasks if task.get("id") == number), None)
+
+    @staticmethod
+    def _format_task_list(pending: list[dict], completed: list[dict]) -> str:
+        output = (
+            "Current Tasks (use Pending task numbers with complete_task/delete_task):\n"
+            "Pending:\n"
+        )
+        if pending:
+            for index, task in enumerate(pending, start=1):
+                output += f"{index}. [ ] {task['description']} ({task['list']})\n"
+        else:
+            output += "- none\n"
+
+        if completed:
+            output += "\nCompleted (for reference; not numbered for task actions):\n"
+            for task in completed:
+                output += f"- [x] {task['description']} ({task['list']})\n"
+
+        return output
 
     @staticmethod
     def _tasks_similar(a: str, b: str) -> bool:
