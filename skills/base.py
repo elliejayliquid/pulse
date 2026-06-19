@@ -24,6 +24,8 @@ class BaseSkill(ABC):
 
     name: str = ""
     description: str = ""          # one-line summary for search + prompt display
+    search_summary: str = ""       # optional friendlier summary for on-demand menus
+    search_examples: list[str] = [] # example phrases that should discover this skill
     aliases: list[str] = []        # search_tools hints, e.g. "reach out", "creative"
     categories: list[str] = []     # broad search groups, e.g. "social", "creative"
     always_loaded: bool = False    # True = all tools always in API calls

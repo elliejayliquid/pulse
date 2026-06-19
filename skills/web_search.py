@@ -15,6 +15,8 @@ logger = logging.getLogger(__name__)
 class WebSearchSkill(BaseSkill):
     name = "web_search"
     description = "Search the internet and fetch web page content"
+    search_summary = "Search the web, search images, or fetch web page content"
+    search_examples = ["search the web", "look up latest", "fetch this URL"]
     aliases = ["web", "internet", "search online", "look up", "latest", "news", "research"]
     categories = ["research", "web"]
 

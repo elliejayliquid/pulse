@@ -28,6 +28,8 @@ def _blob_to_vec(blob: bytes | None) -> np.ndarray | None:
 class StickerSkill(BaseSkill):
     name = "sticker"
     description = "Send mood-matched Telegram stickers"
+    search_summary = "Send or preview mood-matched Telegram stickers"
+    search_examples = ["send a sticker", "send something cute", "preview a reaction"]
     aliases = ["sticker", "emoji", "reaction", "mood", "affection", "send something cute", "reach out"]
     categories = ["social", "reach out", "creative"]
 

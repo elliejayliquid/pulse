@@ -142,6 +142,8 @@ def _write_markdown_entry(path: Path, meta: dict, content: str):
 class JournalSkill(BaseSkill):
     name = "journal"
     description = "Write, search, and manage structured self-reflection and identity entries"
+    search_summary = "Write, search, update, and browse structured reflection or identity notes"
+    search_examples = ["write in my journal", "reflect on this", "update identity notes"]
     aliases = ["journal", "reflect", "reflection", "identity", "diary", "write thoughts", "inner state", "housekeeping"]
     categories = ["reflection", "memory", "housekeeping"]
 

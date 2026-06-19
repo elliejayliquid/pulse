@@ -1059,10 +1059,14 @@ You decide when to lift the timeout — not the human."""
                 skill_menu = "\n".join(menu_lines) + "\n\n"
 
             if on_demand_manifest:
-                od_lines = ["## More skills (call search_tools to load)"]
+                od_lines = [
+                    "## More skills you can load with search_tools",
+                    "These skills are available now; their full tool definitions load only when needed.",
+                ]
                 for s in on_demand_manifest:
                     tags = f"; tags: {', '.join(s.get('categories', [])[:3])}" if s.get("categories") else ""
-                    od_lines.append(f"  {s['skill']}: {s['description']} ({s['tool_count']} tools{tags})")
+                    examples = f"; try: {', '.join(s.get('examples', [])[:2])}" if s.get("examples") else ""
+                    od_lines.append(f"  {s['skill']}: {s['description']} ({s['tool_count']} tools{tags}{examples})")
                 skill_menu += "\n".join(od_lines) + "\n\n"
 
             your_turn += f"\n{skill_menu}"
@@ -1081,10 +1085,11 @@ You decide when to lift the timeout — not the human."""
             "fails, report the failure instead of pretending it worked.\n\n"
             "\"silent\" means \"don't message "
             f"{self.user_name}\" — it does NOT mean \"don't do anything.\"\n\n"
-            "If the tool you need is not listed yet, call search_tools now with a plain-language "
-            "description of what you want. search_tools only loads tools; it does not "
-            "perform the action. After it returns, call one of the loaded tools in "
-            "this same turn before describing any result. "
+            "If the tool you need is in More skills, or you are not sure where it lives, "
+            "call search_tools now with the skill name or a plain-language description "
+            "of what you want. search_tools only loads tools; it does not perform the action. "
+            "After it returns, call one of the loaded tools in this same turn before "
+            "describing any result. "
             "Do not say you will check, post, speak, search, update, or make something later "
             "when you can use the tool now.\n\n"
             "If you used the speak tool, the voice note itself is the message. "
@@ -1145,10 +1150,14 @@ You decide when to lift the timeout — not the human."""
             skill_menu = "\n".join(menu_lines) + "\n"
 
         if on_demand_manifest:
-            od_lines = ["More skills (call search_tools to load):"]
+            od_lines = [
+                "More skills you can load with search_tools:",
+                "These skills are available now; their full tool definitions load only when needed.",
+            ]
             for s in on_demand_manifest:
                 tags = f"; tags: {', '.join(s.get('categories', [])[:3])}" if s.get("categories") else ""
-                od_lines.append(f"  {s['skill']}: {s['description']} ({s['tool_count']} tools{tags})")
+                examples = f"; try: {', '.join(s.get('examples', [])[:2])}" if s.get("examples") else ""
+                od_lines.append(f"  {s['skill']}: {s['description']} ({s['tool_count']} tools{tags}{examples})")
             skill_menu += "\n".join(od_lines) + "\n"
 
         conv_system += (
@@ -1169,9 +1178,10 @@ You decide when to lift the timeout — not the human."""
             "after the tool result comes back may you say what happened. If you did "
             "not call the tool, say plainly that you have not done it yet. If a tool "
             "fails, report the failure instead of pretending it worked.\n\n"
-            "If the tool you need is on-demand, call search_tools now, then use one of the "
-            "loaded tools in this same turn. search_tools only loads tools; it does not "
-            "perform the action. Do not tell the user you will check, post, speak, "
+            "If the tool you need is in More skills, or you are not sure where it lives, "
+            "call search_tools now with the skill name or a plain-language description, "
+            "then use one of the loaded tools in this same turn. search_tools only "
+            "loads tools; it does not perform the action. Do not tell the user you will check, post, speak, "
             "search, update, or make something later when you can do it now.\n\n"
             "IMPORTANT: Always respond to the user's MOST RECENT message below. "
             "Do not revisit or re-address topics from earlier in the conversation "

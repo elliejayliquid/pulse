@@ -41,6 +41,8 @@ def _blob_to_vec(blob: bytes | None) -> np.ndarray | None:
 class MemorySkill(BaseSkill):
     name = "memory"
     description = "Save, recall, and search persistent memories, facts, and conversation history"
+    search_summary = "Browse, update, and inspect memory or conversation history beyond quick save/search"
+    search_examples = ["browse memories", "update a memory", "search past conversations"]
     aliases = ["remember", "recall", "memory", "memories", "conversation history", "legacy chat", "housekeeping"]
     categories = ["memory", "reflection", "housekeeping"]
     always_tools = ["save_memory", "search_memory"]

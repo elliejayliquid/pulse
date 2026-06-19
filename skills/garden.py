@@ -53,6 +53,8 @@ ALL_BLOOMS = [
 class GardenSkill(BaseSkill):
     name = "garden"
     description = "Tend an emotional garden — plant, water, and grow memory flowers"
+    search_summary = "Tend the emotional garden by planting, watering, pruning, and viewing memory flowers"
+    search_examples = ["tend the garden", "water flowers", "plant a memory"]
     aliases = ["garden", "flowers", "plant", "water", "tend", "emotional garden", "housekeeping"]
     categories = ["creative", "reflection", "housekeeping"]
 

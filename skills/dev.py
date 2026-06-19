@@ -76,6 +76,8 @@ class DevSkill(BaseSkill):
 
     name = "dev"
     description = "Read, write, search, and manage Pulse skill code for self-improvement"
+    search_summary = "Read, search, edit, validate, and manage Pulse skill code"
+    search_examples = ["read source", "search code", "improve Pulse"]
     aliases = ["code", "coding", "programming", "self improvement", "improve pulse", "read source"]
     categories = ["development"]
     workflow = "list_skills → read_source → search_code → write_skill → dev_journal_write"

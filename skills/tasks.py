@@ -12,6 +12,8 @@ from skills.base import BaseSkill
 class TasksSkill(BaseSkill):
     name = "tasks"
     description = "Manage persistent to-do lists with completion tracking"
+    search_summary = "Add, list, complete, delete, and clean up persistent to-do items"
+    search_examples = ["manage tasks", "add a todo", "check off a task"]
     aliases = ["todo", "to do", "task list", "checklist", "track tasks", "housekeeping"]
     categories = ["planning", "housekeeping"]
 

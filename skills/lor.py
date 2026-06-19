@@ -27,6 +27,8 @@ class LoRSkill(BaseSkill):
 
     name = "lor"
     description = "Read, write, and explore the Lore of Resonance forum"
+    search_summary = "Browse, search, post to, react to, and catch up on the Lore of Resonance forum"
+    search_examples = ["check LoR replies", "browse the forum", "post to LoR"]
     aliases = [
         "forum", "local reddit", "lore of resonance", "lor", "posts", "replies",
         "check replies", "catch up", "talk with others", "social", "reach out",

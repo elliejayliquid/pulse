@@ -50,6 +50,8 @@ TARGET_PX = 384  # Upscaled size for Telegram/human viewing
 class PaintSkill(BaseSkill):
     name = "paint"
     description = "Create tiny pixel art on a 16x16 emoji grid canvas"
+    search_summary = "Create and finish tiny pixel art on a 16x16 emoji grid canvas"
+    search_examples = ["paint a picture", "draw pixel art", "make something creative"]
     aliases = ["paint", "draw", "art", "picture", "image", "creative", "make something", "pixel art"]
     categories = ["creative", "art"]
     workflow = "paint_start → paint_set (place colors) → paint_view (review) → paint_set → paint_finish"

@@ -142,7 +142,6 @@ class SkillRegistry:
     def get_skill_summary(self) -> list[dict]:
         """Compact summary of always-loaded skills and their tool names."""
         summary = []
-        seen_tools = set()
         for name, skill in self.skills.items():
             tool_names = [
                 t.get("function", {}).get("name", "?")
@@ -153,6 +152,28 @@ class SkillRegistry:
             if tool_names:
                 summary.append({"skill": name, "tools": tool_names})
         return summary
+
+    def _skill_display_summary(self, name: str, skill: BaseSkill) -> str:
+        """Return a compact, model-facing summary for a skill."""
+        summary = (getattr(skill, "search_summary", "") or skill.description or "").strip()
+        if summary:
+            return summary
+
+        tool_descriptions = [
+            (td.get("function", {}).get("description") or "").strip()
+            for td in self._on_demand_tools.get(name, [])
+        ]
+        tool_descriptions = [desc for desc in tool_descriptions if desc]
+        if tool_descriptions:
+            return tool_descriptions[0].split(".")[0].strip()
+        return f"Load tools from the {name} skill"
+
+    def _skill_search_examples(self, skill: BaseSkill) -> list[str]:
+        """Return short example queries for menus and search scoring."""
+        examples = list(getattr(skill, "search_examples", []) or [])
+        if not examples:
+            examples = list(getattr(skill, "aliases", []) or [])[:3]
+        return [str(example).strip() for example in examples if str(example).strip()]
 
     def get_on_demand_manifest(self) -> list[dict]:
         """Compact summaries for prompt injection."""
@@ -165,8 +186,9 @@ class SkillRegistry:
             ]
             manifest.append({
                 "skill": name,
-                "description": skill.description or name,
+                "description": self._skill_display_summary(name, skill),
                 "categories": list(getattr(skill, "categories", []) or []),
+                "examples": self._skill_search_examples(skill),
                 "tool_count": tool_count,
                 "tools": tool_names,
             })
@@ -175,6 +197,8 @@ class SkillRegistry:
     # ── search_tools meta-tool ──────────────────────────────────
 
     def _skill_search_text(self, name: str, skill: BaseSkill) -> str:
+        summary = getattr(skill, "search_summary", "") or ""
+        examples = " ".join(self._skill_search_examples(skill))
         aliases = " ".join(getattr(skill, "aliases", []) or [])
         categories = " ".join(getattr(skill, "categories", []) or [])
         tool_text = " ".join(
@@ -184,7 +208,7 @@ class SkillRegistry:
             ])
             for td in self._on_demand_tools.get(name, [])
         )
-        return f"{name} {skill.description or ''} {aliases} {categories} {tool_text}".lower()
+        return f"{name} {skill.description or ''} {summary} {examples} {aliases} {categories} {tool_text}".lower()
 
     def _keyword_score(self, query: str, name: str, skill: BaseSkill) -> float:
         query_lower = query.lower()
@@ -217,29 +241,43 @@ class SkillRegistry:
             elif alias_terms and alias_terms & query_terms:
                 score += 2.0 * len(alias_terms & query_terms)
 
+        for example in self._skill_search_examples(skill):
+            example_lower = example.lower()
+            example_terms = set(_terms(example_lower))
+            if example_lower and example_lower in query_lower:
+                score += 10.0
+            elif example_terms and example_terms <= query_terms:
+                score += 7.0
+            elif example_terms and example_terms & query_terms:
+                score += 2.0 * len(example_terms & query_terms)
+
         score += float(len(query_terms & searchable_terms))
         return score
 
     def _search_tools_definition(self) -> dict:
         manifest = self.get_on_demand_manifest()
-        skill_list = ", ".join(
-            f"{s['skill']} ({s['tool_count']} tools"
-            + (f"; {', '.join(s['categories'][:3])}" if s.get("categories") else "")
+        skill_list = "; ".join(
+            f"{s['skill']}: {s['description']} ({s['tool_count']} tools"
+            + (f"; try: {', '.join(s.get('examples', [])[:2])}" if s.get("examples") else "")
             + ")"
             for s in manifest
         )
+        examples = []
+        for skill in manifest:
+            examples.extend(skill.get("examples", [])[:1])
+        example_text = ", ".join(examples[:8]) or "search the web, send a sticker, write in my journal"
         return {
             "type": "function",
             "function": {
                 "name": "search_tools",
                 "description": (
-                    "Load additional tools by describing what you need. "
-                    "Available: " + skill_list + ". "
-                    "Describe what you want to do and the matching tools "
-                    "will be added. search_tools only loads tools; it does not "
-                    "perform the requested action. If tools are loaded, call the "
-                    "appropriate loaded tool in this same turn before describing "
-                    "any result."
+                    "Load additional tools that are available but not shown in full yet. "
+                    "Use this whenever a task may need an on-demand skill. "
+                    "Available skills: " + skill_list + ". "
+                    "After this returns, matching tools are available immediately "
+                    "in this same turn. search_tools opens the toolbox; it does "
+                    "not perform the requested action. Next, call the loaded tool "
+                    "that actually does the work before describing any result."
                 ),
                 "parameters": {
                     "type": "object",
@@ -247,10 +285,8 @@ class SkillRegistry:
                         "query": {
                             "type": "string",
                             "description": (
-                                "What you want to do, e.g. 'paint a picture', "
-                                "'search the web', 'write in my journal', "
-                                "'send a sticker', 'check LoR replies', "
-                                "'reach out', 'creative tools', 'manage my tasks'"
+                                "Name a skill or describe what you want to do. "
+                                "Examples: " + example_text
                             ),
                         },
                     },
@@ -266,7 +302,10 @@ class SkillRegistry:
         result_text to feed back to the model.
         """
         if not query.strip():
-            return [], "Please describe what you want to do."
+            return [], (
+                "search_tools is ready to help. Describe the capability you need "
+                "or name one of the available skills."
+            )
 
         scored: dict[str, float] = {}
 
@@ -295,7 +334,11 @@ class SkillRegistry:
         matched_skills = [name for name, _ in ranked[:top_k]]
 
         if not matched_skills:
-            return [], "No matching tools found. Try a different description."
+            available = ", ".join(self._on_demand_skills.keys())
+            return [], (
+                "No matching tools found yet. Try a skill name or a plainer "
+                f"description of the task. Available on-demand skills: {available}."
+            )
 
         tools = []
         result_parts = []
@@ -304,15 +347,17 @@ class SkillRegistry:
             tools.extend(skill_tools)
             skill = self._on_demand_skills[skill_name]
             tool_names = [td["function"]["name"] for td in skill_tools]
-            result_parts.append(f"{skill_name}: {', '.join(tool_names)}")
+            summary = self._skill_display_summary(skill_name, skill)
+            result_parts.append(f"- {skill_name}: {summary}")
+            result_parts.append(f"  Tools: {', '.join(tool_names)}")
             if skill.workflow:
                 result_parts.append(f"  Workflow: {skill.workflow}")
 
         result_text = (
-            f"Loaded {len(tools)} tools. These tools are available now. "
-            "No requested action has been performed yet; search_tools only loads tools. "
-            "If you intended to do something, call the appropriate loaded tool now "
-            "in this same turn before describing any result.\n" + "\n".join(result_parts)
+            f"Loaded {len(tools)} tools. They are available now in this same turn. "
+            "No requested action has been performed yet; search_tools only opens "
+            "access to tools. If you intended to act, call the appropriate loaded "
+            "tool now before describing any result.\n" + "\n".join(result_parts)
         )
         return tools, result_text
 
