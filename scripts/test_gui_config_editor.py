@@ -411,6 +411,27 @@ def test_config_editor_rejects_unknown_fields():
             assert result["ok"] is True
 
         result = api.preview_persona_save("demo", {
+            "provider": {
+                "cache_ttl": "1h",
+                "cache_automatic": True,
+                "cache_diagnostics": False,
+            },
+        })
+        assert result["ok"] is True
+
+        result = api.preview_persona_save("demo", {
+            "provider": {"cache_ttl": "2h"},
+        })
+        assert result["ok"] is False
+        assert "Anthropic Cache TTL" in result["error"]
+
+        result = api.preview_persona_save("demo", {
+            "provider": {"cache_diagnostics": "true"},
+        })
+        assert result["ok"] is False
+        assert "Anthropic Cache Diagnostics" in result["error"]
+
+        result = api.preview_persona_save("demo", {
             "model": {"temperature": -0.1},
         })
         assert result["ok"] is False

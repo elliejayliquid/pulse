@@ -226,6 +226,20 @@
           <div id="baseUrlRow" class="field-grid one hidden">
             <label title="API endpoint URL for custom providers (e.g. https://api.nanogpt.com/v1). Not needed for standard providers — they auto-configure">Base URL<input id="providerBaseUrl" type="text" placeholder="https://api.example.com/v1"></label>
           </div>
+          <div id="anthropicCacheRow" class="field-grid three hidden">
+            <label title="Anthropic prompt cache lifetime for explicit stable-prefix caching">Cache TTL
+              <select id="anthropicCacheTtl">
+                <option value="5m">5 minutes</option>
+                <option value="1h">1 hour</option>
+              </select>
+            </label>
+            <label class="check-label-inline" title="Add top-level automatic prompt caching to Anthropic tool-loop calls">
+              <input id="anthropicCacheAutomatic" type="checkbox"> Auto-cache tool loops
+            </label>
+            <label class="check-label-inline" title="Log Anthropic beta cache miss diagnostics on consecutive calls">
+              <input id="anthropicCacheDiagnostics" type="checkbox"> Cache diagnostics
+            </label>
+          </div>
           <div class="secret-list">
             <div id="apiKeyRow" class="secret-row">
               <span id="apiKeyName">API key</span>

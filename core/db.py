@@ -48,6 +48,10 @@ class PulseDatabase:
             "ALTER TABLE memories ADD COLUMN valid_until TEXT",
             "ALTER TABLE journal_entries ADD COLUMN search_summary TEXT",
             "ALTER TABLE journal_entries ADD COLUMN summary_needs_review INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE usage ADD COLUMN cache_read_input_tokens INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE usage ADD COLUMN cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE usage ADD COLUMN cache_creation_5m_input_tokens INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE usage ADD COLUMN cache_creation_1h_input_tokens INTEGER NOT NULL DEFAULT 0",
         ]:
             try:
                 self.conn.execute(stmt)
@@ -593,17 +597,31 @@ class PulseDatabase:
 
     def record_usage(self, date: str, prompt_tokens: int,
                      completion_tokens: int, calls: int = 1,
-                     provider: str = "", model: str = "") -> None:
+                     provider: str = "", model: str = "",
+                     cache_read_input_tokens: int = 0,
+                     cache_creation_input_tokens: int = 0,
+                     cache_creation_5m_input_tokens: int = 0,
+                     cache_creation_1h_input_tokens: int = 0) -> None:
         """Record or accumulate token usage for a date+model combo."""
         self.conn.execute(
             "INSERT INTO usage (date, prompt_tokens, completion_tokens, calls, "
-            "provider, model) VALUES (?, ?, ?, ?, ?, ?) "
+            "provider, model, cache_read_input_tokens, cache_creation_input_tokens, "
+            "cache_creation_5m_input_tokens, cache_creation_1h_input_tokens) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(date, model) DO UPDATE SET "
             "prompt_tokens = prompt_tokens + excluded.prompt_tokens, "
             "completion_tokens = completion_tokens + excluded.completion_tokens, "
             "calls = calls + excluded.calls, "
+            "cache_read_input_tokens = cache_read_input_tokens + excluded.cache_read_input_tokens, "
+            "cache_creation_input_tokens = cache_creation_input_tokens + excluded.cache_creation_input_tokens, "
+            "cache_creation_5m_input_tokens = cache_creation_5m_input_tokens + excluded.cache_creation_5m_input_tokens, "
+            "cache_creation_1h_input_tokens = cache_creation_1h_input_tokens + excluded.cache_creation_1h_input_tokens, "
             "provider = COALESCE(excluded.provider, provider)",
-            (date, prompt_tokens, completion_tokens, calls, provider, model)
+            (
+                date, prompt_tokens, completion_tokens, calls, provider, model,
+                cache_read_input_tokens, cache_creation_input_tokens,
+                cache_creation_5m_input_tokens, cache_creation_1h_input_tokens,
+            )
         )
         self.conn.commit()
 
@@ -1004,6 +1022,10 @@ CREATE TABLE IF NOT EXISTS usage (
     prompt_tokens     INTEGER NOT NULL DEFAULT 0,
     completion_tokens INTEGER NOT NULL DEFAULT 0,
     calls             INTEGER NOT NULL DEFAULT 0,
+    cache_read_input_tokens        INTEGER NOT NULL DEFAULT 0,
+    cache_creation_input_tokens    INTEGER NOT NULL DEFAULT 0,
+    cache_creation_5m_input_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_creation_1h_input_tokens INTEGER NOT NULL DEFAULT 0,
     provider          TEXT,
     model             TEXT
 );

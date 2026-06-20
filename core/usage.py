@@ -28,7 +28,11 @@ class UsageTracker:
             self.path.parent.mkdir(parents=True, exist_ok=True)
 
     def record(self, prompt_tokens: int, completion_tokens: int,
-               provider: str = "", model: str = ""):
+               provider: str = "", model: str = "",
+               cache_read_input_tokens: int = 0,
+               cache_creation_input_tokens: int = 0,
+               cache_creation_5m_input_tokens: int = 0,
+               cache_creation_1h_input_tokens: int = 0):
         """Record token usage for the current day.
 
         Accumulates into the existing entry for today, or creates a new one.
@@ -44,7 +48,11 @@ class UsageTracker:
                     completion_tokens=completion_tokens,
                     calls=1,
                     provider=provider,
-                    model=model
+                    model=model,
+                    cache_read_input_tokens=cache_read_input_tokens,
+                    cache_creation_input_tokens=cache_creation_input_tokens,
+                    cache_creation_5m_input_tokens=cache_creation_5m_input_tokens,
+                    cache_creation_1h_input_tokens=cache_creation_1h_input_tokens,
                 )
                 return
             except Exception as e:
@@ -68,12 +76,24 @@ class UsageTracker:
                 "calls": 0,
                 "provider": provider,
                 "model": model,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "cache_creation_5m_input_tokens": 0,
+                "cache_creation_1h_input_tokens": 0,
             }
             log.append(entry)
 
         entry["prompt_tokens"] += prompt_tokens
         entry["completion_tokens"] += completion_tokens
         entry["calls"] += 1
+        entry["cache_read_input_tokens"] = entry.get("cache_read_input_tokens", 0) + cache_read_input_tokens
+        entry["cache_creation_input_tokens"] = entry.get("cache_creation_input_tokens", 0) + cache_creation_input_tokens
+        entry["cache_creation_5m_input_tokens"] = (
+            entry.get("cache_creation_5m_input_tokens", 0) + cache_creation_5m_input_tokens
+        )
+        entry["cache_creation_1h_input_tokens"] = (
+            entry.get("cache_creation_1h_input_tokens", 0) + cache_creation_1h_input_tokens
+        )
         # Update provider/model in case it changed mid-day
         if provider:
             entry["provider"] = provider
@@ -101,15 +121,23 @@ class UsageTracker:
                     "prompt_tokens": sum(r["prompt_tokens"] for r in rows),
                     "completion_tokens": sum(r["completion_tokens"] for r in rows),
                     "calls": sum(r["calls"] for r in rows),
+                    "cache_read_input_tokens": sum(r.get("cache_read_input_tokens", 0) for r in rows),
+                    "cache_creation_input_tokens": sum(r.get("cache_creation_input_tokens", 0) for r in rows),
+                    "cache_creation_5m_input_tokens": sum(r.get("cache_creation_5m_input_tokens", 0) for r in rows),
+                    "cache_creation_1h_input_tokens": sum(r.get("cache_creation_1h_input_tokens", 0) for r in rows),
                 }
                 return summary
-            return {"date": today, "prompt_tokens": 0, "completion_tokens": 0, "calls": 0}
+            return self._empty_summary(today)
 
         # JSON Fallback
         for item in self._load():
             if item.get("date") == today:
+                item.setdefault("cache_read_input_tokens", 0)
+                item.setdefault("cache_creation_input_tokens", 0)
+                item.setdefault("cache_creation_5m_input_tokens", 0)
+                item.setdefault("cache_creation_1h_input_tokens", 0)
                 return item
-        return {"date": today, "prompt_tokens": 0, "completion_tokens": 0, "calls": 0}
+        return self._empty_summary(today)
 
     def get_recent(self, days: int = 7) -> list[dict]:
         """Get usage for the last N days."""
@@ -129,6 +157,18 @@ class UsageTracker:
                 return json.load(f)
         except (json.JSONDecodeError, IOError):
             return []
+
+    def _empty_summary(self, date: str) -> dict:
+        return {
+            "date": date,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "calls": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "cache_creation_5m_input_tokens": 0,
+            "cache_creation_1h_input_tokens": 0,
+        }
 
     def _save(self, log: list[dict]):
         # Keep last 90 days max to prevent unbounded growth

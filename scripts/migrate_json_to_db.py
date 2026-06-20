@@ -303,6 +303,10 @@ def migrate_usage(db: PulseDatabase, data_dir: Path) -> int:
             calls=entry.get("calls", 0),
             provider=entry.get("provider", ""),
             model=entry.get("model", ""),
+            cache_read_input_tokens=entry.get("cache_read_input_tokens", 0),
+            cache_creation_input_tokens=entry.get("cache_creation_input_tokens", 0),
+            cache_creation_5m_input_tokens=entry.get("cache_creation_5m_input_tokens", 0),
+            cache_creation_1h_input_tokens=entry.get("cache_creation_1h_input_tokens", 0),
         )
         count += 1
 

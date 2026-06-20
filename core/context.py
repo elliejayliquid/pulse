@@ -493,6 +493,41 @@ You decide when to lift the timeout — not the human."""
         """Rough token count estimation."""
         return len(text) // self.CHARS_PER_TOKEN
 
+    def _measure_text(self, value) -> str:
+        """Flatten prompt-ish values for rough measurement without logging content."""
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        if isinstance(value, list):
+            return "\n".join(self._measure_text(item) for item in value)
+        if isinstance(value, dict):
+            content = value.get("content")
+            if content is not None:
+                return self._measure_text(content)
+            if value.get("type") == "text":
+                return str(value.get("text", ""))
+            if value.get("type") in ("image", "image_url"):
+                return "[image]"
+            return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+        return str(value)
+
+    def _estimate_value_tokens(self, value) -> int:
+        text = self._measure_text(value)
+        if not text:
+            return 0
+        return max(1, len(text) // self.CHARS_PER_TOKEN)
+
+    def _log_context_breakdown(self, label: str, total_value, parts: list[tuple[str, object]]):
+        total = self._estimate_value_tokens(total_value)
+        chunks = []
+        for name, value in parts:
+            tokens = self._estimate_value_tokens(value)
+            if tokens:
+                chunks.append(f"{name}~{tokens}")
+        detail = " | ".join(chunks) if chunks else "empty"
+        logger.info(f"Context token breakdown [{label}]: total~{total} | {detail}")
+
     def _truncate_to_budget(self, text: str, token_budget: int) -> str:
         """Truncate text to fit within token budget."""
         max_chars = token_budget * self.CHARS_PER_TOKEN
@@ -1048,9 +1083,9 @@ You decide when to lift the timeout — not the human."""
                 "those are commitments you made, so take care of them.\n"
             )
 
+        skill_menu = ""
         if has_tools:
             # Build a grouped skill/tool menu
-            skill_menu = ""
             if skill_summary:
                 menu_lines = ["## Your Tools (always available)"]
                 for s in skill_summary:
@@ -1115,10 +1150,25 @@ You decide when to lift the timeout — not the human."""
         )
         context_parts.append(your_turn)
 
-        return [
+        messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": "\n\n".join(context_parts)}
         ]
+        self._log_context_breakdown("heartbeat", messages, [
+            ("stable_system", system),
+            ("time", time_block),
+            ("timeout", timeout_block),
+            ("injected_skills", injected_block),
+            ("memories", memories_block),
+            ("journal", journal_block),
+            ("schedules", schedules_block),
+            ("due_tasks", due_block),
+            ("action_log", action_log_block),
+            ("recent_conversation", convo_block),
+            ("tool_menu", skill_menu),
+            ("turn_instructions", your_turn),
+        ])
+        return messages
 
     def build_conversation_prompt(self, user_message: str, history: list[dict] = None,
                                    image_url: str = None, timeout_state: dict = None,
@@ -1251,12 +1301,12 @@ You decide when to lift the timeout — not the human."""
 
         # Add conversation history (filter out system messages — many models
         # only support one system message and choke on extras in the middle)
+        trimmed = []
         if history:
             history = [m for m in history if m.get("role") in ("user", "assistant")]
             # Only include recent history within budget
             budget_chars = self.budget.get("conversation", 4000) * self.CHARS_PER_TOKEN
             total_chars = 0
-            trimmed = []
             for msg in reversed(history):
                 msg_chars = len(msg.get("content", "")) if isinstance(msg.get("content"), str) else 100
                 if total_chars + msg_chars > budget_chars:
@@ -1282,6 +1332,22 @@ You decide when to lift the timeout — not the human."""
         else:
             messages.append({"role": "user", "content": user_message})
 
+        current_message_measure = [
+            {"type": "text", "text": user_message},
+            {"type": "image_url"} if image_url else "",
+        ]
+        self._log_context_breakdown("conversation", messages, [
+            ("stable_system", conv_system),
+            ("tool_menu", skill_menu),
+            ("time", time_block),
+            ("timeout", timeout_block),
+            ("injected_skills", injected_block),
+            ("journal", journal_block),
+            ("memories", memories_block),
+            ("conversation_tail", trimmed),
+            ("current_marker", f"{self.user_name}'s new message:"),
+            ("current_message", current_message_measure),
+        ])
         return messages
 
     def build_dev_prompt(self) -> list[dict]:
@@ -1411,6 +1477,7 @@ You decide when to lift the timeout — not the human."""
         )
 
         origin = task.get("origin", "companion")
+        recent_task_convo = ""
 
         task_prompt = (
             f"## Current Time\n{time_str}\n\n"
@@ -1439,9 +1506,9 @@ You decide when to lift the timeout — not the human."""
                     content = msg.get("content", "")
                     if isinstance(content, str):
                         recent_lines.append(f"  {role}: {content[:200]}")
-                convo_block = "\n".join(recent_lines)
+                recent_task_convo = "\n".join(recent_lines)
                 task_prompt += (
-                    f"## Recent Conversation\n{convo_block}\n\n"
+                    f"## Recent Conversation\n{recent_task_convo}\n\n"
                 )
 
             task_prompt += (
@@ -1480,7 +1547,17 @@ You decide when to lift the timeout — not the human."""
             "Keep it natural — don't over-format simple messages. Use asterisks for actions as usual."
         )
 
-        return [
+        messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": task_prompt}
         ]
+        self._log_context_breakdown("scheduled_task", messages, [
+            ("stable_system", system),
+            ("time", time_str),
+            ("injected_skills", injected_block),
+            ("memories", memories_block),
+            ("task", task.get("task", "")),
+            ("recent_conversation", recent_task_convo),
+            ("user_prompt_total", task_prompt),
+        ])
+        return messages

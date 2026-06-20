@@ -11,7 +11,7 @@ import hashlib
 import json
 import logging
 import time
-from typing import Optional
+from typing import Any, Optional
 
 from anthropic import Anthropic, APIConnectionError, APIStatusError, InternalServerError
 
@@ -24,6 +24,9 @@ from core.llm import (
 )
 
 logger = logging.getLogger(__name__)
+
+CACHE_DIAGNOSTICS_BETA = "cache-diagnosis-2026-04-07"
+_MISSING = object()
 
 
 def _openai_tools_to_anthropic(tools: list[dict]) -> list[dict]:
@@ -150,6 +153,19 @@ def _convert_messages(messages: list[dict]) -> tuple[list[str], list[dict]]:
     return system_parts, anthropic_msgs
 
 
+def _obj_get(obj: Any, name: str, default=None):
+    """Read either SDK objects or plain dicts returned by tests/mocks."""
+    if isinstance(obj, dict):
+        return obj.get(name, default)
+    model_extra = getattr(obj, "model_extra", None)
+    if isinstance(model_extra, dict) and name in model_extra:
+        return model_extra[name]
+    pydantic_extra = getattr(obj, "__pydantic_extra__", None)
+    if isinstance(pydantic_extra, dict) and name in pydantic_extra:
+        return pydantic_extra[name]
+    return getattr(obj, name, default)
+
+
 class AnthropicClient:
     """Native Anthropic API client with prompt caching and tool_use support."""
 
@@ -159,7 +175,8 @@ class AnthropicClient:
                  top_p: float = 1.0, top_k: int | None = None,
                  api_key: str = "", usage_tracker=None,
                  reasoning: bool = False, provider_type: str = "anthropic",
-                 cache_ttl: str = "5m"):
+                 cache_ttl: str = "5m", cache_automatic: bool = False,
+                 cache_diagnostics: bool = False):
         self.client = Anthropic(api_key=api_key)
         self.model_name = model_name
         self.temperature = temperature
@@ -178,6 +195,10 @@ class AnthropicClient:
         # Pays off if a written cache is read at least one extra time —
         # ideal for personas with heartbeat intervals ≤60 min.
         self._cache_ttl = cache_ttl if cache_ttl in ("5m", "1h") else "5m"
+        self._cache_automatic = bool(cache_automatic)
+        self._cache_diagnostics = bool(cache_diagnostics)
+        self._diagnostics_disabled = False
+        self._diagnostics_previous_ids: dict[str, str] = {}
 
         # Captured reasoning from the most recent call. Mirrors LLMClient's
         # interface so the engine can read either client uniformly. For now
@@ -190,7 +211,14 @@ class AnthropicClient:
         # etc.) instead of a generic "LLM didn't respond" message.
         self.last_error: str = ""
 
-    def _create_kwargs(self, *, system, messages, tools=None) -> dict:
+    def _cache_control(self) -> dict:
+        control = {"type": "ephemeral"}
+        if self._cache_ttl == "1h":
+            control["ttl"] = "1h"
+        return control
+
+    def _create_kwargs(self, *, system, messages, tools=None,
+                       automatic_cache: bool = False) -> dict:
         """Build Anthropic request kwargs without deprecated sampler params.
 
         Newer Claude models reject some generation controls such as
@@ -205,29 +233,173 @@ class AnthropicClient:
         }
         if tools:
             kwargs["tools"] = tools
+        if self._enable_caching and automatic_cache:
+            kwargs["cache_control"] = self._cache_control()
         return kwargs
 
     def _track(self, response):
         """Log token usage from an Anthropic API response."""
-        if self._usage and hasattr(response, "usage") and response.usage:
+        usage = _obj_get(response, "usage")
+        if self._usage and usage:
+            cache_read = _obj_get(usage, "cache_read_input_tokens", 0) or 0
+            cache_create = _obj_get(usage, "cache_creation_input_tokens", 0) or 0
+            cache_creation = _obj_get(usage, "cache_creation")
+            cache_5m = _obj_get(cache_creation, "ephemeral_5m_input_tokens", 0) or 0
+            cache_1h = _obj_get(cache_creation, "ephemeral_1h_input_tokens", 0) or 0
+            if not cache_create and (cache_5m or cache_1h):
+                cache_create = cache_5m + cache_1h
+
             self._usage.record(
-                prompt_tokens=response.usage.input_tokens or 0,
-                completion_tokens=response.usage.output_tokens or 0,
+                prompt_tokens=_obj_get(usage, "input_tokens", 0) or 0,
+                completion_tokens=_obj_get(usage, "output_tokens", 0) or 0,
                 provider=self._provider_name,
                 model=self.model_name,
+                cache_read_input_tokens=cache_read,
+                cache_creation_input_tokens=cache_create,
+                cache_creation_5m_input_tokens=cache_5m,
+                cache_creation_1h_input_tokens=cache_1h,
             )
             # Log cache stats if available
-            cache_read = getattr(response.usage, "cache_read_input_tokens", 0) or 0
-            cache_create = getattr(response.usage, "cache_creation_input_tokens", 0) or 0
             if cache_read or cache_create:
                 # Anthropic's input_tokens excludes cached tokens, so total =
                 # input_tokens (uncached) + cache_read + cache_create
-                total = (response.usage.input_tokens or 0) + cache_read + cache_create
+                input_tokens = _obj_get(usage, "input_tokens", 0) or 0
+                total = input_tokens + cache_read + cache_create
                 hit_pct = cache_read * 100 // total if total else 0
+                breakdown = ""
+                if cache_5m or cache_1h:
+                    breakdown = f" ({cache_5m} 5m, {cache_1h} 1h)"
                 logger.info(
                     f"Prompt cache: {cache_read} read, {cache_create} created "
-                    f"of {total} total tokens ({hit_pct}% hit)"
+                    f"{breakdown} of {total} total tokens ({hit_pct}% hit)"
                 )
+
+    def _diagnostics_key(self, system) -> str:
+        """Group related calls for Anthropic cache diagnostics comparisons."""
+        if isinstance(system, list) and system:
+            first = _obj_get(system[0], "text", "")
+        else:
+            first = system or ""
+        payload = json.dumps(
+            {"model": self.model_name, "stable_system": first},
+            sort_keys=True,
+            ensure_ascii=False,
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _diagnostics_error(self, error: Exception) -> bool:
+        text = str(error).lower()
+        return (
+            "cache-diagnosis" in text
+            or "diagnostic" in text
+            or "betas" in text
+            or "beta" in text
+        )
+
+    def _log_cache_diagnostics(self, response, previous_id: str | None) -> None:
+        diagnostics = _obj_get(response, "diagnostics", _MISSING)
+        usage = _obj_get(response, "usage")
+        cache_read = _obj_get(usage, "cache_read_input_tokens", 0) or 0
+
+        if diagnostics is _MISSING:
+            logger.info(
+                "Anthropic cache diagnostics: response field absent "
+                "(beta header may not have been accepted)"
+            )
+            return
+
+        if diagnostics is None:
+            if previous_id:
+                logger.info(
+                    "Anthropic cache diagnostics: no divergence detected "
+                    f"(cache_read_input_tokens={cache_read})"
+                )
+            else:
+                logger.info(
+                    "Anthropic cache diagnostics: baseline captured; "
+                    "next matching call can be compared"
+                )
+            return
+
+        reason = _obj_get(diagnostics, "cache_miss_reason")
+        if reason is None:
+            logger.info("Anthropic cache diagnostics: comparison pending/inconclusive")
+            return
+
+        reason_type = _obj_get(reason, "type", "unknown")
+        missed_tokens = _obj_get(reason, "cache_missed_input_tokens", 0) or 0
+        logger.info(
+            "Anthropic cache diagnostics: "
+            f"{reason_type} (~{missed_tokens} missed input tokens)"
+        )
+
+    def _create_message_with_diagnostics(self, create_kwargs: dict, previous_id: str | None):
+        """Send diagnostics using typed beta params or the SDK escape hatch."""
+        try:
+            beta_messages = getattr(getattr(self.client, "beta", None), "messages", None)
+            if beta_messages is None:
+                raise AttributeError("Anthropic SDK has no beta.messages API")
+            return beta_messages.create(
+                **create_kwargs,
+                diagnostics={"previous_message_id": previous_id},
+                betas=[CACHE_DIAGNOSTICS_BETA],
+            )
+        except AttributeError as e:
+            logger.debug(f"Anthropic typed cache diagnostics unavailable: {e}")
+        except TypeError as e:
+            if not self._diagnostics_error(e):
+                raise
+            logger.debug(f"Anthropic typed cache diagnostics unsupported by SDK: {e}")
+
+        extra_headers = dict(create_kwargs.pop("extra_headers", {}) or {})
+        existing_beta = extra_headers.get("anthropic-beta") or extra_headers.get("Anthropic-Beta")
+        if existing_beta:
+            betas = [part.strip() for part in existing_beta.split(",") if part.strip()]
+            if CACHE_DIAGNOSTICS_BETA not in betas:
+                betas.append(CACHE_DIAGNOSTICS_BETA)
+            extra_headers["anthropic-beta"] = ",".join(betas)
+        else:
+            extra_headers["anthropic-beta"] = CACHE_DIAGNOSTICS_BETA
+
+        extra_body = dict(create_kwargs.pop("extra_body", {}) or {})
+        extra_body["diagnostics"] = {"previous_message_id": previous_id}
+
+        return self.client.messages.create(
+            **create_kwargs,
+            extra_headers=extra_headers,
+            extra_body=extra_body,
+        )
+
+    def _create_message(self, create_kwargs: dict, diagnostics_key: str | None = None):
+        """Create a message, optionally adding Anthropic cache diagnostics."""
+        if (
+            not self._cache_diagnostics
+            or self._diagnostics_disabled
+            or not diagnostics_key
+        ):
+            return self.client.messages.create(**create_kwargs)
+
+        previous_id = self._diagnostics_previous_ids.get(diagnostics_key)
+        try:
+            response = self._create_message_with_diagnostics(dict(create_kwargs), previous_id)
+        except TypeError as e:
+            if not self._diagnostics_error(e):
+                raise
+            self._diagnostics_disabled = True
+            logger.warning(f"Anthropic cache diagnostics unsupported by installed SDK; retrying normally: {e}")
+            return self.client.messages.create(**create_kwargs)
+        except APIStatusError as e:
+            if not self._diagnostics_error(e):
+                raise
+            self._diagnostics_disabled = True
+            logger.warning(f"Anthropic cache diagnostics rejected by API; retrying normally: {e}")
+            return self.client.messages.create(**create_kwargs)
+
+        response_id = _obj_get(response, "id")
+        if response_id:
+            self._diagnostics_previous_ids[diagnostics_key] = response_id
+        self._log_cache_diagnostics(response, previous_id)
+        return response
 
     def is_available(self) -> bool:
         """Check if the Anthropic API is reachable."""
@@ -261,10 +433,7 @@ class AnthropicClient:
                 continue
             block = {"type": "text", "text": text}
             if self._enable_caching and i == 0:
-                cache_control = {"type": "ephemeral"}
-                if self._cache_ttl == "1h":
-                    cache_control["ttl"] = "1h"
-                block["cache_control"] = cache_control
+                block["cache_control"] = self._cache_control()
             blocks.append(block)
         return blocks
 
@@ -276,16 +445,18 @@ class AnthropicClient:
         self.last_error = ""
         try:
             system_parts, anthropic_msgs = _convert_messages(messages)
+            system_blocks = self._build_system_blocks(system_parts)
+            diagnostics_key = self._diagnostics_key(system_blocks)
 
             create_kwargs = self._create_kwargs(
-                system=self._build_system_blocks(system_parts),
+                system=system_blocks,
                 messages=anthropic_msgs,
             )
             # Retry loop for transient 500 errors
             response = None
             for attempt in range(3):
                 try:
-                    response = self.client.messages.create(**create_kwargs)
+                    response = self._create_message(create_kwargs, diagnostics_key)
                     break  # Success!
                 except InternalServerError as e:
                     if attempt < 2:
@@ -354,6 +525,7 @@ class AnthropicClient:
         loop_warned = False
 
         system_blocks = self._build_system_blocks(system_parts)
+        diagnostics_key = self._diagnostics_key(system_blocks)
 
         for round_num in range(effective_max):
             try:
@@ -361,13 +533,14 @@ class AnthropicClient:
                     system=system_blocks,
                     messages=anthropic_msgs,
                     tools=anthropic_tools if anthropic_tools else None,
+                    automatic_cache=self._cache_automatic,
                 )
                 
                 # Retry loop for transient 500 errors
                 response = None
                 for attempt in range(3):
                     try:
-                        response = self.client.messages.create(**create_kwargs)
+                        response = self._create_message(create_kwargs, diagnostics_key)
                         break  # Success!
                     except InternalServerError as e:
                         if attempt < 2:
@@ -483,13 +656,14 @@ class AnthropicClient:
             create_kwargs = self._create_kwargs(
                 system=system_blocks,
                 messages=anthropic_msgs,
+                automatic_cache=self._cache_automatic,
             )
 
             # Retry loop for transient 500 errors
             response = None
             for attempt in range(3):
                 try:
-                    response = self.client.messages.create(**create_kwargs)
+                    response = self._create_message(create_kwargs, diagnostics_key)
                     break
                 except InternalServerError as e:
                     if attempt < 2:

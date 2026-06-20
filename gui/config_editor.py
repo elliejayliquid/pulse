@@ -33,6 +33,9 @@ PROVIDER_FIELDS = {
     "model": "Provider Model",
     "max_context": "Max Context",
     "base_url": "Base URL",
+    "cache_ttl": "Anthropic Cache TTL",
+    "cache_automatic": "Anthropic Automatic Cache",
+    "cache_diagnostics": "Anthropic Cache Diagnostics",
 }
 
 PROVIDER_TYPES = {"local", "openrouter", "openai", "anthropic", "custom"}
@@ -375,16 +378,22 @@ class ConfigEditor:
             cleaned.append(text)
         return cleaned
 
-    def _clean_provider_value(self, key: str, value: Any) -> str | int:
+    def _clean_provider_value(self, key: str, value: Any) -> str | int | bool:
         label = PROVIDER_FIELDS[key]
         if key == "type":
             if not isinstance(value, str) or value not in PROVIDER_TYPES:
                 raise ValueError(f"{label} must be one of: {', '.join(sorted(PROVIDER_TYPES))}.")
             return value
-        if key == "model":
+        if key in ("model", "base_url"):
             return self._clean_text(value, label)
-        if key == "base_url":
-            return self._clean_text(value, label)
+        if key == "cache_ttl":
+            if not isinstance(value, str) or value not in {"5m", "1h"}:
+                raise ValueError(f"{label} must be 5m or 1h.")
+            return value
+        if key in ("cache_automatic", "cache_diagnostics"):
+            if type(value) is not bool:
+                raise ValueError(f"{label} must be true or false.")
+            return value
         if type(value) is not int:
             raise ValueError(f"{label} must be a whole number.")
         if not 1024 <= value <= 1048576:

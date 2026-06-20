@@ -84,6 +84,8 @@ class PulseEngine:
                 api_key=api_key,
                 usage_tracker=usage_tracker,
                 cache_ttl=provider_config.get("cache_ttl", "5m"),
+                cache_automatic=provider_config.get("cache_automatic", False),
+                cache_diagnostics=provider_config.get("cache_diagnostics", False),
             )
         elif provider_type == "openai":
             self.llm = OpenAIResponsesClient(
@@ -309,6 +311,35 @@ class PulseEngine:
                 json.dump(log, f, indent=2)
         except IOError as e:
             logger.warning(f"Failed to write action log: {e}")
+
+    def _estimate_payload_tokens(self, payload) -> int:
+        text = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+        if not text:
+            return 0
+        return max(1, len(text) // 4)
+
+    def _log_tool_payload_breakdown(self, label: str, tools: list[dict] | None):
+        if not tools:
+            return
+        total = self._estimate_payload_tokens(tools)
+        rows = []
+        for tool in tools:
+            if isinstance(tool, dict):
+                func = tool.get("function", {})
+                name = func.get("name") or tool.get("name", "unknown")
+            else:
+                name = "unknown"
+            rows.append((name, self._estimate_payload_tokens(tool)))
+        rows.sort(key=lambda item: item[1], reverse=True)
+        visible_limit = 24
+        top = ", ".join(f"{name}~{tokens}" for name, tokens in rows[:visible_limit])
+        remainder = len(rows) - visible_limit
+        if remainder > 0:
+            top += f", +{remainder} more"
+        logger.info(
+            f"Tool schema token breakdown [{label}]: "
+            f"{len(tools)} tools, total~{total} | {top}"
+        )
 
     async def _warmup_tts(self, tts_skill):
         try:
@@ -569,6 +600,19 @@ class PulseEngine:
         })
         return self.context.save_conversation(history)
 
+    def _save_dev_tick_to_history(self, summary: str) -> list[int]:
+        """Save a dev tick outcome so the companion can see its own background work."""
+        summary = (summary or "").strip()
+        if not summary:
+            return []
+
+        history = self.context._load_conversation()
+        history.append({
+            "role": "assistant",
+            "content": f"[Dev tick]\n{summary}",
+        })
+        return self.context.save_conversation(history)
+
     @staticmethod
     def _is_voice_delivery_meta(response: PulseResponse | None) -> bool:
         """True when the final heartbeat notification only describes speak()."""
@@ -696,6 +740,7 @@ class PulseEngine:
         t0 = time.time()
         if tools:
             logger.info(f"Tool-calling mode: {len(tools)} tools available")
+            self._log_tool_payload_breakdown(source, tools)
             tool_mode, tool_budget = self._resolve_tool_loop_params()
             reply, tools_used = await asyncio.to_thread(
                 self.llm.chat_with_tools, messages, tools, self.skill_registry,
@@ -887,6 +932,7 @@ class PulseEngine:
             response = None
             tg_msg_id = None
             if tools:
+                self._log_tool_payload_breakdown("scheduled_task", tools)
                 tool_mode, tool_budget = self._resolve_tool_loop_params()
                 text, tools_used = await asyncio.to_thread(
                     self.llm.chat_with_tools, messages, tools, self.skill_registry,
@@ -981,6 +1027,7 @@ class PulseEngine:
         if tools:
             # Tool-calling mode: companion can use tools, then gives JSON decision
             logger.info(f"Heartbeat with {len(tools)} tools available")
+            self._log_tool_payload_breakdown("heartbeat", tools)
             tool_mode, tool_budget = self._resolve_tool_loop_params()
             text, tools_used = await asyncio.to_thread(
                 self.llm.chat_with_tools, messages, tools, self.skill_registry,
@@ -1055,18 +1102,25 @@ class PulseEngine:
         import subprocess
 
         logger.info("=== Dev tick starting ===")
+        dev_tick_unavailable_summary = (
+            "I tried to run an autonomous dev tick, but the LLM server was not available."
+        )
 
         # Dev ticks are silent background work — they bypass quiet hours.
         # Notifications (the approval ping) are sent regardless.
 
         available = await asyncio.to_thread(self.llm.is_available)
         if not available:
+            self._save_dev_tick_to_history(dev_tick_unavailable_summary)
             logger.warning("LLM server not available — skipping dev tick.")
             return
 
         # Only use dev tools during dev ticks (not the full skill registry)
         dev_skill = self.skill_registry.get_skill("dev") if self.skill_registry else None
         if not dev_skill:
+            self._save_dev_tick_to_history(
+                "I tried to run an autonomous dev tick, but the dev skill was not available."
+            )
             logger.warning("Dev skill not available — skipping dev tick.")
             return
 
@@ -1080,6 +1134,10 @@ class PulseEngine:
                 capture_output=True, text=True, cwd=self._pulse_root
             )
             if status.stdout.strip():
+                self._save_dev_tick_to_history(
+                    "I tried to run an autonomous dev tick, but skipped because "
+                    "there were uncommitted changes in skills/ or persona.json."
+                )
                 logger.warning("Uncommitted changes in skills/ — skipping dev tick to avoid conflicts.")
                 return
 
@@ -1090,6 +1148,9 @@ class PulseEngine:
             logger.info(f"Created dev branch: {branch_name}")
         except subprocess.CalledProcessError as e:
             logger.error(f"Failed to create dev branch: {e}")
+            self._save_dev_tick_to_history(
+                f"I tried to run an autonomous dev tick, but could not create branch `{branch_name}`."
+            )
             return
 
         try:
@@ -1153,26 +1214,40 @@ class PulseEngine:
                 summary = (
                     f"Hey! I did some coding on branch `{branch_name}`.\n"
                     f"Changed files: {', '.join(all_changed)}\n"
-                    f"Tools used: {', '.join(set(tools_used)) if tools_used else 'none'}\n"
+                    f"Tools used: {', '.join(dict.fromkeys(tools_used)) if tools_used else 'none'}\n"
                     f"Have a look when you get a chance?"
                 )
                 if text:
                     summary += f"\n\nMy notes: {text}"
 
                 telegram = self.channels.get("telegram")
+                tg_msg_id = None
                 if telegram:
-                    await telegram.send(summary)
+                    tg_msg_id = await telegram.send(summary)
                 toast = self.channels.get("toast")
                 if toast:
                     await toast.send(f"Dev tick: {len(all_changed)} file(s) on {branch_name}")
 
+                db_ids = self._save_dev_tick_to_history(summary)
+                if tg_msg_id and db_ids and self.db:
+                    self.db.update_message_channel_id(db_ids[-1], tg_msg_id)
                 self._log_action("dev_tick", tools_used, f"branch: {branch_name}, files: {len(all_changed)}")
             else:
                 logger.info("Dev tick: no files changed.")
+                summary = (
+                    "I ran an autonomous dev tick; no files changed.\n"
+                    f"Tools used: {', '.join(dict.fromkeys(tools_used)) if tools_used else 'none'}"
+                )
+                if text:
+                    summary += f"\n\nMy notes: {text}"
+                self._save_dev_tick_to_history(summary)
                 self._log_action("dev_tick_noop", tools_used, "no changes")
 
         except Exception as e:
             logger.error(f"Dev tick failed: {e}", exc_info=True)
+            self._save_dev_tick_to_history(
+                f"I ran an autonomous dev tick, but it failed: {str(e)[:200]}"
+            )
             self._log_action("dev_tick_error", summary=str(e)[:120])
         finally:
             # Always switch back to main, regardless of what happened

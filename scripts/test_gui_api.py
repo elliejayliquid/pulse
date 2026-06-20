@@ -80,6 +80,9 @@ voice_notes: Warm.
         assert demo["summary"]["provider_model"] == "demo/model"
         assert demo["summary"]["max_context"] == 32768
         assert demo["summary"]["provider_max_context"] == 32768
+        assert demo["summary"]["cache_ttl"] == "5m"
+        assert demo["summary"]["cache_automatic"] is False
+        assert demo["summary"]["cache_diagnostics"] is False
         assert demo["summary"]["local_max_context"] == 16384
         assert demo["summary"]["server"]["host"] == "127.0.0.1"
         assert demo["summary"]["server"]["port"] == 8012

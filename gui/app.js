@@ -2757,6 +2757,11 @@ function syncBaseUrlVisibility() {
   el("baseUrlRow").classList.toggle("hidden", !isCustom);
 }
 
+function syncAnthropicCacheVisibility() {
+  const isAnthropic = el("providerType").value === "anthropic";
+  el("anthropicCacheRow").classList.toggle("hidden", !isAnthropic);
+}
+
 function syncLocalServerVisibility() {
   const isLocal = el("providerType").value === "local";
   el("localServerSection").classList.toggle("hidden", !isLocal);
@@ -2786,7 +2791,11 @@ function renderProvider(data) {
   el("providerModel").value = text(summary.provider_model);
   el("providerBaseUrl").value = text(summary.base_url);
   el("maxContext").value = text(summary.provider_max_context ?? summary.max_context);
+  el("anthropicCacheTtl").value = text(summary.cache_ttl, "5m");
+  el("anthropicCacheAutomatic").checked = Boolean(summary.cache_automatic);
+  el("anthropicCacheDiagnostics").checked = Boolean(summary.cache_diagnostics);
   syncBaseUrlVisibility();
+  syncAnthropicCacheVisibility();
   syncLocalServerVisibility();
   el("ttsVoice").value = text(tts.voice_description);
   el("ttsSample").value = text(tts.voice_sample);
@@ -2854,6 +2863,9 @@ function editableSnapshot() {
       model: el("providerModel").value,
       base_url: el("providerBaseUrl").value,
       max_context: el("maxContext").value,
+      cache_ttl: el("anthropicCacheTtl").value,
+      cache_automatic: Boolean(el("anthropicCacheAutomatic").checked),
+      cache_diagnostics: Boolean(el("anthropicCacheDiagnostics").checked),
     },
     model: {
       model_file: el("lsModelFile").value,
@@ -2962,7 +2974,17 @@ function setEditableState(data) {
     const field = el(id);
     if (field) field.readOnly = !editable;
   });
-  ["providerType", "lsFlashAttn", "tuningReasoning", "tuningEffort", "tuningShowReasoning", "hbDebug"].forEach((id) => {
+  [
+    "providerType",
+    "anthropicCacheTtl",
+    "anthropicCacheAutomatic",
+    "anthropicCacheDiagnostics",
+    "lsFlashAttn",
+    "tuningReasoning",
+    "tuningEffort",
+    "tuningShowReasoning",
+    "hbDebug",
+  ].forEach((id) => {
     const field = el(id);
     if (field) field.disabled = !editable;
   });
@@ -3774,9 +3796,13 @@ function wireEvents() {
   ].forEach((id) => {
     el(id)?.addEventListener("input", () => setDirty(hasEditableChanges()));
   });
+  ["anthropicCacheTtl", "anthropicCacheAutomatic", "anthropicCacheDiagnostics"].forEach((id) => {
+    el(id)?.addEventListener("change", () => setDirty(hasEditableChanges()));
+  });
   el("providerType").addEventListener("change", () => {
     maybeBumpCloudContext();
     syncBaseUrlVisibility();
+    syncAnthropicCacheVisibility();
     syncLocalServerVisibility();
     syncTuningProviderHints();
     setDirty(hasEditableChanges());

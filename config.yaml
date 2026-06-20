@@ -64,6 +64,13 @@ provider:
   # extra time before expiring — ideal for personas with heartbeats every
   # ≤60 min, where most ticks would otherwise miss the 5-minute window.
   cache_ttl: "1h"
+  # Anthropic only: top-level automatic prompt caching for tool-loop calls.
+  # Can reduce repeated input processing across multi-round tool use, but may
+  # write extra cache entries for one-shot turns with dynamic context.
+  cache_automatic: false
+  # Anthropic only: beta cache diagnostics. Enable temporarily to log miss
+  # reasons such as system_changed, tools_changed, or messages_changed.
+  cache_diagnostics: false
 
 # --- Heartbeat ---
 heartbeat:
