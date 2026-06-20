@@ -979,6 +979,10 @@ function renderSkillDialogBody(skill) {
   if (skill?.name === "tasks") {
     return `
       <div class="skill-setting-stack">
+        <label class="check-row skill-setting-check" title="Injects a compact numbered pending-task list into model context on each turn. Save from the main footer; takes effect after restart.">
+          <span>Inject pending tasks into context</span>
+          <input id="skillTasksContextInject" type="checkbox" ${skillContextInjected("tasks") ? "checked" : ""}>
+        </label>
         <div id="skillTasksSummary" class="skill-tool-panel">
           <div class="skill-empty-settings">
             <strong>Loading tasks</strong>
@@ -1170,7 +1174,7 @@ function openSkillDialog(skillName) {
             : skill.name === "sticker"
               ? "Sticker selection still happens through companion tools."
               : skill.name === "tasks"
-                ? "Task changes are staged here until you press Save."
+                ? "Task edits use this dialog's Save. Context injection is saved from the main footer."
                 : skill.name === "schedule"
                   ? "Reminder changes are staged here until you press Save."
     : "Changes here are staged until you use the main Save button.";
@@ -1236,6 +1240,14 @@ function bindSkillDialogControls(skill) {
   if (skill?.name === "garden") {
     el("skillGardenContextInject")?.addEventListener("change", (event) => {
       setSkillContextInjected("garden", event.target.checked);
+      setDirty(hasEditableChanges());
+    });
+    return;
+  }
+
+  if (skill?.name === "tasks") {
+    el("skillTasksContextInject")?.addEventListener("change", (event) => {
+      setSkillContextInjected("tasks", event.target.checked);
       setDirty(hasEditableChanges());
     });
     return;

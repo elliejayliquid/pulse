@@ -107,6 +107,55 @@ class TasksSkill(BaseSkill):
             }
         ]
 
+    def get_context(self) -> str:
+        """Surface pending tasks when this skill is listed in inject_skills."""
+        try:
+            pending = self._get_pending_tasks()
+        except Exception:
+            return ""
+
+        if not pending:
+            return ""
+
+        max_show = 8
+        lines = [
+            f"Tasks: {len(pending)} pending.",
+            "Use these Pending task numbers with complete_task/delete_task.",
+        ]
+
+        shown = 0
+        for index, task in enumerate(pending[:max_show], start=1):
+            desc = (task.get("description") or "").strip()
+            if not desc:
+                continue
+            list_name = (task.get("list") or "Daily").strip() or "Daily"
+            lines.append(f"{index}. [ ] {desc} ({list_name})")
+            shown += 1
+
+        if not shown:
+            return ""
+
+        if len(pending) > max_show:
+            lines.append(
+                f"...and {len(pending) - max_show} more. "
+                "Call list_tasks before acting on hidden tasks."
+            )
+        else:
+            lines.append(
+                "If the target is unclear or the list may have changed, "
+                "call list_tasks before acting."
+            )
+
+        return "\n".join(lines)
+
+    def _get_pending_tasks(self) -> list[dict]:
+        """Return pending tasks from the DB or legacy JSON store."""
+        db = self.config.get("_shared_db") or self.config.get("_db")
+        if db:
+            return db.get_tasks(completed=False)
+        data = self._read_tasks()
+        return [task for task in data.get("tasks", []) if not task.get("completed")]
+
     def execute(self, tool_name: str, arguments: dict) -> str:
         db = self.config.get("_shared_db") or self.config.get("_db")
 
