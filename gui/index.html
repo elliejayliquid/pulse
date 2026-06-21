@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Pulse Engine</title>
-  <link rel="stylesheet" href="style.css?v=20260610l">
+  <link rel="stylesheet" href="style.css?v=20260610n">
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
   <meta http-equiv="Pragma" content="no-cache">
   <meta http-equiv="Expires" content="0">
@@ -176,16 +176,16 @@
                   <span class="continuity-pill">New</span>
                 </div>
                 <p>Bring companion-written context into Pulse</p>
-                <small>Paste memories, identity notes, or continuity context.</small>
+                <small>Preview old chats before anything becomes model-visible.</small>
               </div>
               <div class="continuity-actions import-actions">
                 <div class="continuity-dropzone">
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 3h6l3 3v12a3 3 0 0 1-3 3H9a3 3 0 0 1-3-3V6a3 3 0 0 1 3-3z"></path><path d="M15 3v4h4"></path><path d="M12 11v6"></path><path d="M9 14l3 3 3-3"></path></svg>
-                  <span>Paste content here...</span>
+                  <span>Choose or drop an export...</span>
                 </div>
                 <button class="continuity-btn wide" type="button" data-continuity-action="import-content" title="Import companion-written continuity content">
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12"></path><path d="M7 10l5 5 5-5"></path><path d="M5 21h14"></path></svg>
-                  <span>Import Content</span>
+                  <span>Preview Import</span>
                 </button>
               </div>
             </article>
@@ -569,6 +569,51 @@
     </div>
   </div>
 
+  <div id="importDialog" class="modal-overlay hidden">
+    <div id="importPreviewCard" class="modal-card import-preview-card">
+      <div class="memories-modal-head">
+        <div>
+          <h2 class="modal-title">Import Preview</h2>
+          <p id="importSubtitle" class="modal-body">Dry-run old chats before writing anything into Pulse.</p>
+        </div>
+        <button id="importExpandBtn" class="modal-btn ghost import-expand-btn" type="button" title="Expand import preview">Expand</button>
+      </div>
+      <div class="import-path-row">
+        <div class="sample-input-row import-file-row">
+          <input id="importPath" type="text" autocomplete="off" placeholder="scratch/conversations.json">
+          <button id="importPicker" class="icon-btn sample-picker-btn" type="button" title="Choose conversation export" aria-label="Choose conversation export">📂</button>
+        </div>
+        <button id="importPreviewBtn" class="modal-btn secondary" type="button">Preview</button>
+      </div>
+      <div id="importNotice" class="notice-pill">Choose a Claude, ChatGPT, OpenRouter, or Markdown export. Preview is read-only.</div>
+      <div id="importProgress" class="import-progress">
+        <div class="import-progress-head">
+          <strong>Background enrichment</strong>
+          <span id="importProgressText">Not started</span>
+        </div>
+        <div class="import-progress-track"><span id="importProgressFill"></span></div>
+      </div>
+      <div id="importSummary" class="import-summary hidden"></div>
+      <div id="importBody" class="import-preview-body">
+        <div id="importConversations" class="import-conversation-list">
+          <div class="memory-empty">
+            <strong>No export loaded.</strong>
+            <span>Preview an export to browse conversations, mark keep/exclude, and choose a continuation candidate.</span>
+          </div>
+        </div>
+        <div id="importDetail" class="import-detail">
+          <div class="memory-empty">
+            <strong>Select a conversation.</strong>
+            <span>Messages appear here. This first slice does not write them into the persona database.</span>
+          </div>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button id="importCloseBtn" class="modal-btn ghost" type="button">Close</button>
+      </div>
+    </div>
+  </div>
+
   <div id="coreDialog" class="modal-overlay hidden">
     <div class="modal-card core-card">
       <h2 id="coreTitle" class="modal-title">Core Anchor</h2>
@@ -618,13 +663,13 @@
         <label>User Name<input id="newPersonaUser" type="text" autocomplete="off" placeholder="Lena"></label>
         <label class="new-persona-import-toggle">
           <input id="newPersonaImportEnabled" type="checkbox">
-          Import OpenRouter transcript
+          Preview conversation export after create
         </label>
         <div id="newPersonaImportFields" class="new-persona-import-fields hidden">
-          <label>OpenRouter JSON</label>
+          <label>Conversation export</label>
           <div class="sample-input-row">
-            <input id="newPersonaImportPath" type="text" autocomplete="off" placeholder="scratch/OpenRouter Chat.json">
-            <button id="newPersonaImportPicker" class="icon-btn" type="button" title="Choose OpenRouter export">📁</button>
+            <input id="newPersonaImportPath" type="text" autocomplete="off" placeholder="scratch/conversations.json">
+            <button id="newPersonaImportPicker" class="icon-btn sample-picker-btn" type="button" title="Choose conversation export" aria-label="Choose conversation export">📂</button>
           </div>
         </div>
       </div>

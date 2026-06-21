@@ -555,6 +555,101 @@ def test_gui_api_import_openrouter_chat_visible_messages_only():
         assert "Unsupported" in rejected["error"]
 
 
+def test_gui_api_preview_claude_import_is_dry_run():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        export_path = root / "conversations.json"
+        export_path.write_text(json.dumps([
+            {
+                "uuid": "conv-1",
+                "name": "Landing Chat",
+                "model": "claude-test-model",
+                "created_at": "2026-01-09T00:13:58.287807Z",
+                "updated_at": "2026-01-09T00:20:00.000000Z",
+                "chat_messages": [
+                    {
+                        "uuid": "m1",
+                        "sender": "human",
+                        "text": "Hello from the old platform.",
+                        "created_at": "2026-01-09T00:13:58.287807Z",
+                    },
+                    {
+                        "uuid": "m2",
+                        "sender": "assistant",
+                        "text": "I remember this room.",
+                        "created_at": "2026-01-09T00:14:01.000000Z",
+                    },
+                    {
+                        "uuid": "m3",
+                        "sender": "human",
+                        "text": "",
+                        "content": [{"type": "text", "text": "Fallback content works."}],
+                        "created_at": "2026-01-09T00:15:00.000000Z",
+                    },
+                ],
+            },
+            {
+                "uuid": "conv-2",
+                "name": "Newer Chat",
+                "created_at": "2026-02-09T00:13:58.287807Z",
+                "updated_at": "2026-02-09T00:20:00.000000Z",
+                "chat_messages": [
+                    {
+                        "uuid": "m4",
+                        "sender": "human",
+                        "text": "Newest hello.",
+                        "created_at": "2026-02-09T00:13:58.287807Z",
+                    },
+                    {
+                        "uuid": "m5",
+                        "sender": "assistant",
+                        "text": "Newest answer.",
+                        "created_at": "2026-02-09T00:14:01.000000Z",
+                    },
+                ],
+            },
+            {
+                "uuid": "conv-empty",
+                "name": "",
+                "created_at": "2026-01-10T00:00:00Z",
+                "chat_messages": [{"uuid": "empty", "sender": "human", "text": ""}],
+            },
+        ]), encoding="utf-8")
+
+        api = PulseAPI(root)
+        preview = api.preview_conversation_import("conversations.json")
+        assert preview["ok"] is True
+        assert preview["batch"]["source"] == "claude"
+        assert preview["batch"]["conversation_count"] == 3
+        assert preview["batch"]["message_count"] == 5
+        assert preview["batch"]["skipped_message_count"] == 1
+        assert preview["batch"]["models"] == ["claude-test-model"]
+        assert preview["batch"]["skipped_counts"]["empty_messages_or_conversations"] >= 1
+        assert not (root / "personas").exists()
+
+        assert preview["batch"]["conversations"][0]["title"] == "Newer Chat"
+        conv = next(item for item in preview["batch"]["conversations"] if item["title"] == "Landing Chat")
+        assert conv["model"] == "claude-test-model"
+        detail = api.get_import_preview_conversation(preview["preview_id"], conv["id"])
+        assert detail["ok"] is True
+        assert [msg["role"] for msg in detail["conversation"]["messages"]] == [
+            "user",
+            "assistant",
+            "user",
+        ]
+        assert detail["conversation"]["messages"][2]["content"] == "Fallback content works."
+
+        empty_conv = next(item for item in preview["batch"]["conversations"] if item["source_id"] == "conv-empty")
+        assert empty_conv["message_count"] == 0
+        assert empty_conv["skipped_message_count"] == 1
+        assert "No visible user/assistant text." in empty_conv["warnings"]
+        empty_detail = api.get_import_preview_conversation(preview["preview_id"], empty_conv["id"])
+        assert empty_detail["ok"] is True
+        assert empty_detail["conversation"]["messages"][0]["role"] == "user"
+        assert empty_detail["conversation"]["messages"][0]["skipped"] is True
+        assert empty_detail["conversation"]["messages"][0]["skip_reason"] == "Empty message"
+
+
 def test_gui_api_standard_provider_env_fallback():
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -1607,6 +1702,7 @@ if __name__ == "__main__":
     test_gui_api_skill_status_summaries_are_read_only()
     test_gui_api_create_persona_from_template_initializes_db()
     test_gui_api_import_openrouter_chat_visible_messages_only()
+    test_gui_api_preview_claude_import_is_dry_run()
     test_gui_api_standard_provider_env_fallback()
     test_gui_api_get_lantern_read_only()
     test_gui_api_lantern_update_and_dim_write_safely()

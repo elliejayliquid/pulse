@@ -8,6 +8,7 @@ project.
 from __future__ import annotations
 
 import base64
+import hashlib
 import importlib.util
 import json
 import os
@@ -26,6 +27,7 @@ import yaml
 
 from gui.backup import BackupManager
 from gui.config_editor import ConfigEditor
+from gui.import_preview import preview_import_file
 from gui.openrouter_import import parse_openrouter_chat
 from core.db import PulseDatabase
 from core.scheduler import (
@@ -259,6 +261,7 @@ class PulseAPI:
         self._window = None
         self._close_requested: list[str] | None = None
         self._force_close = False
+        self._import_previews: dict[str, dict[str, Any]] = {}
 
     # Persona management
 
@@ -410,6 +413,44 @@ class PulseAPI:
             }
         except (FileNotFoundError, ValueError, OSError, sqlite3.Error, json.JSONDecodeError) as e:
             return {"ok": False, "error": str(e)}
+
+    def preview_conversation_import(self, path: str) -> dict:
+        """Dry-run a conversation export into normalized preview data.
+
+        This intentionally does not write to persona DBs, memories, journals, or
+        live sessions. The parsed batch is cached in memory for click-through
+        detail until the GUI process exits or another preview replaces it.
+        """
+        try:
+            export_path = self._resolve_import_file(path, "Conversation export file")
+            batch = preview_import_file(export_path)
+            preview_id = self._preview_id(export_path)
+            batch_dict = batch.to_dict()
+            self._import_previews[preview_id] = {
+                "path": str(export_path),
+                "batch": batch,
+            }
+            return {
+                "ok": True,
+                "preview_id": preview_id,
+                "path": self._display_import_path(export_path),
+                "batch": batch_dict,
+            }
+        except (FileNotFoundError, ValueError, OSError, json.JSONDecodeError) as e:
+            return {"ok": False, "error": str(e)}
+
+    def get_import_preview_conversation(self, preview_id: str, conversation_id: str) -> dict:
+        entry = self._import_previews.get(str(preview_id or ""))
+        if not entry:
+            return {"ok": False, "error": "Import preview expired. Choose the export again."}
+        batch = entry["batch"]
+        for conversation in batch.conversations:
+            if conversation.id == conversation_id:
+                return {
+                    "ok": True,
+                    "conversation": conversation.to_detail_dict(),
+                }
+        return {"ok": False, "error": "Conversation not found in this preview."}
 
     def _clean_new_persona_fields(self, fields: Any) -> dict[str, str]:
         if isinstance(fields, str):
@@ -691,6 +732,64 @@ class PulseAPI:
             return {"ok": True, "path": chosen.resolve().relative_to(self.root).as_posix()}
         except ValueError:
             return {"ok": True, "path": str(chosen)}
+
+    def pick_conversation_export(self, current_path: str = "") -> dict:
+        if not self._window:
+            return {"ok": False, "error": "File dialog requires pywebview."}
+        start_dir = str(self.root)
+        if current_path:
+            candidate = Path(current_path).expanduser()
+            if not candidate.is_absolute():
+                candidate = self.root / candidate
+            if candidate.is_file():
+                start_dir = str(candidate.parent)
+            elif candidate.parent.is_dir():
+                start_dir = str(candidate.parent)
+        try:
+            import webview
+            result = self._window.create_file_dialog(
+                webview.OPEN_DIALOG,
+                directory=start_dir,
+                allow_multiple=False,
+                file_types=(
+                    "Conversation exports (*.json;*.md;*.markdown)",
+                    "JSON exports (*.json)",
+                    "Markdown exports (*.md;*.markdown)",
+                    "All Files (*.*)",
+                ),
+            )
+        except Exception as e:
+            return {"ok": False, "error": f"File dialog failed: {e}"}
+        if not result:
+            return {"ok": False}
+        chosen = Path(result[0] if isinstance(result, (list, tuple)) else result)
+        if not chosen.is_file():
+            return {"ok": False, "error": "Selected file does not exist."}
+        return {"ok": True, "path": self._display_import_path(chosen)}
+
+    def _resolve_import_file(self, path: str, label: str) -> Path:
+        raw = str(path or "").strip()
+        if not raw:
+            raise ValueError(f"{label} is required.")
+        candidate = Path(raw).expanduser()
+        if not candidate.is_absolute():
+            candidate = (self.root / candidate).resolve()
+        if not candidate.is_file():
+            raise FileNotFoundError(f"{label} not found.")
+        return candidate
+
+    def _display_import_path(self, path: Path) -> str:
+        try:
+            return path.resolve().relative_to(self.root).as_posix()
+        except ValueError:
+            return str(path)
+
+    def _preview_id(self, path: Path) -> str:
+        stat = path.stat()
+        digest = hashlib.sha256(
+            f"{path.resolve()}|{stat.st_mtime_ns}|{stat.st_size}".encode("utf-8")
+        ).hexdigest()
+        return digest[:16]
 
     # Secrets/status/logs
 

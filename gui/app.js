@@ -55,6 +55,7 @@ const state = {
   journalDetailId: "",
   journalBaseline: {},
   journalUndoStamp: "",
+  importPreview: { previewId: "", path: "", batch: null, selectedId: "", choices: {}, continuationId: "", exchangeChoices: {} },
   taskBaselines: {},
   taskDrafts: [],
   taskOriginals: [],
@@ -197,11 +198,14 @@ const fallbackApi = {
     };
   },
   async import_openrouter_chat() { return { ok: false, error: "Run through pywebview to import OpenRouter chats." }; },
+  async preview_conversation_import() { return { ok: false, error: "Run through pywebview to preview imports." }; },
+  async get_import_preview_conversation() { return { ok: false, error: "Run through pywebview to inspect import previews." }; },
   async list_reminders() { return { ok: false, error: "Run through pywebview to manage reminders." }; },
   async add_reminder() { return { ok: false, error: "Run through pywebview to manage reminders." }; },
   async delete_reminder() { return { ok: false, error: "Run through pywebview to manage reminders." }; },
   async save_reminders() { return { ok: false, error: "Run through pywebview to manage reminders." }; },
   async pick_openrouter_export() { return { ok: false, error: "Run through pywebview to pick files." }; },
+  async pick_conversation_export() { return { ok: false, error: "Run through pywebview to pick files." }; },
   async preview_persona_save() { return { ok: false, error: "Run through pywebview to save." }; },
   async save_persona() { return { ok: false, error: "Run through pywebview to save." }; },
   async get_secrets() { return { ok: false, error: "Run through pywebview to edit secrets." }; },
@@ -292,6 +296,7 @@ let secretsBackdropPointerDown = false;
 let lanternBackdropPointerDown = false;
 let memoriesBackdropPointerDown = false;
 let journalBackdropPointerDown = false;
+let importBackdropPointerDown = false;
 let coreBackdropPointerDown = false;
 let skillBackdropPointerDown = false;
 let confirmBackdropPointerDown = false;
@@ -3252,8 +3257,11 @@ function handleContinuityAction(action) {
     openCoreDialog("_relationship");
     return;
   }
+  if (action === "import-content") {
+    openImportDialog();
+    return;
+  }
   const messages = {
-    "import-content": "Continuity import will start with pasted companion-written notes and preview before writing.",
     "learn-more": "Continuity planning lives in designs/continuity_section.md.",
   };
   setNotice(messages[action] || "Continuity action coming soon.", "info", NOTICE_INFO_MS);
@@ -3354,7 +3362,7 @@ async function submitNewPersona() {
     return;
   }
   if (el("newPersonaImportEnabled").checked && !importPath) {
-    showNewPersonaError("Choose an OpenRouter JSON export or turn import off.");
+    showNewPersonaError("Choose a conversation export or turn preview off.");
     return;
   }
   if (state.dirty || hasEditableChanges()) {
@@ -3381,12 +3389,6 @@ async function submitNewPersona() {
     return;
   }
 
-  let importResult = null;
-  if (importPath) {
-    showNewPersonaError("Persona created. Importing transcript...");
-    importResult = await api().import_openrouter_chat(result.name || slug, importPath);
-  }
-
   closeNewPersonaDialog();
   state.personas = await api().list_personas();
   if (result.persona && !state.personas.some((p) => p.name === result.persona.name)) {
@@ -3394,17 +3396,373 @@ async function submitNewPersona() {
   }
   renderPersonaMenu();
   await loadPersona(result.name || slug);
-  if (importResult && !importResult.ok) {
-    setNotice(`Created ${result.display_name || displayName}, but import failed: ${importResult.error || "unknown error"}`, "warning", NOTICE_WARNING_MS);
-  } else if (importResult) {
-    setNotice(
-      `Created ${result.display_name || displayName}. Imported ${importResult.imported_messages} messages; skipped ${importResult.skipped_reasoning} reasoning blocks. Review setup before starting.`,
-      "warning",
-      NOTICE_WARNING_MS
-    );
+  if (importPath) {
+    openImportDialog(importPath);
+    await previewImportPath(importPath);
+    setNotice(`Created ${result.display_name || displayName}. Import preview is open; nothing has been written into conversation history.`, "warning", NOTICE_WARNING_MS);
   } else {
     setNotice(`Created ${result.display_name || displayName}. Review setup before starting.`, "warning", NOTICE_WARNING_MS);
   }
+}
+
+function openImportDialog(initialPath = "") {
+  if (!state.current || state.current.name === "__base__") {
+    setNotice("Choose a persona first.", "warning", NOTICE_WARNING_MS);
+    return;
+  }
+  if (initialPath) {
+    resetImportPreviewState();
+    el("importPath").value = initialPath;
+  }
+  el("importDialog").classList.remove("hidden");
+  document.body.classList.add("modal-open");
+  renderImportPreview();
+  setTimeout(() => el("importPath").focus(), 0);
+}
+
+function closeImportDialog() {
+  el("importDialog").classList.add("hidden");
+  document.body.classList.remove("modal-open");
+}
+
+function setImportDialogExpanded(expanded) {
+  const card = el("importPreviewCard");
+  const button = el("importExpandBtn");
+  if (!card || !button) return;
+  card.classList.toggle("expanded", Boolean(expanded));
+  button.textContent = expanded ? "Restore" : "Expand";
+  button.title = expanded ? "Restore compact import preview" : "Expand import preview";
+}
+
+function toggleImportDialogExpanded() {
+  const card = el("importPreviewCard");
+  setImportDialogExpanded(!card?.classList.contains("expanded"));
+}
+
+function resetImportPreviewState() {
+  state.importPreview = { previewId: "", path: "", batch: null, selectedId: "", choices: {}, continuationId: "", exchangeChoices: {} };
+}
+
+function setImportNotice(message) {
+  el("importNotice").textContent = message || "Choose a Claude, ChatGPT, OpenRouter, or Markdown export. Preview is read-only.";
+}
+
+async function previewImportPath(path = "") {
+  if (!state.current || state.current.name === "__base__") {
+    setNotice("Choose a persona first.", "warning", NOTICE_WARNING_MS);
+    return;
+  }
+  const importPath = (path || el("importPath").value || "").trim();
+  if (!importPath) {
+    setImportNotice("Choose an export file first.");
+    return;
+  }
+  el("importPath").value = importPath;
+  el("importPreviewBtn").disabled = true;
+  setImportNotice("Reading export preview...");
+  const result = await api().preview_conversation_import(importPath);
+  el("importPreviewBtn").disabled = false;
+  if (!result.ok) {
+    resetImportPreviewState();
+    renderImportPreview();
+    setImportNotice(result.error || "Could not preview this export.");
+    return;
+  }
+  const conversations = result.batch?.conversations || [];
+  state.importPreview = {
+    previewId: result.preview_id || "",
+    path: result.path || importPath,
+    batch: result.batch || null,
+    selectedId: conversations[0]?.id || "",
+    choices: {},
+    continuationId: "",
+    exchangeChoices: {},
+  };
+  el("importPath").value = state.importPreview.path;
+  renderImportPreview();
+  el("importConversations").scrollTop = 0;
+  el("importDetail").scrollTop = 0;
+  const skippedCount = Number(state.importPreview.batch?.skipped_message_count || 0);
+  setImportNotice(skippedCount
+    ? "Preview loaded. Red conversations contain empty or skipped messages you can review in the transcript."
+    : "Preview loaded. These choices are temporary and do not write companion data.");
+  if (state.importPreview.selectedId) {
+    await selectImportConversation(state.importPreview.selectedId);
+  }
+}
+
+function renderImportPreview() {
+  const preview = state.importPreview;
+  const batch = preview.batch;
+  el("importProgressText").textContent = batch ? "0% - preview only" : "Not started";
+  el("importProgressFill").style.width = "0%";
+  if (!batch) {
+    el("importSubtitle").textContent = "Dry-run old chats before writing anything into Pulse.";
+    el("importSummary").classList.add("hidden");
+    el("importSummary").innerHTML = "";
+    el("importConversations").innerHTML = `
+      <div class="memory-empty">
+        <strong>No export loaded.</strong>
+        <span>Preview an export to browse conversations, mark keep/exclude, and choose a continuation candidate.</span>
+      </div>`;
+    el("importDetail").innerHTML = `
+      <div class="memory-empty">
+        <strong>Select a conversation.</strong>
+        <span>Messages appear here. This first slice does not write them into the persona database.</span>
+      </div>`;
+    return;
+  }
+
+  const skipped = Object.entries(batch.skipped_counts || {})
+    .filter(([, count]) => Number(count) > 0)
+    .map(([name, count]) => `${humanizeMemoryBadge(name)}: ${count}`)
+    .join(" / ");
+  el("importSubtitle").textContent = `${humanizeMemoryBadge(batch.source)} export / ${batch.conversation_count || 0} conversations`;
+  el("importSummary").classList.remove("hidden");
+  el("importSummary").innerHTML = `
+    <span><strong>${escapeHtml(batch.conversation_count || 0)}</strong> conversations</span>
+    <span><strong>${escapeHtml(batch.message_count || 0)}</strong> messages</span>
+    ${Number(batch.skipped_message_count || 0) ? `<span class="import-summary-warning"><strong>${escapeHtml(batch.skipped_message_count || 0)}</strong> skipped/empty</span>` : ""}
+    <span><strong>${escapeHtml(batch.estimated_tokens || 0)}</strong> est. tokens</span>
+    ${skipped ? `<span>${escapeHtml(skipped)}</span>` : ""}`;
+  renderImportConversationList();
+}
+
+function renderImportConversationList() {
+  const batch = state.importPreview.batch;
+  const conversations = batch?.conversations || [];
+  if (!conversations.length) {
+    el("importConversations").innerHTML = `
+      <div class="memory-empty">
+        <strong>No visible conversations found.</strong>
+        <span>This export did not produce user/assistant messages for preview.</span>
+      </div>`;
+    return;
+  }
+  el("importConversations").innerHTML = conversations.map(renderImportConversationCard).join("");
+  el("importConversations").querySelectorAll(".import-conversation-card").forEach((card) => {
+    card.addEventListener("click", (event) => {
+      if (event.target.closest("button")) return;
+      void selectImportConversation(card.dataset.conversationId);
+    });
+  });
+  el("importConversations").querySelectorAll("[data-import-choice]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      setImportConversationChoice(button.dataset.conversationId, button.dataset.importChoice);
+    });
+  });
+}
+
+function renderImportConversationCard(conversation) {
+  const choice = importConversationChoice(conversation.id);
+  const selected = conversation.id === state.importPreview.selectedId ? " selected" : "";
+  const skippedCount = Number(conversation.skipped_message_count || 0);
+  const needsReview = skippedCount > 0 || Number(conversation.message_count || 0) === 0;
+  const reviewClass = needsReview ? " warning" : "";
+  const warnings = (conversation.warnings || []).map((warning) => `<span>${escapeHtml(warning)}</span>`).join("");
+  const skipped = skippedCount ? `<span class="import-skipped-pill">${escapeHtml(skippedCount)} skipped</span>` : "";
+  const model = conversation.model ? `<span>${escapeHtml(conversation.model)}</span>` : "";
+  return `
+    <article class="import-conversation-card${selected}${reviewClass} ${choice}" data-conversation-id="${escapeHtml(conversation.id)}">
+      <div class="memory-card-head">
+        <span>${escapeHtml(formatImportDate(conversation.created_at))}</span>
+        <span>${escapeHtml(conversation.message_count || 0)} msgs</span>
+        ${skipped}
+        <span>${escapeHtml(conversation.estimated_tokens || 0)} tokens</span>
+        ${model}
+      </div>
+      <h3>${escapeHtml(conversation.title || "Untitled conversation")}</h3>
+      <p>${escapeHtml(conversation.preview || (needsReview ? "No visible text to preview." : ""))}</p>
+      <div class="import-card-warnings">${warnings}</div>
+      <div class="import-card-actions">
+        <button class="${choice === "keep" ? "active" : ""}" type="button" data-conversation-id="${escapeHtml(conversation.id)}" data-import-choice="keep">Keep</button>
+        <button class="${choice === "exclude" ? "active" : ""}" type="button" data-conversation-id="${escapeHtml(conversation.id)}" data-import-choice="exclude">Exclude</button>
+        <button class="${choice === "continue" ? "active" : ""}" type="button" data-conversation-id="${escapeHtml(conversation.id)}" data-import-choice="continue">Continue</button>
+      </div>
+    </article>`;
+}
+
+function importConversationChoice(conversationId) {
+  if (state.importPreview.continuationId === conversationId) return "continue";
+  return state.importPreview.choices[conversationId] || "keep";
+}
+
+function setImportConversationChoice(conversationId, choice) {
+  if (!conversationId) return;
+  if (choice === "continue") {
+    state.importPreview.continuationId = conversationId;
+    state.importPreview.choices[conversationId] = "keep";
+  } else {
+    state.importPreview.choices[conversationId] = choice === "exclude" ? "exclude" : "keep";
+    if (choice === "exclude" && state.importPreview.continuationId === conversationId) {
+      state.importPreview.continuationId = "";
+    }
+  }
+  state.importPreview.selectedId = conversationId;
+  renderImportPreview();
+  void selectImportConversation(conversationId, true);
+}
+
+async function selectImportConversation(conversationId, force = false, resetDetailScroll = true) {
+  if (!conversationId || !state.importPreview.previewId) return;
+  if (!force && state.importPreview.selectedId === conversationId && el("importDetail").dataset.conversationId === conversationId) return;
+  const previousDetailScroll = el("importDetail").scrollTop;
+  state.importPreview.selectedId = conversationId;
+  renderImportConversationList();
+  el("importDetail").dataset.conversationId = conversationId;
+  el("importDetail").innerHTML = `<div class="memory-empty">Loading conversation...</div>`;
+  const result = await api().get_import_preview_conversation(state.importPreview.previewId, conversationId);
+  if (!result.ok) {
+    el("importDetail").innerHTML = `<div class="memory-empty">${escapeHtml(result.error || "Conversation preview unavailable.")}</div>`;
+    return;
+  }
+  renderImportConversationDetail(result.conversation || {});
+  el("importDetail").scrollTop = resetDetailScroll ? 0 : previousDetailScroll;
+}
+
+function renderImportConversationDetail(conversation) {
+  const messages = conversation.messages || [];
+  const warnings = (conversation.warnings || []).map((warning) => `<span>${escapeHtml(warning)}</span>`).join("");
+  const model = conversation.model ? ` / ${conversation.model}` : "";
+  const skippedCount = Number(conversation.skipped_message_count || 0);
+  const messageMeta = `${conversation.message_count || 0} messages${skippedCount ? ` / ${skippedCount} skipped` : ""}${model}`;
+  const exchanges = buildImportExchanges(messages);
+  const excludedCount = exchanges.filter((exchange) => importExchangeChoice(conversation.id, exchange.id) === "exclude").length;
+  const flaggedCount = exchanges.filter((exchange) => exchange.warnings.length).length;
+  const excludedNote = excludedCount
+    ? `<div class="memory-source-note"><strong>${escapeHtml(excludedCount)} exchange${excludedCount === 1 ? "" : "s"} excluded</strong><span>Exchange exclusions are temporary preview choices in this slice.</span></div>`
+    : "";
+  const flaggedNote = flaggedCount
+    ? `<div class="memory-source-note import-review-note"><strong>${escapeHtml(flaggedCount)} exchange${flaggedCount === 1 ? "" : "s"} need review</strong><span>Pulse found unusual role ordering or skipped empty messages.</span></div>`
+    : "";
+  const truncated = conversation.messages_truncated
+    ? `<div class="memory-source-note"><strong>Preview truncated</strong><span>Showing ${escapeHtml(conversation.shown_message_count || messages.length)} of ${escapeHtml(conversation.message_count || messages.length)} messages.</span></div>`
+    : "";
+  el("importDetail").innerHTML = `
+    <div class="import-detail-head">
+      <div>
+        <h3>${escapeHtml(conversation.title || "Untitled conversation")}</h3>
+        <span>${escapeHtml(formatImportDate(conversation.created_at))} / ${escapeHtml(messageMeta)}</span>
+      </div>
+    </div>
+    ${warnings ? `<div class="import-detail-warnings">${warnings}</div>` : ""}
+    ${excludedNote}
+    ${flaggedNote}
+    ${truncated}
+    <div class="import-message-list">
+      ${exchanges.map((exchange) => renderImportExchange(conversation.id, exchange)).join("") || `<div class="memory-empty">No messages to show.</div>`}
+    </div>`;
+  el("importDetail").querySelectorAll("[data-import-exchange-choice]").forEach((button) => {
+    button.addEventListener("click", () => {
+      setImportExchangeChoice(button.dataset.conversationId, button.dataset.exchangeId, button.dataset.importExchangeChoice);
+    });
+  });
+}
+
+function buildImportExchanges(messages) {
+  const exchanges = [];
+  let current = null;
+  const finish = () => {
+    if (!current || !current.messages.length) return;
+    current.warnings = exchangeWarnings(current.messages);
+    exchanges.push(current);
+    current = null;
+  };
+  messages.forEach((message, index) => {
+    const role = message.role === "assistant" ? "assistant" : "user";
+    if (!current) {
+      current = { id: `ex${exchanges.length + 1}`, messages: [message], warnings: [] };
+      return;
+    }
+    const roles = current.messages.map((item) => item.role === "assistant" ? "assistant" : "user");
+    const hasUser = roles.includes("user");
+    const hasAssistant = roles.includes("assistant");
+    if (role === "user" && (hasUser || hasAssistant)) {
+      finish();
+      current = { id: `ex${exchanges.length + 1}`, messages: [message], warnings: [] };
+      return;
+    }
+    if (role === "assistant" && hasAssistant && !hasUser) {
+      finish();
+      current = { id: `ex${exchanges.length + 1}`, messages: [message], warnings: [] };
+      return;
+    }
+    current.messages.push(message);
+    if (index === messages.length - 1) finish();
+  });
+  finish();
+  return exchanges;
+}
+
+function exchangeWarnings(messages) {
+  const warnings = [];
+  const roles = messages.map((message) => message.role === "assistant" ? "assistant" : "user");
+  if (messages.some((message) => message.skipped)) warnings.push("Contains skipped empty message.");
+  if (!roles.includes("user")) warnings.push("No user message in this exchange.");
+  if (!roles.includes("assistant")) warnings.push("No assistant reply in this exchange.");
+  for (let i = 1; i < roles.length; i += 1) {
+    if (roles[i] === roles[i - 1]) {
+      warnings.push(`Consecutive ${humanizeMemoryBadge(roles[i])} messages.`);
+      break;
+    }
+  }
+  return warnings;
+}
+
+function renderImportExchange(conversationId, exchange) {
+  const choice = importExchangeChoice(conversationId, exchange.id);
+  const warnings = exchange.warnings.map((warning) => `<span>${escapeHtml(warning)}</span>`).join("");
+  return `
+    <article class="import-exchange ${choice} ${exchange.warnings.length ? "review" : ""}">
+      <div class="import-exchange-head">
+        <strong>${escapeHtml(humanizeMemoryBadge(choice))}</strong>
+        <span>${escapeHtml(exchange.messages.length)} message${exchange.messages.length === 1 ? "" : "s"}</span>
+        <button class="${choice === "keep" ? "active" : ""}" type="button" data-conversation-id="${escapeHtml(conversationId)}" data-exchange-id="${escapeHtml(exchange.id)}" data-import-exchange-choice="keep">Keep exchange</button>
+        <button class="${choice === "exclude" ? "active" : ""}" type="button" data-conversation-id="${escapeHtml(conversationId)}" data-exchange-id="${escapeHtml(exchange.id)}" data-import-exchange-choice="exclude">Exclude exchange</button>
+      </div>
+      ${warnings ? `<div class="import-card-warnings">${warnings}</div>` : ""}
+      ${exchange.messages.map(renderImportMessage).join("")}
+    </article>`;
+}
+
+function renderImportMessage(message) {
+  const role = message.role === "assistant" ? "assistant" : "user";
+  const skipped = Boolean(message.skipped);
+  const model = role === "assistant" && message.model ? `<span>${escapeHtml(message.model)}</span>` : "";
+  const skippedPill = skipped ? `<span class="import-skipped-pill">Skipped</span>` : "";
+  const content = skipped ? (message.skip_reason || "Skipped message") : (message.content || "");
+  return `
+    <article class="import-message ${role}${skipped ? " skipped" : ""}">
+      <div>
+        <strong>${escapeHtml(humanizeMemoryBadge(role))}</strong>
+        <span>${escapeHtml(formatImportDate(message.created_at))}</span>
+        ${skippedPill}
+        ${model}
+      </div>
+      <p>${escapeHtml(content)}</p>
+    </article>`;
+}
+
+function importExchangeChoice(conversationId, exchangeId) {
+  return state.importPreview.exchangeChoices?.[conversationId]?.[exchangeId] || "keep";
+}
+
+function setImportExchangeChoice(conversationId, exchangeId, choice) {
+  if (!conversationId || !exchangeId) return;
+  if (!state.importPreview.exchangeChoices[conversationId]) {
+    state.importPreview.exchangeChoices[conversationId] = {};
+  }
+  state.importPreview.exchangeChoices[conversationId][exchangeId] = choice === "exclude" ? "exclude" : "keep";
+  void selectImportConversation(conversationId, true, false);
+}
+
+function formatImportDate(value) {
+  if (!value) return "unknown date";
+  const raw = String(value);
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) return raw.slice(0, 24);
+  return parsed.toISOString().slice(0, 16).replace("T", " ");
 }
 
 async function pickFolder(inputId) {
@@ -3666,7 +4024,7 @@ function wireEvents() {
     el("newPersonaImportFields").classList.toggle("hidden", !el("newPersonaImportEnabled").checked);
   });
   el("newPersonaImportPicker").addEventListener("click", async () => {
-    const result = await api().pick_openrouter_export(el("newPersonaImportPath").value || "");
+    const result = await api().pick_conversation_export(el("newPersonaImportPath").value || "");
     if (result?.ok && result.path) {
       el("newPersonaImportPath").value = result.path;
       el("newPersonaImportEnabled").checked = true;
@@ -3742,6 +4100,53 @@ function wireEvents() {
   });
   el("journalTypeTabs").querySelectorAll("[data-journal-type]").forEach((button) => {
     button.addEventListener("click", () => { void setJournalType(button.dataset.journalType); });
+  });
+  el("importCloseBtn").addEventListener("click", closeImportDialog);
+  el("importPicker").addEventListener("click", async () => {
+    const result = await api().pick_conversation_export(el("importPath").value || "");
+    if (result?.ok && result.path) {
+      el("importPath").value = result.path;
+      await previewImportPath(result.path);
+    } else if (result && !result.ok && result.error) {
+      setImportNotice(result.error);
+    }
+  });
+  el("importPreviewBtn").addEventListener("click", () => { void previewImportPath(); });
+  el("importExpandBtn").addEventListener("click", toggleImportDialogExpanded);
+  el("importPath").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      void previewImportPath();
+    } else if (event.key === "Escape") {
+      closeImportDialog();
+    }
+  });
+  el("importDialog").addEventListener("pointerdown", (event) => {
+    importBackdropPointerDown = event.target === el("importDialog");
+  });
+  el("importDialog").addEventListener("click", (event) => {
+    if (importBackdropPointerDown && event.target === el("importDialog")) closeImportDialog();
+    importBackdropPointerDown = false;
+  });
+  document.querySelectorAll(".continuity-dropzone").forEach((zone) => {
+    zone.addEventListener("click", () => openImportDialog());
+    zone.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      zone.classList.add("dragging");
+    });
+    zone.addEventListener("dragleave", () => zone.classList.remove("dragging"));
+    zone.addEventListener("drop", (event) => {
+      event.preventDefault();
+      zone.classList.remove("dragging");
+      const file = event.dataTransfer?.files?.[0];
+      const path = file?.path || file?.name || "";
+      openImportDialog(path);
+      if (file?.path) {
+        void previewImportPath(file.path);
+      } else {
+        setImportNotice("Drop received. If the path did not fill in, use Choose so Pulse can read the file.");
+      }
+    });
   });
   el("coreCloseBtn").addEventListener("click", closeCoreDialog);
   el("coreSaveBtn").addEventListener("click", saveCoreAnchor);

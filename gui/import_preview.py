@@ -1,0 +1,769 @@
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+ROLE_ALIASES = {
+    "human": "user",
+    "user": "user",
+    "you": "user",
+    "assistant": "assistant",
+    "model": "assistant",
+    "ai": "assistant",
+}
+
+
+@dataclass
+class PreviewMessage:
+    id: str
+    role: str
+    content: str
+    created_at: str = ""
+    source_role: str = ""
+    model: str = ""
+    skipped: bool = False
+    skip_reason: str = ""
+
+    def to_dict(self, include_content: bool = True) -> dict:
+        data = {
+            "id": self.id,
+            "role": self.role,
+            "created_at": self.created_at,
+            "source_role": self.source_role,
+            "model": self.model,
+            "skipped": self.skipped,
+            "skip_reason": self.skip_reason,
+            "char_count": len(self.content),
+        }
+        if include_content:
+            data["content"] = self.content
+        return data
+
+
+@dataclass
+class PreviewConversation:
+    id: str
+    source_id: str
+    title: str
+    created_at: str = ""
+    updated_at: str = ""
+    model: str = ""
+    messages: list[PreviewMessage] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+
+    def to_summary_dict(self) -> dict:
+        visible_messages = [msg for msg in self.messages if not msg.skipped]
+        skipped_count = len(self.messages) - len(visible_messages)
+        user_count = sum(1 for msg in visible_messages if msg.role == "user")
+        assistant_count = sum(1 for msg in visible_messages if msg.role == "assistant")
+        preview = next((msg.content for msg in visible_messages if msg.content.strip()), "")
+        warnings = list(self.warnings)
+        if skipped_count:
+            warnings.append(f"{skipped_count} empty/skipped message{'s' if skipped_count != 1 else ''}.")
+        if not visible_messages:
+            warnings.append("No visible user/assistant text.")
+        return {
+            "id": self.id,
+            "source_id": self.source_id,
+            "title": self.title,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "model": self.model,
+            "message_count": len(visible_messages),
+            "skipped_message_count": skipped_count,
+            "user_count": user_count,
+            "assistant_count": assistant_count,
+            "estimated_tokens": estimate_tokens("\n".join(msg.content for msg in visible_messages)),
+            "preview": collapse_ws(preview)[:220],
+            "warnings": warnings,
+        }
+
+    def to_detail_dict(self, message_limit: int = 500) -> dict:
+        messages = self.messages[:message_limit]
+        return {
+            **self.to_summary_dict(),
+            "messages": [msg.to_dict() for msg in messages],
+            "messages_truncated": len(self.messages) > len(messages),
+            "shown_message_count": len(messages),
+        }
+
+
+@dataclass
+class PreviewBatch:
+    source: str
+    source_version: str
+    file_name: str
+    file_size: int
+    conversations: list[PreviewConversation]
+    warnings: list[str] = field(default_factory=list)
+    skipped_counts: dict[str, int] = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        message_count = sum(
+            len([msg for msg in conv.messages if not msg.skipped])
+            for conv in self.conversations
+        )
+        skipped_message_count = sum(
+            len([msg for msg in conv.messages if msg.skipped])
+            for conv in self.conversations
+        )
+        conversations = sort_conversations_recent_first(self.conversations)
+        models = sorted({conv.model for conv in conversations if conv.model})
+        return {
+            "source": self.source,
+            "source_version": self.source_version,
+            "file_name": self.file_name,
+            "file_size": self.file_size,
+            "conversation_count": len(self.conversations),
+            "message_count": message_count,
+            "skipped_message_count": skipped_message_count,
+            "estimated_tokens": sum(
+                conv.to_summary_dict()["estimated_tokens"] for conv in conversations
+            ),
+            "models": models,
+            "warnings": self.warnings,
+            "skipped_counts": self.skipped_counts,
+            "conversations": [conv.to_summary_dict() for conv in conversations],
+        }
+
+
+def preview_import_file(path: Path) -> PreviewBatch:
+    path = Path(path)
+    if not path.is_file():
+        raise FileNotFoundError("Conversation export file not found.")
+    suffix = path.suffix.lower()
+    if suffix == ".json":
+        return _preview_json(path)
+    if suffix in {".md", ".markdown"}:
+        return _preview_markdown(path)
+    raise ValueError("Unsupported import preview file type. Choose a JSON or Markdown export.")
+
+
+def _preview_json(path: Path) -> PreviewBatch:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Could not parse JSON export: {e}") from e
+
+    file_size = path.stat().st_size
+    if isinstance(payload, dict) and payload.get("version") == "orpg.3.0":
+        return _preview_openrouter(path.name, file_size, payload)
+
+    if isinstance(payload, list) and payload:
+        first = next((item for item in payload if isinstance(item, dict)), {})
+        if isinstance(first, dict) and "chat_messages" in first:
+            return _preview_claude(path.name, file_size, payload)
+        if isinstance(first, dict) and "mapping" in first:
+            return _preview_chatgpt(path.name, file_size, payload)
+        generic = _preview_generic_list(path.name, file_size, payload)
+        if generic.conversations:
+            return generic
+
+    if isinstance(payload, dict):
+        generic = _preview_generic_dict(path.name, file_size, payload)
+        if generic.conversations:
+            return generic
+
+    raise ValueError("Could not recognize a supported conversation export shape.")
+
+
+def _preview_claude(file_name: str, file_size: int, payload: list[Any]) -> PreviewBatch:
+    conversations: list[PreviewConversation] = []
+    skipped_empty = 0
+    for index, conv in enumerate(payload):
+        if not isinstance(conv, dict):
+            continue
+        messages: list[PreviewMessage] = []
+        raw_messages = conv.get("chat_messages") or []
+        for msg_index, msg in enumerate(raw_messages):
+            if not isinstance(msg, dict):
+                continue
+            role = normalize_role(msg.get("sender"))
+            text = sanitize_claude_text(extract_claude_text(msg))
+            if not role:
+                if not text:
+                    skipped_empty += 1
+                continue
+            if not text:
+                skipped_empty += 1
+                messages.append(make_skipped_message(
+                    id=str(msg.get("uuid") or f"m{msg_index}"),
+                    role=role,
+                    source_role=str(msg.get("sender") or ""),
+                    created_at=normalize_timestamp(msg.get("created_at")),
+                    model=extract_model_hint(msg),
+                    reason="Empty message",
+                ))
+                continue
+            messages.append(PreviewMessage(
+                id=str(msg.get("uuid") or f"m{msg_index}"),
+                role=role,
+                source_role=str(msg.get("sender") or ""),
+                content=text,
+                created_at=normalize_timestamp(msg.get("created_at")),
+                model=extract_model_hint(msg),
+            ))
+        warnings = []
+        if not raw_messages:
+            skipped_empty += 1
+            warnings.append("No messages found.")
+        title = clean_title(conv.get("name"), fallback=f"Untitled Claude Conversation {index + 1}")
+        if not str(conv.get("name") or "").strip():
+            warnings.append("Untitled conversation.")
+        conversations.append(PreviewConversation(
+            id=f"claude:{conv.get('uuid') or index}",
+            source_id=str(conv.get("uuid") or index),
+            title=title,
+            created_at=normalize_timestamp(conv.get("created_at")),
+            updated_at=normalize_timestamp(conv.get("updated_at")),
+            model=extract_model_hint(conv),
+            messages=messages,
+            warnings=warnings,
+        ))
+    return PreviewBatch(
+        source="claude",
+        source_version="conversations.json",
+        file_name=file_name,
+        file_size=file_size,
+        conversations=conversations,
+        skipped_counts={"empty_messages_or_conversations": skipped_empty},
+    )
+
+
+def _preview_chatgpt(file_name: str, file_size: int, payload: list[Any]) -> PreviewBatch:
+    conversations: list[PreviewConversation] = []
+    skipped_internal = 0
+    skipped_empty = 0
+    for index, conv in enumerate(payload):
+        if not isinstance(conv, dict):
+            continue
+        messages = []
+        for msg_index, msg in enumerate(walk_chatgpt_messages(conv.get("mapping") or {})):
+            role = normalize_role(msg.get("role"))
+            text = msg.get("content", "").strip()
+            if not role:
+                skipped_internal += 1
+                continue
+            if not text:
+                if is_chatgpt_internal_content(msg.get("content_type")):
+                    skipped_internal += 1
+                    continue
+                skipped_empty += 1
+                messages.append(make_skipped_message(
+                    id=str(msg.get("id") or f"m{msg_index}"),
+                    role=role,
+                    source_role=str(msg.get("role") or ""),
+                    created_at=normalize_timestamp(msg.get("created_at")),
+                    model=extract_model_hint(msg),
+                    reason="Empty message",
+                ))
+                continue
+            messages.append(PreviewMessage(
+                id=str(msg.get("id") or f"m{msg_index}"),
+                role=role,
+                source_role=str(msg.get("role") or ""),
+                content=text,
+                created_at=normalize_timestamp(msg.get("created_at")),
+                model=extract_model_hint(msg),
+            ))
+        if not messages:
+            skipped_empty += 1
+        created_at = normalize_timestamp(conv.get("create_time"), from_epoch=True)
+        conversations.append(PreviewConversation(
+            id=f"chatgpt:{conv.get('id') or index}",
+            source_id=str(conv.get("id") or index),
+            title=clean_title(conv.get("title"), fallback=f"Untitled ChatGPT Conversation {index + 1}"),
+            created_at=created_at,
+            updated_at=normalize_timestamp(conv.get("update_time"), from_epoch=True),
+            model=extract_model_hint(conv),
+            messages=messages,
+        ))
+    return PreviewBatch(
+        source="chatgpt",
+        source_version="conversations.json",
+        file_name=file_name,
+        file_size=file_size,
+        conversations=conversations,
+        skipped_counts={
+            "internal_or_unknown_messages": skipped_internal,
+            "empty_messages_or_conversations": skipped_empty,
+        },
+    )
+
+
+def _preview_openrouter(file_name: str, file_size: int, payload: dict[str, Any]) -> PreviewBatch:
+    raw_messages = payload.get("messages")
+    raw_items = payload.get("items")
+    if not isinstance(raw_messages, dict) or not isinstance(raw_items, dict):
+        raise ValueError("OpenRouter export is missing messages/items maps.")
+
+    messages: list[PreviewMessage] = []
+    skipped_reasoning = 0
+    skipped_empty = 0
+    for index, message in enumerate(raw_messages.values()):
+        if not isinstance(message, dict):
+            continue
+        role = normalize_role(message.get("type"))
+        if role not in {"user", "assistant"}:
+            continue
+        visible_parts: list[str] = []
+        for item_id in openrouter_item_ids(message):
+            item = raw_items.get(item_id)
+            if not isinstance(item, dict):
+                continue
+            data = item.get("data")
+            if not isinstance(data, dict):
+                continue
+            item_type = data.get("type")
+            if item_type == "reasoning":
+                skipped_reasoning += 1
+                continue
+            if item_type != "message":
+                continue
+            if data.get("role") and normalize_role(data.get("role")) != role:
+                continue
+            text = content_text(data.get("content")).strip()
+            if text:
+                visible_parts.append(text)
+        content = "\n\n".join(visible_parts).strip()
+        if not content:
+            skipped_empty += 1
+            messages.append(make_skipped_message(
+                id=str(message.get("id") or f"m{index}"),
+                role=role,
+                source_role=str(message.get("type") or ""),
+                created_at=normalize_timestamp(message.get("createdAt")),
+                model=extract_model_hint(message),
+                reason="Empty visible message",
+            ))
+            continue
+        messages.append(PreviewMessage(
+            id=str(message.get("id") or f"m{index}"),
+            role=role,
+            source_role=str(message.get("type") or ""),
+            content=content,
+            created_at=normalize_timestamp(message.get("createdAt")),
+            model=extract_model_hint(message),
+        ))
+
+    if not messages:
+        raise ValueError("No visible user/assistant messages found in OpenRouter export.")
+
+    title = clean_title(payload.get("title"), fallback="OpenRouter Chat")
+    conv = PreviewConversation(
+        id=f"openrouter:{slug_id(title)}",
+        source_id=str(payload.get("id") or title),
+        title=title,
+        created_at=messages[0].created_at,
+        updated_at=messages[-1].created_at,
+        model=extract_model_hint(payload),
+        messages=messages,
+        warnings=(["Hidden reasoning blocks were skipped."] if skipped_reasoning else []),
+    )
+    return PreviewBatch(
+        source="openrouter",
+        source_version=str(payload.get("version") or ""),
+        file_name=file_name,
+        file_size=file_size,
+        conversations=[conv],
+        skipped_counts={
+            "reasoning_blocks": skipped_reasoning,
+            "empty_messages": skipped_empty,
+        },
+    )
+
+
+def _preview_generic_list(file_name: str, file_size: int, payload: list[Any]) -> PreviewBatch:
+    conversations: list[PreviewConversation] = []
+    for index, item in enumerate(payload):
+        if not isinstance(item, dict):
+            continue
+        conv = generic_conversation_from_dict(item, index, "generic")
+        if conv:
+            conversations.append(conv)
+    return PreviewBatch(
+        source="generic",
+        source_version="json-list",
+        file_name=file_name,
+        file_size=file_size,
+        conversations=conversations,
+        warnings=(["Generic parser used. Review role/date mapping carefully."] if conversations else []),
+    )
+
+
+def _preview_generic_dict(file_name: str, file_size: int, payload: dict[str, Any]) -> PreviewBatch:
+    conv = generic_conversation_from_dict(payload, 0, "generic")
+    conversations = [conv] if conv else []
+    return PreviewBatch(
+        source="generic",
+        source_version="json-object",
+        file_name=file_name,
+        file_size=file_size,
+        conversations=conversations,
+        warnings=(["Generic parser used. Review role/date mapping carefully."] if conversations else []),
+    )
+
+
+def _preview_markdown(path: Path) -> PreviewBatch:
+    text = path.read_text(encoding="utf-8")
+    metadata, body = split_frontmatter(text)
+    messages = []
+    for index, (role, content) in enumerate(parse_markdown_messages(body)):
+        normalized = normalize_role(role)
+        if not normalized:
+            continue
+        if not content.strip():
+            messages.append(make_skipped_message(
+                id=f"m{index}",
+                role=normalized,
+                source_role=role,
+                created_at=normalize_timestamp(metadata.get("date")),
+                model=str(metadata.get("model") or metadata.get("model_slug") or "").strip(),
+                reason="Empty message",
+            ))
+            continue
+        messages.append(PreviewMessage(
+            id=f"m{index}",
+            role=normalized,
+            source_role=role,
+            content=content.strip(),
+            created_at=normalize_timestamp(metadata.get("date")),
+            model=str(metadata.get("model") or metadata.get("model_slug") or "").strip(),
+        ))
+    if not messages:
+        raise ValueError("No visible user/assistant messages found in Markdown export.")
+    title = clean_title(metadata.get("title"), fallback=path.stem)
+    conv = PreviewConversation(
+        id=f"markdown:{slug_id(path.stem)}",
+        source_id=str(metadata.get("conversation_id") or path.stem),
+        title=title,
+        created_at=normalize_timestamp(metadata.get("date")),
+        model=str(metadata.get("model") or metadata.get("model_slug") or "").strip(),
+        messages=messages,
+    )
+    return PreviewBatch(
+        source=str(metadata.get("source") or "markdown"),
+        source_version="markdown",
+        file_name=path.name,
+        file_size=path.stat().st_size,
+        conversations=[conv],
+    )
+
+
+def generic_conversation_from_dict(item: dict[str, Any], index: int, source: str) -> PreviewConversation | None:
+    raw_messages = item.get("messages") or item.get("chat_messages") or item.get("conversation")
+    if not isinstance(raw_messages, list):
+        return None
+    messages = []
+    for msg_index, raw in enumerate(raw_messages):
+        if not isinstance(raw, dict):
+            continue
+        source_role = raw.get("role") or raw.get("sender") or raw.get("author")
+        role = normalize_role(source_role)
+        content = (
+            raw.get("content")
+            or raw.get("text")
+            or raw.get("message")
+            or raw.get("body")
+            or ""
+        )
+        if isinstance(content, list):
+            content = content_text(content)
+        if not role:
+            continue
+        if not str(content).strip():
+            messages.append(make_skipped_message(
+                id=str(raw.get("id") or raw.get("uuid") or f"m{msg_index}"),
+                role=role,
+                source_role=str(source_role or ""),
+                created_at=normalize_timestamp(raw.get("created_at") or raw.get("timestamp") or raw.get("createdAt")),
+                model=extract_model_hint(raw),
+                reason="Empty message",
+            ))
+            continue
+        messages.append(PreviewMessage(
+            id=str(raw.get("id") or raw.get("uuid") or f"m{msg_index}"),
+            role=role,
+            source_role=str(source_role or ""),
+            content=str(content).strip(),
+            created_at=normalize_timestamp(raw.get("created_at") or raw.get("timestamp") or raw.get("createdAt")),
+            model=extract_model_hint(raw),
+        ))
+    if not messages:
+        return None
+    return PreviewConversation(
+        id=f"{source}:{item.get('id') or item.get('uuid') or index}",
+        source_id=str(item.get("id") or item.get("uuid") or index),
+        title=clean_title(item.get("title") or item.get("name"), fallback=f"Imported Conversation {index + 1}"),
+        created_at=normalize_timestamp(item.get("created_at") or item.get("createdAt") or item.get("create_time")),
+        updated_at=normalize_timestamp(item.get("updated_at") or item.get("updatedAt") or item.get("update_time")),
+        model=extract_model_hint(item),
+        messages=messages,
+        warnings=["Generic parser used."],
+    )
+
+
+def make_skipped_message(
+    id: str,
+    role: str,
+    source_role: str = "",
+    created_at: str = "",
+    model: str = "",
+    reason: str = "Skipped message",
+) -> PreviewMessage:
+    return PreviewMessage(
+        id=id,
+        role=role,
+        source_role=source_role,
+        content="",
+        created_at=created_at,
+        model=model,
+        skipped=True,
+        skip_reason=reason,
+    )
+
+
+def extract_claude_text(msg: dict[str, Any]) -> str:
+    text = str(msg.get("text") or "").strip()
+    if text:
+        return text
+    parts = []
+    for block in msg.get("content") or []:
+        if isinstance(block, dict) and block.get("type") == "text" and block.get("text"):
+            parts.append(str(block["text"]).strip())
+    return "\n\n".join(part for part in parts if part)
+
+
+def sanitize_claude_text(text: str) -> str:
+    unsupported = r"```[\s\n]*This block is not supported on your current device yet\.?[\s\n]*```"
+    text = re.sub(unsupported, "", text, flags=re.IGNORECASE)
+    text = text.replace("This block is not supported on your current device yet.", "")
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+def walk_chatgpt_messages(mapping: dict[str, Any]) -> list[dict[str, Any]]:
+    if not isinstance(mapping, dict):
+        return []
+    all_children: set[str] = set()
+    for node in mapping.values():
+        if isinstance(node, dict):
+            all_children.update(child for child in node.get("children", []) if isinstance(child, str))
+    roots = [key for key in mapping if key not in all_children] or list(mapping.keys())
+    queue = list(roots)
+    seen = set()
+    messages = []
+    while queue:
+        node_id = queue.pop(0)
+        if node_id in seen:
+            continue
+        seen.add(node_id)
+        node = mapping.get(node_id)
+        if not isinstance(node, dict):
+            continue
+        msg = node.get("message")
+        if isinstance(msg, dict):
+            author = msg.get("author") or {}
+            role = author.get("role")
+            raw_content = msg.get("content") or {}
+            content = chatgpt_content_text(raw_content)
+            created_at = normalize_timestamp(msg.get("create_time"), from_epoch=True)
+            messages.append({
+                "id": msg.get("id") or node_id,
+                "role": role,
+                "content": content,
+                "content_type": raw_content.get("content_type") if isinstance(raw_content, dict) else "",
+                "created_at": created_at,
+            })
+        queue.extend(child for child in node.get("children", []) if isinstance(child, str))
+    return messages
+
+
+def is_chatgpt_internal_content(content_type: Any) -> bool:
+    return str(content_type or "") in {"system_error", "user_editable_context", "thoughts"}
+
+
+def chatgpt_content_text(content: Any) -> str:
+    if not isinstance(content, dict):
+        return ""
+    content_type = content.get("content_type")
+    if content_type in {"system_error", "user_editable_context", "thoughts"}:
+        return ""
+    if content_type in {"code", "execution_output"}:
+        return "[IMAGE_PROMPT]"
+    if content_type == "multimodal_text":
+        return sanitize_chatgpt_text("".join(str(part) for part in content.get("parts") or []))
+    if content_type == "text":
+        return sanitize_chatgpt_text("".join(str(part) for part in content.get("parts") or []))
+    if "parts" in content:
+        return sanitize_chatgpt_text("".join(str(part) for part in content.get("parts") or []))
+    return ""
+
+
+def sanitize_chatgpt_text(text: str) -> str:
+    lowered = text.lower()
+    if "do not say or show anything" in lowered or "please end this turn now" in lowered:
+        return ""
+    if "content_type" in text and "image_asset_pointer" in text:
+        return "[IMAGE]"
+    if '"prompt":' in text or "'prompt':" in text:
+        return "[IMAGE_PROMPT]"
+    return text.strip()
+
+
+def openrouter_item_ids(message: dict[str, Any]) -> list[str]:
+    ids = []
+    for item in message.get("items") or []:
+        if isinstance(item, str):
+            ids.append(item)
+        elif isinstance(item, dict) and isinstance(item.get("id"), str):
+            ids.append(item["id"])
+    return ids
+
+
+def content_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts = []
+    for chunk in content:
+        if isinstance(chunk, str):
+            parts.append(chunk)
+        elif isinstance(chunk, dict):
+            for key in ("text", "content", "value"):
+                value = chunk.get(key)
+                if isinstance(value, str):
+                    parts.append(value)
+                    break
+    return "\n".join(part for part in parts if part)
+
+
+def split_frontmatter(text: str) -> tuple[dict[str, Any], str]:
+    if not text.startswith("---"):
+        return {}, text
+    parts = text.split("---", 2)
+    if len(parts) < 3:
+        return {}, text
+    metadata: dict[str, Any] = {}
+    for raw in parts[1].splitlines():
+        if ":" not in raw:
+            continue
+        key, value = raw.split(":", 1)
+        metadata[key.strip()] = value.strip().strip('"').strip("'")
+    return metadata, parts[2]
+
+
+def parse_markdown_messages(body: str) -> list[tuple[str, str]]:
+    blocks = re.split(r"^> \*\*([^*]+):\*\*", body, flags=re.MULTILINE)
+    messages = []
+    for index in range(1, len(blocks), 2):
+        role = blocks[index].strip()
+        content_block = blocks[index + 1] if index + 1 < len(blocks) else ""
+        lines = []
+        for line in content_block.splitlines():
+            while line.startswith("> "):
+                line = line[2:]
+            while line.startswith(">"):
+                line = line[1:]
+            lines.append(line)
+        content = "\n".join(lines).strip()
+        messages.append((role, content))
+    return messages
+
+
+def normalize_role(value: Any) -> str:
+    role = str(value or "").strip().lower()
+    return ROLE_ALIASES.get(role, "")
+
+
+def normalize_timestamp(value: Any, from_epoch: bool = False) -> str:
+    if value in (None, ""):
+        return ""
+    try:
+        if from_epoch or isinstance(value, (int, float)):
+            return datetime.fromtimestamp(float(value), tz=timezone.utc).isoformat()
+        raw = str(value).strip()
+        if not raw:
+            return ""
+        if re.fullmatch(r"\d+(\.\d+)?", raw):
+            return datetime.fromtimestamp(float(raw), tz=timezone.utc).isoformat()
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).isoformat()
+    except (TypeError, ValueError, OSError):
+        return str(value)
+
+
+def sort_conversations_recent_first(conversations: list[PreviewConversation]) -> list[PreviewConversation]:
+    return sorted(
+        conversations,
+        key=lambda conv: timestamp_sort_value(
+            conv.updated_at
+            or conv.created_at
+            or (conv.messages[-1].created_at if conv.messages else "")
+        ),
+        reverse=True,
+    )
+
+
+def timestamp_sort_value(value: str) -> datetime:
+    if not value:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except ValueError:
+        return datetime.min.replace(tzinfo=timezone.utc)
+
+
+def extract_model_hint(value: Any, depth: int = 0) -> str:
+    if depth > 3:
+        return ""
+    if isinstance(value, dict):
+        for key, item in value.items():
+            key_text = str(key).lower()
+            if "model" in key_text and isinstance(item, str):
+                cleaned = collapse_ws(item)
+                if 1 <= len(cleaned) <= 120:
+                    return cleaned
+        for key, item in value.items():
+            key_text = str(key).lower()
+            if key_text in {"text", "content", "messages", "chat_messages", "mapping"}:
+                continue
+            found = extract_model_hint(item, depth + 1)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for item in value[:20]:
+            found = extract_model_hint(item, depth + 1)
+            if found:
+                return found
+    return ""
+
+
+def clean_title(value: Any, fallback: str) -> str:
+    title = collapse_ws(str(value or ""))
+    return title[:140] or fallback
+
+
+def collapse_ws(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def estimate_tokens(text: str) -> int:
+    if not text:
+        return 0
+    return max(1, len(text) // 4)
+
+
+def slug_id(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
+    return slug[:48] or "conversation"
