@@ -4,6 +4,10 @@ __pycache__/
 .env
 .venv/
 *data/
+*design/
+*scratch/
 personal_usage_notes.md
 # Keep schedules.json tracked (it's the empty initial state)
 .claude
+AGENTS.md
+CLAUDE.md
