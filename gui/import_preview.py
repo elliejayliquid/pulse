@@ -28,6 +28,7 @@ class PreviewMessage:
     model: str = ""
     skipped: bool = False
     skip_reason: str = ""
+    attachment_placeholder: bool = False
 
     def to_dict(self, include_content: bool = True) -> dict:
         data = {
@@ -38,6 +39,7 @@ class PreviewMessage:
             "model": self.model,
             "skipped": self.skipped,
             "skip_reason": self.skip_reason,
+            "attachment_placeholder": self.attachment_placeholder,
             "char_count": len(self.content),
         }
         if include_content:
@@ -59,6 +61,8 @@ class PreviewConversation:
     def to_summary_dict(self) -> dict:
         visible_messages = [msg for msg in self.messages if not msg.skipped]
         skipped_count = len(self.messages) - len(visible_messages)
+        review_issues = conversation_review_issues(self.messages)
+        duplicate_clusters = duplicate_resend_clusters(self.messages)
         user_count = sum(1 for msg in visible_messages if msg.role == "user")
         assistant_count = sum(1 for msg in visible_messages if msg.role == "assistant")
         preview = next((msg.content for msg in visible_messages if msg.content.strip()), "")
@@ -76,6 +80,9 @@ class PreviewConversation:
             "model": self.model,
             "message_count": len(visible_messages),
             "skipped_message_count": skipped_count,
+            "review_issue_count": len(review_issues),
+            "duplicate_cluster_count": len(duplicate_clusters),
+            "default_choice": "exclude" if not visible_messages else "keep",
             "user_count": user_count,
             "assistant_count": assistant_count,
             "estimated_tokens": estimate_tokens("\n".join(msg.content for msg in visible_messages)),
@@ -83,13 +90,35 @@ class PreviewConversation:
             "warnings": warnings,
         }
 
-    def to_detail_dict(self, message_limit: int = 500) -> dict:
-        messages = self.messages[:message_limit]
+    def to_detail_dict(self, message_offset: int = 0, message_limit: int = 160) -> dict:
+        total_messages = len(self.messages)
+        limit = clamp_int(message_limit, default=160, minimum=1, maximum=500)
+        offset = clamp_int(message_offset, default=0, minimum=0, maximum=max(total_messages - 1, 0))
+        if total_messages and offset >= total_messages:
+            offset = max(0, total_messages - limit)
+        end = min(total_messages, offset + limit)
+        messages = []
+        duplicate_map = duplicate_resend_map(self.messages)
+        for index, msg in enumerate(self.messages[offset:end], start=offset):
+            data = msg.to_dict()
+            data["index"] = index
+            if index in duplicate_map:
+                data.update(duplicate_map[index])
+            messages.append(data)
+        review_issues = conversation_review_issues(self.messages)
         return {
             **self.to_summary_dict(),
-            "messages": [msg.to_dict() for msg in messages],
-            "messages_truncated": len(self.messages) > len(messages),
+            "messages": messages,
+            "messages_truncated": total_messages > len(messages),
             "shown_message_count": len(messages),
+            "total_message_count": total_messages,
+            "message_offset": offset,
+            "message_end": end,
+            "message_limit": limit,
+            "has_earlier": offset > 0,
+            "has_later": end < total_messages,
+            "review_issues": review_issues,
+            "review_issue_count": len(review_issues),
         }
 
 
@@ -188,6 +217,18 @@ def _preview_claude(file_name: str, file_size: int, payload: list[Any]) -> Previ
             if not role:
                 if not text:
                     skipped_empty += 1
+                continue
+            attachment_placeholder = claude_attachment_placeholder(msg) if role == "user" else ""
+            if not text and attachment_placeholder:
+                messages.append(PreviewMessage(
+                    id=str(msg.get("uuid") or f"m{msg_index}"),
+                    role=role,
+                    source_role=str(msg.get("sender") or ""),
+                    content=attachment_placeholder,
+                    created_at=normalize_timestamp(msg.get("created_at")),
+                    model=extract_model_hint(msg),
+                    attachment_placeholder=True,
+                ))
                 continue
             if not text:
                 skipped_empty += 1
@@ -528,6 +569,164 @@ def make_skipped_message(
     )
 
 
+def conversation_review_issues(messages: list[PreviewMessage]) -> list[dict[str, Any]]:
+    issues = []
+    duplicate_clusters = duplicate_resend_clusters(messages)
+    duplicate_indexes = {
+        index
+        for cluster in duplicate_clusters
+        for index in range(cluster["start_index"], cluster["end_index"] + 1)
+    }
+    for cluster in duplicate_clusters:
+        count = cluster["count"]
+        role = cluster["role"]
+        role_label = role[:1].upper() + role[1:]
+        issues.append({
+            "id": f"duplicate-{cluster['start_index']}",
+            "exchange_index": len(issues) + 1,
+            "message_index": cluster["start_index"],
+            "message_end_index": cluster["end_index"],
+            "warnings": [f"Duplicate {role_label} resend cluster ({count} copies)."],
+            "label": f"Duplicate {role_label} resend cluster ({count} copies).",
+        })
+    for exchange_index, exchange in enumerate(build_review_exchanges(messages), start=1):
+        if all(index in duplicate_indexes for index in range(exchange["start_index"], exchange["end_index"] + 1)):
+            continue
+        warnings = exchange_review_warnings(exchange["messages"])
+        if not warnings:
+            continue
+        issues.append({
+            "id": f"issue-{exchange['start_index']}",
+            "exchange_index": exchange_index,
+            "message_index": exchange["start_index"],
+            "message_end_index": exchange["end_index"],
+            "warnings": warnings,
+            "label": "; ".join(warnings),
+        })
+    return issues
+
+
+def duplicate_resend_clusters(messages: list[PreviewMessage]) -> list[dict[str, Any]]:
+    clusters: list[dict[str, Any]] = []
+    run_start = 0
+    run_key = duplicate_resend_key(messages[0]) if messages else ""
+
+    def finish_run(end_index: int) -> None:
+        if not run_key or end_index - run_start + 1 < 2:
+            return
+        first = messages[run_start]
+        clusters.append({
+            "id": f"dup-{run_start}",
+            "role": first.role,
+            "content_key": run_key,
+            "start_index": run_start,
+            "end_index": end_index,
+            "count": end_index - run_start + 1,
+        })
+
+    for index in range(1, len(messages)):
+        key = duplicate_resend_key(messages[index])
+        if key and key == run_key:
+            continue
+        finish_run(index - 1)
+        run_start = index
+        run_key = key
+    if messages:
+        finish_run(len(messages) - 1)
+    return clusters
+
+
+def duplicate_resend_map(messages: list[PreviewMessage]) -> dict[int, dict[str, Any]]:
+    mapped: dict[int, dict[str, Any]] = {}
+    for cluster in duplicate_resend_clusters(messages):
+        for index in range(cluster["start_index"], cluster["end_index"] + 1):
+            mapped[index] = {
+                "duplicate_cluster_id": cluster["id"],
+                "duplicate_cluster_count": cluster["count"],
+                "duplicate_cluster_start": cluster["start_index"],
+                "duplicate_cluster_end": cluster["end_index"],
+                "duplicate_index": index - cluster["start_index"] + 1,
+                "duplicate_representative": index == cluster["start_index"],
+            }
+    return mapped
+
+
+def duplicate_resend_key(message: PreviewMessage) -> str:
+    if message.skipped or message.attachment_placeholder:
+        return ""
+    text = normalize_duplicate_text(message.content)
+    if not text:
+        return ""
+    return f"{message.role}:{text}"
+
+
+def normalize_duplicate_text(value: str) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip().casefold()
+
+
+def build_review_exchanges(messages: list[PreviewMessage]) -> list[dict[str, Any]]:
+    exchanges: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+
+    def finish() -> None:
+        nonlocal current
+        if not current or not current["messages"]:
+            return
+        exchanges.append(current)
+        current = None
+
+    for index, message in enumerate(messages):
+        role = "assistant" if message.role == "assistant" else "user"
+        if not current:
+            current = {
+                "start_index": index,
+                "end_index": index,
+                "messages": [message],
+            }
+            continue
+
+        roles = ["assistant" if item.role == "assistant" else "user" for item in current["messages"]]
+        has_user = "user" in roles
+        has_assistant = "assistant" in roles
+        if role == "user" and (has_user or has_assistant):
+            finish()
+            current = {
+                "start_index": index,
+                "end_index": index,
+                "messages": [message],
+            }
+            continue
+        if role == "assistant" and has_assistant and not has_user:
+            finish()
+            current = {
+                "start_index": index,
+                "end_index": index,
+                "messages": [message],
+            }
+            continue
+        current["messages"].append(message)
+        current["end_index"] = index
+
+    finish()
+    return exchanges
+
+
+def exchange_review_warnings(messages: list[PreviewMessage]) -> list[str]:
+    warnings = []
+    roles = ["assistant" if message.role == "assistant" else "user" for message in messages]
+    if any(message.skipped for message in messages):
+        warnings.append("Contains skipped empty message.")
+    if "user" not in roles:
+        warnings.append("No user message in this exchange.")
+    if "assistant" not in roles:
+        warnings.append("No assistant reply in this exchange.")
+    for index in range(1, len(roles)):
+        if roles[index] == roles[index - 1]:
+            warnings.append(f"Consecutive {roles[index]} messages.")
+            break
+    return warnings
+
+
 def extract_claude_text(msg: dict[str, Any]) -> str:
     text = str(msg.get("text") or "").strip()
     if text:
@@ -544,6 +743,30 @@ def sanitize_claude_text(text: str) -> str:
     text = re.sub(unsupported, "", text, flags=re.IGNORECASE)
     text = text.replace("This block is not supported on your current device yet.", "")
     return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+def claude_attachment_placeholder(msg: dict[str, Any]) -> str:
+    files = [item for item in (msg.get("files") or []) if isinstance(item, dict)]
+    attachments = [item for item in (msg.get("attachments") or []) if isinstance(item, dict)]
+    content_blocks = [item for item in (msg.get("content") or []) if isinstance(item, dict)]
+    non_text_blocks = [
+        str(item.get("type") or "attachment")
+        for item in content_blocks
+        if str(item.get("type") or "").lower() not in {"", "text"}
+    ]
+    if not files and not attachments and not non_text_blocks:
+        return ""
+
+    names = [
+        str(item.get("file_name") or item.get("name") or item.get("filename") or "").strip()
+        for item in [*files, *attachments]
+    ]
+    names = [name for name in names if name]
+    if names:
+        return f"[User sent an attachment: {', '.join(names[:3])}. File content was not included in this export.]"
+    if any("image" in kind.lower() for kind in non_text_blocks):
+        return "[User sent an image. Image content was not included in this export.]"
+    return "[User sent an attachment. Attachment content was not included in this export.]"
 
 
 def walk_chatgpt_messages(mapping: dict[str, Any]) -> list[dict[str, Any]]:
@@ -762,6 +985,14 @@ def estimate_tokens(text: str) -> int:
     if not text:
         return 0
     return max(1, len(text) // 4)
+
+
+def clamp_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(maximum, parsed))
 
 
 def slug_id(value: str) -> str:

@@ -32,6 +32,7 @@ const MEMORY_SOURCES = ["user_defined", "model_extracted", "imported", "system"]
 const CLOUD_DEFAULT_CONTEXT = 128000;
 const LOCALISH_CONTEXT_CEILING = 32768;
 const JOURNAL_ENTRY_TYPES = ["event", "preference", "topic", "tone", "open_thread", "follow_up", "reflection"];
+const IMPORT_DETAIL_WINDOW = 160;
 
 const state = {
   personas: [],
@@ -55,7 +56,18 @@ const state = {
   journalDetailId: "",
   journalBaseline: {},
   journalUndoStamp: "",
-  importPreview: { previewId: "", path: "", batch: null, selectedId: "", choices: {}, continuationId: "", exchangeChoices: {} },
+  importPreview: {
+    previewId: "",
+    path: "",
+    batch: null,
+    selectedId: "",
+    choices: {},
+    continuationId: "",
+    exchangeChoices: {},
+    issueCursors: {},
+    pendingIssueId: "",
+    detail: null,
+  },
   taskBaselines: {},
   taskDrafts: [],
   taskOriginals: [],
@@ -3421,17 +3433,20 @@ function openImportDialog(initialPath = "") {
 }
 
 function closeImportDialog() {
+  setImportDialogExpanded(false);
   el("importDialog").classList.add("hidden");
   document.body.classList.remove("modal-open");
 }
 
 function setImportDialogExpanded(expanded) {
   const card = el("importPreviewCard");
-  const button = el("importExpandBtn");
+  const button = el("importMaximizeBtn");
   if (!card || !button) return;
   card.classList.toggle("expanded", Boolean(expanded));
-  button.textContent = expanded ? "Restore" : "Expand";
+  button.classList.toggle("restore", Boolean(expanded));
+  button.setAttribute("aria-pressed", expanded ? "true" : "false");
   button.title = expanded ? "Restore compact import preview" : "Expand import preview";
+  button.setAttribute("aria-label", expanded ? "Restore compact import preview" : "Expand import preview");
 }
 
 function toggleImportDialogExpanded() {
@@ -3440,7 +3455,18 @@ function toggleImportDialogExpanded() {
 }
 
 function resetImportPreviewState() {
-  state.importPreview = { previewId: "", path: "", batch: null, selectedId: "", choices: {}, continuationId: "", exchangeChoices: {} };
+  state.importPreview = {
+    previewId: "",
+    path: "",
+    batch: null,
+    selectedId: "",
+    choices: {},
+    continuationId: "",
+    exchangeChoices: {},
+    issueCursors: {},
+    pendingIssueId: "",
+    detail: null,
+  };
 }
 
 function setImportNotice(message) {
@@ -3477,6 +3503,9 @@ async function previewImportPath(path = "") {
     choices: {},
     continuationId: "",
     exchangeChoices: {},
+    issueCursors: {},
+    pendingIssueId: "",
+    detail: null,
   };
   el("importPath").value = state.importPreview.path;
   renderImportPreview();
@@ -3554,14 +3583,20 @@ function renderImportConversationList() {
   });
 }
 
+function importConversationById(conversationId) {
+  return (state.importPreview.batch?.conversations || []).find((conversation) => conversation.id === conversationId) || null;
+}
+
 function renderImportConversationCard(conversation) {
   const choice = importConversationChoice(conversation.id);
   const selected = conversation.id === state.importPreview.selectedId ? " selected" : "";
   const skippedCount = Number(conversation.skipped_message_count || 0);
-  const needsReview = skippedCount > 0 || Number(conversation.message_count || 0) === 0;
-  const reviewClass = needsReview ? " warning" : "";
+  const reviewCount = Number(conversation.review_issue_count || 0);
+  const needsWarning = skippedCount > 0 || Number(conversation.message_count || 0) === 0;
+  const reviewClass = needsWarning ? " warning" : (reviewCount > 0 ? " review" : "");
   const warnings = (conversation.warnings || []).map((warning) => `<span>${escapeHtml(warning)}</span>`).join("");
   const skipped = skippedCount ? `<span class="import-skipped-pill">${escapeHtml(skippedCount)} skipped</span>` : "";
+  const review = reviewCount ? `<span class="import-review-pill">${escapeHtml(reviewCount)} review</span>` : "";
   const model = conversation.model ? `<span>${escapeHtml(conversation.model)}</span>` : "";
   return `
     <article class="import-conversation-card${selected}${reviewClass} ${choice}" data-conversation-id="${escapeHtml(conversation.id)}">
@@ -3569,11 +3604,12 @@ function renderImportConversationCard(conversation) {
         <span>${escapeHtml(formatImportDate(conversation.created_at))}</span>
         <span>${escapeHtml(conversation.message_count || 0)} msgs</span>
         ${skipped}
+        ${review}
         <span>${escapeHtml(conversation.estimated_tokens || 0)} tokens</span>
         ${model}
       </div>
       <h3>${escapeHtml(conversation.title || "Untitled conversation")}</h3>
-      <p>${escapeHtml(conversation.preview || (needsReview ? "No visible text to preview." : ""))}</p>
+      <p>${escapeHtml(conversation.preview || (needsWarning ? "No visible text to preview." : ""))}</p>
       <div class="import-card-warnings">${warnings}</div>
       <div class="import-card-actions">
         <button class="${choice === "keep" ? "active" : ""}" type="button" data-conversation-id="${escapeHtml(conversation.id)}" data-import-choice="keep">Keep</button>
@@ -3585,7 +3621,9 @@ function renderImportConversationCard(conversation) {
 
 function importConversationChoice(conversationId) {
   if (state.importPreview.continuationId === conversationId) return "continue";
-  return state.importPreview.choices[conversationId] || "keep";
+  if (state.importPreview.choices[conversationId]) return state.importPreview.choices[conversationId];
+  const conversation = importConversationById(conversationId);
+  return conversation?.default_choice || "keep";
 }
 
 function setImportConversationChoice(conversationId, choice) {
@@ -3604,75 +3642,231 @@ function setImportConversationChoice(conversationId, choice) {
   void selectImportConversation(conversationId, true);
 }
 
-async function selectImportConversation(conversationId, force = false, resetDetailScroll = true) {
+function currentImportDetailOffset() {
+  const raw = Number(el("importDetail")?.dataset.messageOffset || 0);
+  return Number.isFinite(raw) ? raw : 0;
+}
+
+async function selectImportConversation(conversationId, force = false, resetDetailScroll = true, messageOffset = 0) {
   if (!conversationId || !state.importPreview.previewId) return;
-  if (!force && state.importPreview.selectedId === conversationId && el("importDetail").dataset.conversationId === conversationId) return;
+  const offset = Math.max(0, Number(messageOffset) || 0);
+  if (!force
+    && state.importPreview.selectedId === conversationId
+    && el("importDetail").dataset.conversationId === conversationId
+    && currentImportDetailOffset() === offset) return;
   const previousDetailScroll = el("importDetail").scrollTop;
   state.importPreview.selectedId = conversationId;
   renderImportConversationList();
   el("importDetail").dataset.conversationId = conversationId;
+  el("importDetail").dataset.messageOffset = String(offset);
   el("importDetail").innerHTML = `<div class="memory-empty">Loading conversation...</div>`;
-  const result = await api().get_import_preview_conversation(state.importPreview.previewId, conversationId);
+  const result = await api().get_import_preview_conversation(
+    state.importPreview.previewId,
+    conversationId,
+    offset,
+    IMPORT_DETAIL_WINDOW
+  );
   if (!result.ok) {
     el("importDetail").innerHTML = `<div class="memory-empty">${escapeHtml(result.error || "Conversation preview unavailable.")}</div>`;
     return;
   }
   renderImportConversationDetail(result.conversation || {});
   el("importDetail").scrollTop = resetDetailScroll ? 0 : previousDetailScroll;
+  if (state.importPreview.pendingIssueId) {
+    requestAnimationFrame(() => focusImportIssue(state.importPreview.pendingIssueId));
+  }
 }
 
 function renderImportConversationDetail(conversation) {
+  state.importPreview.detail = conversation;
   const messages = conversation.messages || [];
   const warnings = (conversation.warnings || []).map((warning) => `<span>${escapeHtml(warning)}</span>`).join("");
   const model = conversation.model ? ` / ${conversation.model}` : "";
   const skippedCount = Number(conversation.skipped_message_count || 0);
   const messageMeta = `${conversation.message_count || 0} messages${skippedCount ? ` / ${skippedCount} skipped` : ""}${model}`;
-  const exchanges = buildImportExchanges(messages);
+  const issues = conversation.review_issues || [];
+  const issueCursor = importIssueCursor(conversation.id, issues);
+  const issueLabel = issues.length ? `Issue ${issueCursor + 1} of ${issues.length}` : "";
+  const rangeStart = Number(conversation.message_offset || 0) + 1;
+  const rangeEnd = Number(conversation.message_end || 0);
+  const totalMessages = Number(conversation.total_message_count || messages.length);
+  const hasWindowControls = conversation.has_earlier || conversation.has_later;
+  const visibleRange = totalMessages
+    ? `Showing messages ${rangeStart}-${rangeEnd} of ${totalMessages}.`
+    : "No messages in this conversation.";
+  const exchanges = buildImportExchanges(messages, issues);
   const excludedCount = exchanges.filter((exchange) => importExchangeChoice(conversation.id, exchange.id) === "exclude").length;
-  const flaggedCount = exchanges.filter((exchange) => exchange.warnings.length).length;
+  const visibleIssueCount = exchanges.filter((exchange) => exchange.reviewIssues.length).length;
   const excludedNote = excludedCount
     ? `<div class="memory-source-note"><strong>${escapeHtml(excludedCount)} exchange${excludedCount === 1 ? "" : "s"} excluded</strong><span>Exchange exclusions are temporary preview choices in this slice.</span></div>`
     : "";
-  const flaggedNote = flaggedCount
-    ? `<div class="memory-source-note import-review-note"><strong>${escapeHtml(flaggedCount)} exchange${flaggedCount === 1 ? "" : "s"} need review</strong><span>Pulse found unusual role ordering or skipped empty messages.</span></div>`
+  const flaggedNote = issues.length
+    ? `<div class="memory-source-note import-review-note">
+        <div class="import-review-note-head">
+          <strong>${escapeHtml(issues.length)} exchange${issues.length === 1 ? "" : "s"} need review</strong>
+          <div class="import-issue-nav">
+            <button type="button" data-import-issue-nav="prev" data-conversation-id="${escapeHtml(conversation.id)}" title="Previous review issue" aria-label="Previous review issue"></button>
+            <span data-import-issue-label="${escapeHtml(conversation.id)}">${escapeHtml(issueLabel)}</span>
+            <button type="button" data-import-issue-nav="next" data-conversation-id="${escapeHtml(conversation.id)}" title="Next review issue" aria-label="Next review issue"></button>
+          </div>
+        </div>
+        <span>${escapeHtml(visibleIssueCount ? `${visibleIssueCount} issue${visibleIssueCount === 1 ? "" : "s"} visible in this slice.` : "Use the arrows to jump to the flagged exchanges.")}</span>
+      </div>`
     : "";
-  const truncated = conversation.messages_truncated
-    ? `<div class="memory-source-note"><strong>Preview truncated</strong><span>Showing ${escapeHtml(conversation.shown_message_count || messages.length)} of ${escapeHtml(conversation.message_count || messages.length)} messages.</span></div>`
+  const windowNote = hasWindowControls
+    ? `<div class="memory-source-note import-window-note">
+        <strong>Transcript window</strong>
+        <span>${escapeHtml(visibleRange)}</span>
+        <div class="import-window-actions">
+          <button type="button" data-import-window="earlier" data-conversation-id="${escapeHtml(conversation.id)}" ${conversation.has_earlier ? "" : "disabled"}>Load earlier</button>
+          <button type="button" data-import-window="later" data-conversation-id="${escapeHtml(conversation.id)}" ${conversation.has_later ? "" : "disabled"}>Load later</button>
+        </div>
+      </div>`
+    : totalMessages
+      ? `<div class="memory-source-note import-window-note compact"><strong>Transcript window</strong><span>${escapeHtml(visibleRange)}</span></div>`
+      : "";
+  const bottomWindowControls = hasWindowControls
+    ? `<div class="import-window-footer">
+        <button type="button" data-import-window="earlier" data-conversation-id="${escapeHtml(conversation.id)}" ${conversation.has_earlier ? "" : "disabled"}>Load earlier</button>
+        <span>${escapeHtml(visibleRange)}</span>
+        <button type="button" data-import-window="later" data-conversation-id="${escapeHtml(conversation.id)}" ${conversation.has_later ? "" : "disabled"}>Load later</button>
+      </div>`
     : "";
   el("importDetail").innerHTML = `
-    <div class="import-detail-head">
-      <div>
-        <h3>${escapeHtml(conversation.title || "Untitled conversation")}</h3>
-        <span>${escapeHtml(formatImportDate(conversation.created_at))} / ${escapeHtml(messageMeta)}</span>
+    <div class="import-detail-sticky">
+      <div class="import-detail-head">
+        <div>
+          <h3>${escapeHtml(conversation.title || "Untitled conversation")}</h3>
+          <span>${escapeHtml(formatImportDate(conversation.created_at))} / ${escapeHtml(messageMeta)}</span>
+        </div>
       </div>
+      ${warnings ? `<div class="import-detail-warnings">${warnings}</div>` : ""}
+      ${excludedNote}
+      ${flaggedNote}
+      ${windowNote}
     </div>
-    ${warnings ? `<div class="import-detail-warnings">${warnings}</div>` : ""}
-    ${excludedNote}
-    ${flaggedNote}
-    ${truncated}
     <div class="import-message-list">
       ${exchanges.map((exchange) => renderImportExchange(conversation.id, exchange)).join("") || `<div class="memory-empty">No messages to show.</div>`}
-    </div>`;
+    </div>
+    ${bottomWindowControls}`;
   el("importDetail").querySelectorAll("[data-import-exchange-choice]").forEach((button) => {
     button.addEventListener("click", () => {
       setImportExchangeChoice(button.dataset.conversationId, button.dataset.exchangeId, button.dataset.importExchangeChoice);
     });
   });
+  el("importDetail").querySelectorAll("[data-import-window]").forEach((button) => {
+    button.addEventListener("click", () => {
+      loadImportWindow(button.dataset.conversationId, button.dataset.importWindow);
+    });
+  });
+  el("importDetail").querySelectorAll("[data-import-issue-nav]").forEach((button) => {
+    button.addEventListener("click", () => {
+      void jumpImportIssue(button.dataset.conversationId, button.dataset.importIssueNav);
+    });
+  });
 }
 
-function buildImportExchanges(messages) {
+function importIssueCursor(conversationId, issues) {
+  if (!issues.length) return 0;
+  const current = Number(state.importPreview.issueCursors?.[conversationId] || 0);
+  if (!Number.isFinite(current)) return 0;
+  return Math.max(0, Math.min(issues.length - 1, current));
+}
+
+function loadImportWindow(conversationId, direction) {
+  const detail = state.importPreview.detail || {};
+  const currentOffset = Number(detail.message_offset || currentImportDetailOffset() || 0);
+  const limit = Number(detail.message_limit || IMPORT_DETAIL_WINDOW);
+  const total = Number(detail.total_message_count || 0);
+  const delta = direction === "earlier" ? -limit : limit;
+  const maxOffset = Math.max(0, total - limit);
+  const nextOffset = Math.max(0, Math.min(maxOffset, currentOffset + delta));
+  void selectImportConversation(conversationId, true, true, nextOffset);
+}
+
+async function jumpImportIssue(conversationId, direction) {
+  const detail = state.importPreview.detail || {};
+  const issues = detail.review_issues || [];
+  if (!conversationId || !issues.length) return;
+  const hasCursor = Object.prototype.hasOwnProperty.call(state.importPreview.issueCursors || {}, conversationId);
+  const current = hasCursor
+    ? importIssueCursor(conversationId, issues)
+    : (direction === "prev" ? 1 : -1);
+  const next = direction === "prev"
+    ? (current - 1 + issues.length) % issues.length
+    : (current + 1) % issues.length;
+  const issue = issues[next];
+  state.importPreview.issueCursors[conversationId] = next;
+  state.importPreview.pendingIssueId = issue.id;
+  updateImportIssueNavLabel(conversationId, next, issues.length);
+  if (importIssueIsInLoadedWindow(issue, detail) && focusImportIssue(issue.id)) {
+    return;
+  }
+  const limit = Number(detail.message_limit || IMPORT_DETAIL_WINDOW);
+  const total = Number(detail.total_message_count || 0);
+  const targetOffset = Math.max(0, Math.min(
+    Math.max(0, total - limit),
+    Number(issue.message_index || 0) - Math.floor(limit / 2)
+  ));
+  await selectImportConversation(conversationId, true, true, targetOffset);
+}
+
+function importIssueIsInLoadedWindow(issue, detail) {
+  const windowStart = Number(detail.message_offset || 0);
+  const windowEnd = Number(detail.message_end || 0);
+  const issueStart = Number(issue.message_index || 0);
+  const issueEnd = Number(issue.message_end_index ?? issueStart);
+  return issueEnd >= windowStart && issueStart < windowEnd;
+}
+
+function updateImportIssueNavLabel(conversationId, index, total) {
+  const safeConversationId = typeof CSS !== "undefined" && CSS.escape
+    ? CSS.escape(conversationId)
+    : String(conversationId).replace(/"/g, '\\"');
+  const label = el("importDetail")?.querySelector(`[data-import-issue-label="${safeConversationId}"]`);
+  if (!label) return;
+  label.textContent = `Issue ${index + 1} of ${total}`;
+}
+
+function focusImportIssue(issueId) {
+  if (!issueId) return false;
+  const safeIssueId = typeof CSS !== "undefined" && CSS.escape
+    ? CSS.escape(issueId)
+    : String(issueId).replace(/"/g, '\\"');
+  const target = el("importDetail")?.querySelector(`[data-issue-id="${safeIssueId}"]`);
+  if (!target) return false;
+  state.importPreview.pendingIssueId = "";
+  target.scrollIntoView({ block: "center", behavior: "smooth" });
+  target.classList.add("pulse-highlight");
+  setTimeout(() => target.classList.remove("pulse-highlight"), 1400);
+  return true;
+}
+
+function buildImportExchanges(messages, issues = []) {
   const exchanges = [];
   let current = null;
   const finish = () => {
     if (!current || !current.messages.length) return;
     current.warnings = exchangeWarnings(current.messages);
+    current.reviewIssues = issues.filter((issue) => (
+      Number(issue.message_index) >= current.startIndex
+      && Number(issue.message_index) <= current.endIndex
+    ));
+    if (current.reviewIssues.length) {
+      const issueWarnings = current.reviewIssues.flatMap((issue) => issue.warnings || []);
+      current.warnings = [...new Set([...current.warnings, ...issueWarnings])];
+    }
     exchanges.push(current);
     current = null;
   };
-  messages.forEach((message, index) => {
+  const visibleMessages = messages.filter((message) => (
+    !message.duplicate_cluster_id || message.duplicate_representative
+  ));
+  visibleMessages.forEach((message, index) => {
     const role = message.role === "assistant" ? "assistant" : "user";
+    const messageIndex = Number.isFinite(Number(message.index)) ? Number(message.index) : index;
     if (!current) {
-      current = { id: `ex${exchanges.length + 1}`, messages: [message], warnings: [] };
+      current = { id: `ex${messageIndex}`, startIndex: messageIndex, endIndex: messageIndex, messages: [message], warnings: [], reviewIssues: [] };
       return;
     }
     const roles = current.messages.map((item) => item.role === "assistant" ? "assistant" : "user");
@@ -3680,16 +3874,17 @@ function buildImportExchanges(messages) {
     const hasAssistant = roles.includes("assistant");
     if (role === "user" && (hasUser || hasAssistant)) {
       finish();
-      current = { id: `ex${exchanges.length + 1}`, messages: [message], warnings: [] };
+      current = { id: `ex${messageIndex}`, startIndex: messageIndex, endIndex: messageIndex, messages: [message], warnings: [], reviewIssues: [] };
       return;
     }
     if (role === "assistant" && hasAssistant && !hasUser) {
       finish();
-      current = { id: `ex${exchanges.length + 1}`, messages: [message], warnings: [] };
+      current = { id: `ex${messageIndex}`, startIndex: messageIndex, endIndex: messageIndex, messages: [message], warnings: [], reviewIssues: [] };
       return;
     }
     current.messages.push(message);
-    if (index === messages.length - 1) finish();
+    current.endIndex = messageIndex;
+    if (index === visibleMessages.length - 1) finish();
   });
   finish();
   return exchanges;
@@ -3697,6 +3892,11 @@ function buildImportExchanges(messages) {
 
 function exchangeWarnings(messages) {
   const warnings = [];
+  const duplicate = messages.find((message) => Number(message.duplicate_cluster_count || 0) > 1);
+  if (duplicate) {
+    warnings.push(`Duplicate ${humanizeMemoryBadge(duplicate.role)} resend cluster (${duplicate.duplicate_cluster_count} copies).`);
+    return warnings;
+  }
   const roles = messages.map((message) => message.role === "assistant" ? "assistant" : "user");
   if (messages.some((message) => message.skipped)) warnings.push("Contains skipped empty message.");
   if (!roles.includes("user")) warnings.push("No user message in this exchange.");
@@ -3712,12 +3912,15 @@ function exchangeWarnings(messages) {
 
 function renderImportExchange(conversationId, exchange) {
   const choice = importExchangeChoice(conversationId, exchange.id);
+  const reviewIssues = exchange.reviewIssues || [];
+  const issueId = reviewIssues[0]?.id || "";
   const warnings = exchange.warnings.map((warning) => `<span>${escapeHtml(warning)}</span>`).join("");
   return `
-    <article class="import-exchange ${choice} ${exchange.warnings.length ? "review" : ""}">
+    <article class="import-exchange ${choice} ${exchange.warnings.length ? "review" : ""}" data-message-start="${escapeHtml(exchange.startIndex)}" ${issueId ? `data-issue-id="${escapeHtml(issueId)}"` : ""}>
       <div class="import-exchange-head">
         <strong>${escapeHtml(humanizeMemoryBadge(choice))}</strong>
         <span>${escapeHtml(exchange.messages.length)} message${exchange.messages.length === 1 ? "" : "s"}</span>
+        <span>${escapeHtml(`messages ${exchange.startIndex + 1}-${exchange.endIndex + 1}`)}</span>
         <button class="${choice === "keep" ? "active" : ""}" type="button" data-conversation-id="${escapeHtml(conversationId)}" data-exchange-id="${escapeHtml(exchange.id)}" data-import-exchange-choice="keep">Keep exchange</button>
         <button class="${choice === "exclude" ? "active" : ""}" type="button" data-conversation-id="${escapeHtml(conversationId)}" data-exchange-id="${escapeHtml(exchange.id)}" data-import-exchange-choice="exclude">Exclude exchange</button>
       </div>
@@ -3729,15 +3932,21 @@ function renderImportExchange(conversationId, exchange) {
 function renderImportMessage(message) {
   const role = message.role === "assistant" ? "assistant" : "user";
   const skipped = Boolean(message.skipped);
+  const attachment = Boolean(message.attachment_placeholder);
+  const duplicateCount = Number(message.duplicate_cluster_count || 0);
   const model = role === "assistant" && message.model ? `<span>${escapeHtml(message.model)}</span>` : "";
   const skippedPill = skipped ? `<span class="import-skipped-pill">Skipped</span>` : "";
+  const attachmentPill = attachment ? `<span class="import-attachment-pill">Attachment</span>` : "";
+  const duplicatePill = duplicateCount > 1 ? `<span class="import-duplicate-pill">Repeated ${escapeHtml(duplicateCount)} times</span>` : "";
   const content = skipped ? (message.skip_reason || "Skipped message") : (message.content || "");
   return `
-    <article class="import-message ${role}${skipped ? " skipped" : ""}">
+    <article class="import-message ${role}${skipped ? " skipped" : ""}${attachment ? " attachment" : ""}${duplicateCount > 1 ? " duplicate" : ""}">
       <div>
         <strong>${escapeHtml(humanizeMemoryBadge(role))}</strong>
         <span>${escapeHtml(formatImportDate(message.created_at))}</span>
         ${skippedPill}
+        ${attachmentPill}
+        ${duplicatePill}
         ${model}
       </div>
       <p>${escapeHtml(content)}</p>
@@ -3754,7 +3963,7 @@ function setImportExchangeChoice(conversationId, exchangeId, choice) {
     state.importPreview.exchangeChoices[conversationId] = {};
   }
   state.importPreview.exchangeChoices[conversationId][exchangeId] = choice === "exclude" ? "exclude" : "keep";
-  void selectImportConversation(conversationId, true, false);
+  void selectImportConversation(conversationId, true, false, currentImportDetailOffset());
 }
 
 function formatImportDate(value) {
@@ -4112,7 +4321,8 @@ function wireEvents() {
     }
   });
   el("importPreviewBtn").addEventListener("click", () => { void previewImportPath(); });
-  el("importExpandBtn").addEventListener("click", toggleImportDialogExpanded);
+  el("importMaximizeBtn").addEventListener("click", toggleImportDialogExpanded);
+  el("importTopCloseBtn").addEventListener("click", closeImportDialog);
   el("importPath").addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
       event.preventDefault();

@@ -439,7 +439,13 @@ class PulseAPI:
         except (FileNotFoundError, ValueError, OSError, json.JSONDecodeError) as e:
             return {"ok": False, "error": str(e)}
 
-    def get_import_preview_conversation(self, preview_id: str, conversation_id: str) -> dict:
+    def get_import_preview_conversation(
+        self,
+        preview_id: str,
+        conversation_id: str,
+        message_offset: int = 0,
+        message_limit: int = 160,
+    ) -> dict:
         entry = self._import_previews.get(str(preview_id or ""))
         if not entry:
             return {"ok": False, "error": "Import preview expired. Choose the export again."}
@@ -448,7 +454,7 @@ class PulseAPI:
             if conversation.id == conversation_id:
                 return {
                     "ok": True,
-                    "conversation": conversation.to_detail_dict(),
+                    "conversation": conversation.to_detail_dict(message_offset, message_limit),
                 }
         return {"ok": False, "error": "Conversation not found in this preview."}
 

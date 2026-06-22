@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Pulse Engine</title>
-  <link rel="stylesheet" href="style.css?v=20260610n">
+  <link rel="stylesheet" href="style.css?v=20260610r">
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
   <meta http-equiv="Pragma" content="no-cache">
   <meta http-equiv="Expires" content="0">
@@ -576,7 +576,14 @@
           <h2 class="modal-title">Import Preview</h2>
           <p id="importSubtitle" class="modal-body">Dry-run old chats before writing anything into Pulse.</p>
         </div>
-        <button id="importExpandBtn" class="modal-btn ghost import-expand-btn" type="button" title="Expand import preview">Expand</button>
+        <div class="modal-window-controls" aria-label="Import preview window controls">
+          <button id="importMaximizeBtn" class="modal-window-btn" type="button" title="Expand import preview" aria-label="Expand import preview" aria-pressed="false">
+            <span class="window-icon maximize" aria-hidden="true"></span>
+          </button>
+          <button id="importTopCloseBtn" class="modal-window-btn" type="button" title="Close import preview" aria-label="Close import preview">
+            <span class="window-icon close" aria-hidden="true"></span>
+          </button>
+        </div>
       </div>
       <div class="import-path-row">
         <div class="sample-input-row import-file-row">

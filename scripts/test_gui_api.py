@@ -614,14 +614,68 @@ def test_gui_api_preview_claude_import_is_dry_run():
                 "created_at": "2026-01-10T00:00:00Z",
                 "chat_messages": [{"uuid": "empty", "sender": "human", "text": ""}],
             },
+            {
+                "uuid": "conv-attachment",
+                "name": "Image Chat",
+                "created_at": "2026-01-11T00:00:00Z",
+                "updated_at": "2026-01-11T00:01:00Z",
+                "chat_messages": [
+                    {
+                        "uuid": "image-only",
+                        "sender": "human",
+                        "text": "",
+                        "content": [{"type": "text", "text": ""}],
+                        "files": [{"file_name": "example.png"}],
+                        "created_at": "2026-01-11T00:00:00Z",
+                    },
+                    {
+                        "uuid": "image-reply",
+                        "sender": "assistant",
+                        "text": "That screenshot is useful.",
+                        "created_at": "2026-01-11T00:00:10Z",
+                    },
+                ],
+            },
+            {
+                "uuid": "conv-duplicates",
+                "name": "Retry Storm",
+                "created_at": "2026-01-12T00:00:00Z",
+                "updated_at": "2026-01-12T00:01:00Z",
+                "chat_messages": [
+                    {
+                        "uuid": "dupe-1",
+                        "sender": "human",
+                        "text": "Please answer this.",
+                        "created_at": "2026-01-12T00:00:00Z",
+                    },
+                    {
+                        "uuid": "dupe-2",
+                        "sender": "human",
+                        "text": "Please answer this.",
+                        "created_at": "2026-01-12T00:00:01Z",
+                    },
+                    {
+                        "uuid": "dupe-3",
+                        "sender": "human",
+                        "text": "Please answer this.",
+                        "created_at": "2026-01-12T00:00:02Z",
+                    },
+                    {
+                        "uuid": "dupe-reply",
+                        "sender": "assistant",
+                        "text": "I can answer now.",
+                        "created_at": "2026-01-12T00:00:03Z",
+                    },
+                ],
+            },
         ]), encoding="utf-8")
 
         api = PulseAPI(root)
         preview = api.preview_conversation_import("conversations.json")
         assert preview["ok"] is True
         assert preview["batch"]["source"] == "claude"
-        assert preview["batch"]["conversation_count"] == 3
-        assert preview["batch"]["message_count"] == 5
+        assert preview["batch"]["conversation_count"] == 5
+        assert preview["batch"]["message_count"] == 11
         assert preview["batch"]["skipped_message_count"] == 1
         assert preview["batch"]["models"] == ["claude-test-model"]
         assert preview["batch"]["skipped_counts"]["empty_messages_or_conversations"] >= 1
@@ -638,16 +692,44 @@ def test_gui_api_preview_claude_import_is_dry_run():
             "user",
         ]
         assert detail["conversation"]["messages"][2]["content"] == "Fallback content works."
+        windowed = api.get_import_preview_conversation(preview["preview_id"], conv["id"], 1, 1)
+        assert windowed["ok"] is True
+        assert windowed["conversation"]["shown_message_count"] == 1
+        assert windowed["conversation"]["total_message_count"] == 3
+        assert windowed["conversation"]["has_earlier"] is True
+        assert windowed["conversation"]["has_later"] is True
+        assert windowed["conversation"]["messages"][0]["index"] == 1
+        assert windowed["conversation"]["messages"][0]["role"] == "assistant"
 
         empty_conv = next(item for item in preview["batch"]["conversations"] if item["source_id"] == "conv-empty")
         assert empty_conv["message_count"] == 0
         assert empty_conv["skipped_message_count"] == 1
+        assert empty_conv["default_choice"] == "exclude"
         assert "No visible user/assistant text." in empty_conv["warnings"]
         empty_detail = api.get_import_preview_conversation(preview["preview_id"], empty_conv["id"])
         assert empty_detail["ok"] is True
         assert empty_detail["conversation"]["messages"][0]["role"] == "user"
         assert empty_detail["conversation"]["messages"][0]["skipped"] is True
         assert empty_detail["conversation"]["messages"][0]["skip_reason"] == "Empty message"
+
+        attachment_conv = next(item for item in preview["batch"]["conversations"] if item["source_id"] == "conv-attachment")
+        assert attachment_conv["message_count"] == 2
+        assert attachment_conv["skipped_message_count"] == 0
+        attachment_detail = api.get_import_preview_conversation(preview["preview_id"], attachment_conv["id"])
+        assert attachment_detail["ok"] is True
+        assert attachment_detail["conversation"]["messages"][0]["attachment_placeholder"] is True
+        assert "example.png" in attachment_detail["conversation"]["messages"][0]["content"]
+
+        duplicate_conv = next(item for item in preview["batch"]["conversations"] if item["source_id"] == "conv-duplicates")
+        assert duplicate_conv["review_issue_count"] == 1
+        assert duplicate_conv["duplicate_cluster_count"] == 1
+        duplicate_detail = api.get_import_preview_conversation(preview["preview_id"], duplicate_conv["id"])
+        assert duplicate_detail["ok"] is True
+        duplicate_messages = duplicate_detail["conversation"]["messages"]
+        assert duplicate_messages[0]["duplicate_cluster_count"] == 3
+        assert duplicate_messages[0]["duplicate_representative"] is True
+        assert duplicate_messages[1]["duplicate_representative"] is False
+        assert "Duplicate User resend cluster" in duplicate_detail["conversation"]["review_issues"][0]["label"]
 
 
 def test_gui_api_standard_provider_env_fallback():
