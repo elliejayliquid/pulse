@@ -38,14 +38,21 @@ Implemented:
 - The detail view supports temporary keep/exclude choices per exchange.
 - Empty or skipped visible user/assistant messages are preserved as reviewable placeholders instead of silently disappearing.
 - Conversations with empty/skipped placeholders are red-tinted in the list.
+- Conversations with structural review issues are amber-tinted in the list and show a review-count pill.
 - Hidden reasoning/internal OpenRouter blocks are skipped and never shown as normal transcript content.
+- The import preview modal has window-control style maximize/restore and close buttons.
+- Large conversation detail is windowed with `Load earlier` / `Load later`.
+- Review issue navigation uses whole-conversation issue locations, but scrolls locally when the target issue is already loaded.
+- Detail controls are sticky so issue navigation remains reachable while scrolling the transcript.
+- Empty attachment-only Claude messages become neutral attachment placeholders when file metadata is present.
+- Consecutive duplicate same-role resend clusters are detected and visually collapsed in preview.
 - A placeholder background-enrichment progress row exists.
 
 Known rough edges:
 
-- The current expand/restore control is placeholder UX and should become a normal window-control style affordance.
-- Conversation detail currently renders a capped slice, so issue navigation needs proper paging/windowing before this can be trusted for huge conversations.
-- Empty attachment-only messages, such as user image sends, need a distinct attachment placeholder rather than red "bad data" treatment.
+- Duplicate resend collapse is preview-only; future commit sanitation should decide whether to store one copy, all copies, or an explicit retry-cluster record.
+- Attachment placeholder detection is implemented for Claude file metadata, but other platform export shapes still need real samples and source-specific handling.
+- Review issues are shown and navigable, but future import commit should define which issue types block living-context landing.
 - Completely empty conversations should default to exclude and should be sanitized out even if the user leaves them marked keep.
 
 ## Phase 1 UX: Read-Only GUI Import Preview
@@ -467,10 +474,11 @@ Rules:
 Status:
 
 - Initial version exists.
-- Needs windowed conversation paging.
-- Needs issue navigation.
-- Needs better attachment placeholder detection.
-- Needs real maximize/restore window-control UX.
+- Windowed conversation paging exists.
+- Issue navigation exists and scrolls locally when possible.
+- Claude attachment placeholder detection exists for file metadata.
+- Maximize/restore window-control UX exists.
+- Duplicate resend detection/collapse exists in preview.
 
 ### Phase 2: Persona-DB Staging
 
@@ -522,13 +530,11 @@ Make the existing preview usable for large and messy conversations.
 
 Minimum next slice:
 
-- Replace the text `Expand` button with normal modal window controls.
-- Make expanded mode near-full-viewport.
-- Add issue previous/next controls for review-marked exchanges.
-- Make issue jumps load or scroll to the relevant exchange.
-- Add visible range and load-earlier/load-later behavior for long conversations.
-- Split true empty messages from attachment-only placeholders where the export data allows it.
-- Default empty-only conversations to exclude in preview state.
-- Keep the preview read-only and avoid persona DB mutation.
+- Decide the import artifact storage shape: SQLite tables, files, or both.
+- Persist preview curation choices in staging rather than frontend memory.
+- Define commit sanitation for empty-only conversations, attachment placeholders, duplicate resend clusters, and unresolved review issues.
+- Build the dry-run-to-staged-import transition without touching live `sessions` / `messages`.
+- Add a clear "preview only" versus "staged archive" distinction in GUI copy.
+- Keep all live-context mutation behind an explicit later commit/landing action.
 
-That turns the current preview frame into a trustworthy curation surface without putting anyone's companion data at risk.
+That turns the current preview frame into a durable staging surface without putting anyone's companion data at risk.
