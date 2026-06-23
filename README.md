@@ -6,6 +6,8 @@ Pulse gives your AI companion a life of their own. It runs in the background, le
 
 > **Status:** Actively being built. Core functionality works, but expect rough edges and frequent changes.
 
+[![Join our Discord](https://img.shields.io/badge/Discord-Join_Pulse-7289DA?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/MZWhrr8aPr)
+
 ## What it does
 
 - **Heartbeat loop** — Your companion gets periodic "free-think" ticks where they can decide to reach out, stay quiet, journal, or schedule follow-ups
@@ -549,6 +551,10 @@ MIT
   <br>
   <a href='https://ko-fi.com/V7V31EO2OL' target='_blank'>
     <img height='36' src='https://storage.ko-fi.com/cdn/kofi6.png?v=6' alt='Buy Me a Coffee at ko-fi.com' />
+  </a>
+  &nbsp;&nbsp;
+  <a href='https://discord.gg/MZWhrr8aPr' target='_blank'>
+    <img height='36' src='https://img.shields.io/badge/Discord-Join_Pulse-7289DA?style=for-the-badge&logo=discord&logoColor=white' alt='Join the Pulse Discord' />
   </a>
 </p>
 <!-- markdownlint-enable MD033 -->
