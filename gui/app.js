@@ -4291,6 +4291,7 @@ async function loadMemoryPage(page) {
   state.memoryBrowse.page = result.page || page;
   state.memoryBrowse.total = result.total || 0;
   state.memoryBrowse.hasMore = Boolean(result.has_more);
+  state.memoryBrowse.shared = Boolean(result.shared);
   state.memoryBrowse.items = page === 1
     ? (result.items || [])
     : state.memoryBrowse.items.concat(result.items || []);
@@ -4301,7 +4302,7 @@ function renderMemoryList(dbPath = "") {
   const browse = state.memoryBrowse;
   const viewLabel = browse.view === "archived" ? "Archived" : "Active";
   const kindLabel = humanizeMemoryKind(browse.kind);
-  el("memoriesSubtitle").textContent = `${viewLabel} ${kindLabel.toLowerCase()} / showing ${browse.items.length} of ${browse.total}`;
+  el("memoriesSubtitle").textContent = `${viewLabel} ${kindLabel.toLowerCase()} / showing ${browse.items.length} of ${browse.total}${browse.shared ? " / shared pool" : ""}`;
   if (!browse.items.length) {
     el("memoriesBody").innerHTML = `
       <div class="memory-empty">
@@ -4829,6 +4830,7 @@ async function loadJournalPage(page) {
   state.journalBrowse.page = result.page || page;
   state.journalBrowse.total = result.total || 0;
   state.journalBrowse.hasMore = Boolean(result.has_more);
+  state.journalBrowse.shared = Boolean(result.shared);
   state.journalBrowse.items = page === 1
     ? (result.items || [])
     : state.journalBrowse.items.concat(result.items || []);
@@ -4839,7 +4841,7 @@ function renderJournalList() {
   const browse = state.journalBrowse;
   const viewLabel = humanizeJournalView(browse.view);
   const typeLabel = humanizeJournalType(browse.type);
-  el("journalSubtitle").textContent = `${viewLabel} ${typeLabel.toLowerCase()} / showing ${browse.items.length} of ${browse.total}`;
+  el("journalSubtitle").textContent = `${viewLabel} ${typeLabel.toLowerCase()} / showing ${browse.items.length} of ${browse.total}${browse.shared ? " / shared pool" : ""}`;
   if (!browse.items.length) {
     el("journalBody").innerHTML = `
       <div class="memory-empty">

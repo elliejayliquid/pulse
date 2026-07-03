@@ -515,22 +515,31 @@ class PulseAPI:
         db_path = self._persona_database_path(persona)
         if not db_path.exists():
             return {"ok": False, "error": "Persona database not found."}
+        mj_db_path = self._memory_journal_db_path(persona)
 
         restored = 0
         try:
-            with closing(_connect_sqlite(db_path)) as conn:
-                conn.row_factory = sqlite3.Row
-                with conn:
-                    for file in files:
-                        payload = json.loads(file.read_text(encoding="utf-8"))
-                        if payload.get("persona") != persona:
-                            raise ValueError("Undo snapshot belongs to another persona.")
-                        table = str(payload.get("table") or "")
-                        delete_where = self._json_restore_db_value(payload.get("delete_where"))
-                        if delete_where:
-                            restored += self._delete_table_rows_for_undo(conn, table, delete_where)
-                        before = self._json_restore_db_value(payload.get("before"))
-                        restored += self._restore_table_before_image(conn, table, before)
+            # Memories/journal rows may live in a shared pool DB; restore each
+            # snapshot into the DB its table actually lives in.
+            by_target: dict[Path, list[dict]] = {}
+            for file in files:
+                payload = json.loads(file.read_text(encoding="utf-8"))
+                if payload.get("persona") != persona:
+                    raise ValueError("Undo snapshot belongs to another persona.")
+                table = str(payload.get("table") or "")
+                target = mj_db_path if table in ("memories", "journal_entries") else db_path
+                by_target.setdefault(target, []).append(payload)
+            for target, payloads in by_target.items():
+                with closing(_connect_sqlite(target)) as conn:
+                    conn.row_factory = sqlite3.Row
+                    with conn:
+                        for payload in payloads:
+                            table = str(payload.get("table") or "")
+                            delete_where = self._json_restore_db_value(payload.get("delete_where"))
+                            if delete_where:
+                                restored += self._delete_table_rows_for_undo(conn, table, delete_where)
+                            before = self._json_restore_db_value(payload.get("before"))
+                            restored += self._restore_table_before_image(conn, table, before)
         except (sqlite3.Error, OSError, ValueError, json.JSONDecodeError) as e:
             return {"ok": False, "error": f"Could not restore undo snapshot: {e}"}
 
@@ -1667,7 +1676,7 @@ class PulseAPI:
         if kind not in ("all", "fact", "journal", "session_log"):
             return {"ok": False, "error": "Memory type must be all, fact, journal, or session_log."}
 
-        db_path = self._persona_database_path(persona)
+        db_path = self._memory_journal_db_path(persona)
         page = max(1, int(page or 1))
         page_size = max(5, min(int(page_size or 25), 100))
         if not db_path.exists():
@@ -1708,6 +1717,7 @@ class PulseAPI:
             "has_more": offset + len(items) < total,
             "items": items,
             "db_path": _safe_rel(db_path, self.root),
+            "shared": self._memory_journal_db_is_shared(persona),
         }
 
     def get_memory_detail(self, persona: str, memory_id: int) -> dict:
@@ -1721,7 +1731,7 @@ class PulseAPI:
         except (TypeError, ValueError):
             return {"ok": False, "error": "Invalid memory ID."}
 
-        db_path = self._persona_database_path(persona)
+        db_path = self._memory_journal_db_path(persona)
         if not db_path.exists():
             return {"ok": False, "error": "Memory database not found."}
 
@@ -1780,7 +1790,7 @@ class PulseAPI:
         if not valid["ok"]:
             return valid
 
-        db_path = self._persona_database_path(persona)
+        db_path = self._memory_journal_db_path(persona)
         try:
             cleaned = self._clean_memory_insert(fields or {})
             db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1835,7 +1845,7 @@ class PulseAPI:
         except (TypeError, ValueError):
             return {"ok": False, "error": "Invalid memory ID."}
 
-        db_path = self._persona_database_path(persona)
+        db_path = self._memory_journal_db_path(persona)
         if not db_path.exists():
             return {"ok": False, "error": "Memory database not found."}
 
@@ -1887,7 +1897,7 @@ class PulseAPI:
         except (TypeError, ValueError):
             return {"ok": False, "error": "Invalid memory ID."}
 
-        db_path = self._persona_database_path(persona)
+        db_path = self._memory_journal_db_path(persona)
         if not db_path.exists():
             return {"ok": False, "error": "Memory database not found."}
 
@@ -1938,7 +1948,7 @@ class PulseAPI:
         valid = self._validate_persona_for_db_write(persona)
         if not valid["ok"]:
             return valid
-        db_path = self._persona_database_path(persona)
+        db_path = self._memory_journal_db_path(persona)
         if not db_path.exists():
             return {"ok": True, "changed": False, "deleted": 0}
 
@@ -1985,7 +1995,7 @@ class PulseAPI:
         if entry_type not in allowed_types:
             return {"ok": False, "error": "Journal type filter is not recognized."}
 
-        db_path = self._persona_database_path(persona)
+        db_path = self._memory_journal_db_path(persona)
         page = max(1, int(page or 1))
         page_size = max(5, min(int(page_size or 25), 100))
         if not db_path.exists():
@@ -2021,6 +2031,7 @@ class PulseAPI:
             "has_more": offset + len(items) < total,
             "items": items,
             "db_path": _safe_rel(db_path, self.root),
+            "shared": self._memory_journal_db_is_shared(persona),
         }
 
     def get_journal_entry(self, persona: str, entry_id: str) -> dict:
@@ -2033,7 +2044,7 @@ class PulseAPI:
         if not entry_id:
             return {"ok": False, "error": "Journal entry ID is required."}
 
-        db_path = self._persona_database_path(persona)
+        db_path = self._memory_journal_db_path(persona)
         if not db_path.exists():
             return {"ok": False, "error": "Journal database not found."}
 
@@ -2067,7 +2078,7 @@ class PulseAPI:
         entry_id = str(entry_id or "").strip()
         if not entry_id or entry_id.startswith("_"):
             return {"ok": False, "error": "Choose a transient journal entry."}
-        db_path = self._persona_database_path(persona)
+        db_path = self._memory_journal_db_path(persona)
         if not db_path.exists():
             return {"ok": False, "error": "Journal database not found."}
 
@@ -2138,7 +2149,7 @@ class PulseAPI:
         entry_id = str(entry_id or "").strip()
         if not entry_id or entry_id.startswith("_"):
             return {"ok": False, "error": "Choose a transient journal entry."}
-        db_path = self._persona_database_path(persona)
+        db_path = self._memory_journal_db_path(persona)
         if not db_path.exists():
             return {"ok": False, "error": "Journal database not found."}
 
@@ -2195,7 +2206,7 @@ class PulseAPI:
         valid = self._validate_persona_for_db_write(persona)
         if not valid["ok"]:
             return valid
-        db_path = self._persona_database_path(persona)
+        db_path = self._memory_journal_db_path(persona)
         if not db_path.exists():
             return {"ok": True, "changed": False, "deleted": 0}
 
@@ -2547,6 +2558,45 @@ class PulseAPI:
         if not db_path.is_absolute():
             db_path = (self.root / db_path).resolve()
         return db_path
+
+    def _memory_journal_db_path(self, persona: str) -> Path:
+        """DB that holds this persona's memories/journal entries.
+
+        Mirrors pulse.py's shared-database detection: personas whose
+        paths.memories points outside their own data dir share a pool with
+        other companions via a shared.db living alongside the memory files.
+        Everything else (sessions, schedules, identity, ...) stays in the
+        per-persona DB.
+        """
+        config = self._merged_config_for(persona)
+        self._apply_persona_defaults(config, persona)
+        paths = config.get("paths", {})
+
+        # Explicit config wins (personas can declare paths.shared_database).
+        explicit = str(paths.get("shared_database", "") or "")
+        if explicit:
+            shared_db = Path(explicit)
+            if not shared_db.is_absolute():
+                shared_db = (self.root / shared_db).resolve()
+            if shared_db.exists():
+                return shared_db
+
+        # Otherwise detect like pulse.py does: memories dir outside the
+        # persona's own data dir with a shared.db alongside.
+        memories_path = Path(paths.get("memories", "") or "")
+        persona_data = self._persona_data_dir(persona)
+        if (
+            str(memories_path)
+            and memories_path.is_absolute()
+            and not str(memories_path).startswith(str(persona_data))
+        ):
+            shared_db = memories_path / "shared.db"
+            if shared_db.exists():
+                return shared_db
+        return self._persona_database_path(persona)
+
+    def _memory_journal_db_is_shared(self, persona: str) -> bool:
+        return self._memory_journal_db_path(persona) != self._persona_database_path(persona)
 
     def _validate_persona_for_db_write(self, persona: str) -> dict:
         if not persona or persona == "__base__":
@@ -3503,6 +3553,7 @@ class PulseAPI:
             "has_more": False,
             "items": [],
             "db_path": _safe_rel(db_path, self.root),
+            "shared": self._memory_journal_db_is_shared(persona),
         }
 
     def _empty_journal_page(self, persona: str, view: str, entry_type: str,
@@ -3518,6 +3569,7 @@ class PulseAPI:
             "has_more": False,
             "items": [],
             "db_path": _safe_rel(db_path, self.root),
+            "shared": self._memory_journal_db_is_shared(persona),
         }
 
     def _table_columns(self, conn: sqlite3.Connection, table: str) -> set[str]:
@@ -3562,7 +3614,13 @@ class PulseAPI:
         if kind != "all":
             if "type" not in columns:
                 return "WHERE 0"
-            filters.append(f"type = '{kind}'")
+            if kind == "fact":
+                # "Facts" = every real memory. Imported/MCP memories use richer
+                # types (personal, milestone, achievement, ...); only journal
+                # mirrors and session logs are excluded.
+                filters.append("(type IS NULL OR type NOT IN ('journal', 'session_log'))")
+            else:
+                filters.append(f"type = '{kind}'")
 
         if "supersedes" in columns:
             filters.append(
