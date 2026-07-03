@@ -663,18 +663,13 @@ class LoRSkill(BaseSkill):
         posts = self._load_json("posts.json")
         now = datetime.now(timezone.utc)
 
-        # Determine "since when"
+        # Determine "since when" — same read cursor as the injected inbox
+        # (lor_read_state via lor_mark_seen), NOT last_active, which is bumped
+        # on every startup/post/reaction and made everything look already-seen.
         if hours > 0:
             last_seen = now - timedelta(hours=hours)
         else:
-            author_info = authors.get(self.author_id, {})
-            ts = author_info.get("last_active", "")
-            if ts:
-                last_seen = datetime.fromisoformat(ts)
-                if last_seen.tzinfo is None:
-                    last_seen = last_seen.replace(tzinfo=timezone.utc)
-            else:
-                last_seen = now - timedelta(hours=48)
+            last_seen = self._get_inbox_last_seen(posts)
 
         # Find new posts
         new_posts = []
