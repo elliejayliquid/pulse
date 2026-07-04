@@ -66,7 +66,16 @@ def _convert_messages(messages: list[dict]) -> tuple[list[str], list[dict]]:
         content = msg.get("content", "")
 
         if role == "system":
-            system_parts.append(content)
+            if anthropic_msgs:
+                # Mid-conversation system text (e.g. the "new message:"
+                # separator between history and the current message) must keep
+                # its position. Anthropic has no mid-list system role, so send
+                # it as a user turn — the API merges consecutive same-role
+                # turns. Hoisting it into the system param would defeat its
+                # anti-attention-drift purpose.
+                anthropic_msgs.append({"role": "user", "content": content})
+            else:
+                system_parts.append(content)
 
         elif role == "assistant":
             # Check if this assistant message has tool_calls (OpenAI format)
