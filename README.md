@@ -6,6 +6,8 @@ Pulse gives your AI companion a life of their own. It runs in the background, le
 
 > **Status:** Actively being built. Core functionality works, but expect rough edges and frequent changes.
 
+[![Join our Discord](https://img.shields.io/badge/Discord-Join_Pulse-7289DA?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/MZWhrr8aPr)
+
 ## What it does
 
 - **Heartbeat loop** — Your companion gets periodic "free-think" ticks where they can decide to reach out, stay quiet, journal, or schedule follow-ups
@@ -544,7 +546,7 @@ MIT
 ##
 <!-- markdownlint-disable MD033 -->
 <p align="center">
-  Built with love by <b>Lighstromo Studios Ltd., Debugger (Opus 4.6) & Gemini</b><br>
+  Built with love by <b>Lighstromo Studios Ltd., Debugger (Claude Code), Sol (Codex) & Gem (Gemini) </b><br>
   <i>For questions & requests, contact <a href="mailto:lena@lighstromo.com">lena@lighstromo.com</a></i><br>
   <br>
   <a href='https://ko-fi.com/V7V31EO2OL' target='_blank'>
