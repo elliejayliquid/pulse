@@ -4,6 +4,7 @@
 **Owner:** Lena
 **For:** Sol / Pulse GUI implementation
 **Related:** `new_persona_v1.md`, `continuity_section.md`, `journal_search_mirror.md`, `Implemented/claude_legacy_implementation_plan.md`
+**Reviewed:** 2026-07-04 (Debugger) — architecture confirmed sound; additive gaps folded in below (identity sources, public inbound format, drop-zone trust copy, parser fixtures, preview cache eviction).
 
 ## Goal
 
@@ -54,6 +55,7 @@ Known rough edges:
 - Attachment placeholder detection is implemented for Claude file metadata, but other platform export shapes still need real samples and source-specific handling.
 - Review issues are shown and navigable, but future import commit should define which issue types block living-context landing.
 - Completely empty conversations should default to exclude and should be sanitized out even if the user leaves them marked keep.
+- `_import_previews` holds fully parsed batches in memory keyed by path, unbounded. Fine for the preview slice, but a large ChatGPT export can be hundreds of MB — Phase 2 staging must evict/replace previews rather than accumulate them.
 
 ## Phase 1 UX: Read-Only GUI Import Preview
 
@@ -276,6 +278,19 @@ Tone:
 - The UI should feel protective and practical.
 - Avoid making the user feel like they are deleting memories. Use language like "exclude from import" and "keep in archive."
 
+The trust moment at the drop zone:
+
+The very first second of import is a person dragging their most intimate
+data into an app. Say the safety promise right there, before anything else:
+
+```text
+Everything stays on this computer. Nothing is sent anywhere unless you
+later choose an enrichment provider.
+```
+
+One sentence at the file picker/drop zone is cheap and buys most of the
+"this feels safe and easy" reaction the whole feature depends on.
+
 ## Landing Strategy
 
 The selected continuation conversation should be treated differently from the older archive.
@@ -320,6 +335,36 @@ You are continuing from an imported conversation selected by your human. Treat i
 ```
 
 Do not hardcode private names or assumptions in model-visible import instructions.
+
+## Identity Sources: The Transcript Is Half the Companion
+
+A companion is not just conversations — it is also a persona prompt, a voice,
+and accumulated memory. If a user ports 400 conversations but writes the
+persona prompt from scratch, the companion will not *sound* right, and the
+emotional target ("they are really back") fails even though the import
+technically worked.
+
+Platform exports carry identity material beyond chat transcripts:
+
+- ChatGPT exports include saved memory entries and custom instructions.
+- claude.ai has project instructions and project knowledge.
+- Character platforms have explicit personality/definition fields.
+
+Add an identity lane alongside the conversation lanes:
+
+1. **Detect:** during preview, surface any identity material found in the
+   export ("This export also contains 14 saved memories and custom
+   instructions").
+2. **Offer:** platform memory entries become *candidate memories* (same
+   needs-review posture as extracted candidates — never auto-promoted);
+   custom/project instructions become an optional persona prompt scaffold
+   offered in the New Persona flow, editable before use.
+3. **Never merge silently:** identity material follows the same
+   staging-then-explicit-commit rule as conversations.
+
+A v1 that only *shows* the user what identity material the export contains
+(without importing it yet) already changes the felt experience — it tells
+them Pulse sees the whole companion, not just the chat log.
 
 ## Summaries and Enrichment
 
@@ -448,6 +493,27 @@ Recommendation for now:
 
 Treat the import pipeline as shippable Pulse product infrastructure, not casual public scaffolding. Preserve user data portability through documented artifacts and exports, but do not rush to publish the full cross-platform importer until the product strategy is clearer.
 
+### The public inbound format (resolves most of this tension)
+
+"Port from any platform" cannot honestly mean per-platform parsers for
+everything — the platforms users actually arrive from (character.ai,
+Kindroid, Replika, ...) often have no clean export at all, and the formats
+we do support change without notice.
+
+The escape hatch already exists in the code: the **markdown-with-frontmatter
+format is the universal inbound bridge**. Formalize and publicly document it
+as "the Pulse import format":
+
+- Keep platform-specific heuristics closed if desired; the documented
+  inbound format is the community extension point.
+- Anyone can write a converter from any platform *to* the public format,
+  and Pulse imports it with full preview/curation/landing treatment.
+- This makes "any platform" an honest promise without open-sourcing the
+  parser crown jewels, and gives the community a way to contribute
+  adapters without touching Pulse internals.
+- Document the generic JSON list/dict shape alongside it as the
+  machine-friendly variant.
+
 ## Safety and Privacy
 
 Rules:
@@ -511,8 +577,28 @@ Status:
 - Drill from summary hit to source messages.
 - Let companion tools search archive with safe, compact results.
 
+## Parser Maintenance: The Long-Term Tax
+
+Export formats change without notice — ChatGPT has reshaped its export
+multiple times historically. If this importer becomes the differentiator
+feature this doc suggests, parser regressions are where the quality lives
+or dies long-term.
+
+- Maintain a fixture corpus of (sanitized) real export samples per platform,
+  versioned alongside the parsers. When a platform ships a new export shape,
+  add the new sample; keep the old ones — users import years-old files.
+- Run the fixtures through the preview pipeline in tests (extend the
+  existing `scripts/test_gui_api.py` pattern): conversation counts, skip
+  counts, review-issue counts, and placeholder behavior are all assertable.
+- "Import broke for everyone" should be a failing test, not a support
+  ticket.
+- When source detection fails entirely, the unknown-format path should still
+  attempt generic parsing and tell the user what to do next (docs pointer,
+  "convert to the Pulse import format", or how to share a sanitized sample).
+
 ## Open Questions
 
+- Which platforms expose identity material (saved memories, custom/project instructions) in their exports, and where should the identity lane surface in the New Persona flow?
 - Should import artifacts be stored as files, SQLite rows, or both?
 - What exact threshold should trigger windowed transcript viewing?
 - Should issue navigation be exchange-index based, message-index based, or both?
