@@ -451,6 +451,7 @@ class AnthropicClient:
             create_kwargs = self._create_kwargs(
                 system=system_blocks,
                 messages=anthropic_msgs,
+                automatic_cache=self._cache_automatic,
             )
             # Retry loop for transient 500 errors
             response = None

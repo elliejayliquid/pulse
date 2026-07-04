@@ -64,10 +64,13 @@ provider:
   # extra time before expiring — ideal for personas with heartbeats every
   # ≤60 min, where most ticks would otherwise miss the 5-minute window.
   cache_ttl: "1h"
-  # Anthropic only: top-level automatic prompt caching for tool-loop calls.
-  # Can reduce repeated input processing across multi-round tool use, but may
-  # write extra cache entries for one-shot turns with dynamic context.
-  cache_automatic: false
+  # Anthropic only: top-level automatic prompt caching (caches the full prompt
+  # prefix, not just the persona block). Without it, every round of a tool loop
+  # re-bills the entire conversation + context at full input price — with it,
+  # each round reads the previous round's prefix at ~0.1x. The extra cache
+  # writes on one-shot turns are incremental (new suffix only) and cheap
+  # relative to re-billing 50k+ tokens per call.
+  cache_automatic: true
   # Anthropic only: beta cache diagnostics. Enable temporarily to log miss
   # reasons such as system_changed, tools_changed, or messages_changed.
   cache_diagnostics: false
