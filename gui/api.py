@@ -864,6 +864,48 @@ class PulseAPI:
         after = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
         return {"ok": True, "changed": before != after}
 
+    def test_mcp_server(self, server: dict) -> dict:
+        """Dry-run connect to one MCP server entry and list its tools.
+
+        Touches no persona state — spawns/contacts the server, lists tools,
+        and disconnects. Lets the user validate an entry before saving and
+        restarting the persona.
+        """
+        try:
+            cleaned = self.config_editor._clean_mcp_servers([server or {}])
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+
+        try:
+            from skills.mcp import MCP_AVAILABLE, _McpRuntime, _McpServer
+        except Exception as e:
+            return {"ok": False, "error": f"MCP support unavailable: {e}"}
+        if not MCP_AVAILABLE:
+            return {"ok": False, "error": "The 'mcp' package is not installed (pip install mcp)."}
+
+        entry = cleaned[0]
+        runtime = _McpRuntime()
+        mcp_server = _McpServer(entry["name"], entry)
+        try:
+            runtime.call(mcp_server.connect(), 25)
+            tools = [
+                {
+                    "name": tool.name,
+                    "description": (tool.description or "").strip().split("\n")[0][:160],
+                }
+                for tool in mcp_server.tools
+            ]
+            return {"ok": True, "server": entry["name"], "tool_count": len(tools), "tools": tools}
+        except Exception as e:
+            reason = str(e) or type(e).__name__
+            return {"ok": False, "error": f"Could not connect: {reason}"}
+        finally:
+            try:
+                runtime.call(mcp_server.close(), 10)
+            except Exception:
+                pass
+            runtime.stop()
+
     def get_status(self, persona: str | None = None) -> dict:
         self._cleanup_processes()
         if persona is None:

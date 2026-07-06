@@ -136,6 +136,13 @@ CONTEXT_FIELDS = {
     "inject_skills": "Context Injection Skills",
 }
 
+# MCP server entries (skills.mcp.servers). The list is replaced as a whole —
+# entries are validated individually, never merged.
+MCP_SERVER_KEYS = {"name", "command", "args", "env", "url", "tool_timeout"}
+MCP_MAX_SERVERS = 12
+MCP_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+MCP_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
+
 PATH_FIELDS = {
     "lor_data": "LoR Data Folder",
 }
@@ -227,6 +234,8 @@ class ConfigEditor:
         channels = changes.get("channels", {}) or {}
         context = changes.get("context", {}) or {}
         paths = changes.get("paths", {}) or {}
+        # None = untouched; [] = deliberately clear all servers.
+        mcp_servers = changes.get("mcp_servers", None)
         if not isinstance(provider, dict):
             raise ValueError("Provider changes must be an object.")
         if not isinstance(server, dict):
@@ -337,6 +346,10 @@ class ConfigEditor:
                 key: self._clean_context_value(key, value, valid_skills)
                 for key, value in context.items()
             },
+            "mcp_servers": (
+                None if mcp_servers is None
+                else self._clean_mcp_servers(mcp_servers)
+            ),
             "paths": {
                 key: self._clean_text(value, PATH_FIELDS[key])
                 for key, value in paths.items()
@@ -464,6 +477,74 @@ class ConfigEditor:
             raise ValueError(f"{label} must be between {low} and {high}.")
         return value
 
+    def _clean_mcp_servers(self, value: Any) -> list[dict[str, Any]]:
+        if not isinstance(value, list):
+            raise ValueError("MCP servers must be a list.")
+        if len(value) > MCP_MAX_SERVERS:
+            raise ValueError(f"Too many MCP servers (max {MCP_MAX_SERVERS}).")
+        cleaned: list[dict[str, Any]] = []
+        seen_names: set[str] = set()
+        for i, entry in enumerate(value, start=1):
+            label = f"MCP server {i}"
+            if not isinstance(entry, dict):
+                raise ValueError(f"{label} must be an object.")
+            unknown = sorted(set(entry) - MCP_SERVER_KEYS)
+            if unknown:
+                raise ValueError(f"{label} has unsupported field(s): {', '.join(unknown)}")
+
+            name = entry.get("name", "")
+            if not isinstance(name, str) or not MCP_NAME_RE.match(name.strip()):
+                raise ValueError(
+                    f"{label} needs a name (letters, digits, _ or -, max 32 chars)."
+                )
+            name = name.strip()
+            if name.lower() in seen_names:
+                raise ValueError(f"MCP server name '{name}' is used more than once.")
+            seen_names.add(name.lower())
+
+            url = self._clean_text(entry.get("url", "") or "", f"{label} URL").strip()
+            command = self._clean_text(entry.get("command", "") or "", f"{label} command").strip()
+            if bool(url) == bool(command):
+                raise ValueError(f"{label} ('{name}') needs either a URL or a command, not both.")
+            if url and not (url.startswith("http://") or url.startswith("https://")):
+                raise ValueError(f"{label} ('{name}') URL must start with http:// or https://.")
+
+            out: dict[str, Any] = {"name": name}
+            if url:
+                out["url"] = url
+            else:
+                out["command"] = command
+                args = entry.get("args", []) or []
+                if not isinstance(args, list) or len(args) > 32:
+                    raise ValueError(f"{label} ('{name}') args must be a list (max 32).")
+                cleaned_args = [
+                    self._clean_text(arg, f"{label} ('{name}') argument") for arg in args
+                ]
+                cleaned_args = [arg for arg in cleaned_args if arg.strip()]
+                if cleaned_args:
+                    out["args"] = cleaned_args
+                env = entry.get("env", {}) or {}
+                if not isinstance(env, dict) or len(env) > 32:
+                    raise ValueError(f"{label} ('{name}') env must be an object (max 32 entries).")
+                cleaned_env = {}
+                for env_key, env_value in env.items():
+                    if not isinstance(env_key, str) or not MCP_ENV_KEY_RE.match(env_key):
+                        raise ValueError(f"{label} ('{name}') has an invalid env var name.")
+                    cleaned_env[env_key] = self._clean_text(env_value, f"{label} ('{name}') env value")
+                if cleaned_env:
+                    out["env"] = cleaned_env
+
+            timeout = entry.get("tool_timeout", None)
+            if timeout not in (None, ""):
+                if type(timeout) not in (int, float) or not 1 <= timeout <= 3600:
+                    raise ValueError(
+                        f"{label} ('{name}') tool timeout must be 1-3600 seconds."
+                    )
+                out["tool_timeout"] = int(timeout)
+
+            cleaned.append(out)
+        return cleaned
+
     def _clean_dev_tick_value(self, key: str, value: Any) -> int | bool | str:
         label = DEV_TICK_FIELDS[key]
         if key == "enabled":
@@ -580,6 +661,7 @@ class ConfigEditor:
             or changes["channels"]
             or changes["context"]
             or changes["paths"]
+            or changes.get("mcp_servers") is not None
         ):
             config_path = persona_dir / "config.yaml"
             original = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
@@ -607,6 +689,10 @@ class ConfigEditor:
                 updated = _set_nested_field(updated, "context", key, value)
             for key, value in changes["paths"].items():
                 updated = _set_nested_field(updated, "paths", key, value)
+            if changes.get("mcp_servers") is not None:
+                updated = _set_deep_nested_field(
+                    updated, ["skills", "mcp", "servers"], changes["mcp_servers"]
+                )
             rendered.append({"path": config_path, "original": original, "updated": updated})
         return rendered
 

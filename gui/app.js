@@ -788,6 +788,21 @@ function setDevTickField(key, value) {
   devTickConfig()[key] = value;
 }
 
+function mcpServersValue() {
+  const list = state.current?.config?.skills?.mcp?.servers;
+  return Array.isArray(list) ? list : [];
+}
+
+function stagedMcpServers() {
+  state.current.config = state.current.config || {};
+  state.current.config.skills = state.current.config.skills || {};
+  state.current.config.skills.mcp = state.current.config.skills.mcp || {};
+  if (!Array.isArray(state.current.config.skills.mcp.servers)) {
+    state.current.config.skills.mcp.servers = [];
+  }
+  return state.current.config.skills.mcp.servers;
+}
+
 function ttsSkillMode() {
   const tts = state.current?.config?.tts || {};
   const hasDescription = Boolean(text(tts.voice_description).trim());
@@ -845,6 +860,16 @@ function renderSkillDialogBody(skill) {
         <label class="sample-path-label" title="Maximum tool-calling rounds for one autonomous dev session.">Max Rounds
           <input id="skillDevTickMaxRounds" type="number" min="1" max="32" step="1" value="${escapeHtml(String(devTickValue("max_rounds", 16)))}">
         </label>
+      </div>
+    `;
+  }
+
+  if (skill?.name === "mcp") {
+    return `
+      <div class="skill-setting-stack">
+        <div id="skillMcpRows">${renderMcpServerRows()}</div>
+        <button id="skillMcpAdd" class="subtle-wide-btn" type="button">Add MCP Server</button>
+        <p class="field-hint">Fill either a local command or a remote URL per server, not both. Env vars can be added by hand in config.yaml. Servers connect when the persona starts.</p>
       </div>
     `;
   }
@@ -1138,6 +1163,8 @@ function openSkillDialog(skillName) {
   el("skillTitle").textContent = skillLabel(skill);
   el("skillSubtitle").textContent = skill.name === "lor"
     ? "Configure this persona's forum identity and inbox behavior."
+    : skill.name === "mcp"
+      ? "Connect external MCP tool servers for this persona."
     : skill.name === "dev"
       ? "Configure autonomous development checks for this persona."
       : skill.name === "lantern"
@@ -1161,7 +1188,9 @@ function openSkillDialog(skillName) {
                         : skill.name === "schedule"
                           ? "Manage DB-backed reminders and scheduled follow-ups."
                         : "Configure this skill for this persona. Save from the main footer when you're done.";
-  el("skillNotice").textContent = skill.name === "paint"
+  el("skillNotice").textContent = skill.name === "mcp"
+    ? "Only add servers you trust — they run as programs on this computer. Changes are staged until the main Save and connect on the persona's next restart."
+    : skill.name === "paint"
     ? "Gallery is read-only here; painting still happens through companion tools."
     : skill.name === "web_search"
       ? "These tools use the network only when the companion calls them."
@@ -1206,7 +1235,126 @@ function openSkillDialog(skillName) {
   }
 }
 
+function renderMcpServerRows() {
+  const servers = mcpServersValue();
+  if (!servers.length) {
+    return `
+      <div class="skill-empty-settings">
+        <strong>No MCP servers configured</strong>
+        <span>Connect this companion to external Model Context Protocol servers — the same servers Claude Desktop uses. Only add servers you trust: they run as programs on this computer.</span>
+      </div>`;
+  }
+  return servers.map((server, index) => `
+    <div class="skill-setting-stack mcp-server-row" data-mcp-index="${index}">
+      <div class="skill-setting-grid">
+        <label class="sample-path-label" title="Short unique name. Prefixes this server's tool names.">Name
+          <input data-mcp-field="name" type="text" maxlength="32" value="${escapeHtml(text(server.name))}">
+        </label>
+        <label class="sample-path-label" title="Optional. Seconds allowed per tool call (1-3600).">Tool Timeout
+          <input data-mcp-field="tool_timeout" type="number" min="1" max="3600" step="1" value="${escapeHtml(server.tool_timeout != null ? String(server.tool_timeout) : "")}">
+        </label>
+      </div>
+      <label class="sample-path-label" title="Local server: the command Pulse runs (e.g. python, npx, node).">Command
+        <input data-mcp-field="command" type="text" value="${escapeHtml(text(server.command))}">
+      </label>
+      <label class="sample-path-label" title="Command arguments, one per line.">Arguments (one per line)
+        <textarea data-mcp-field="args" rows="2">${escapeHtml((server.args || []).join("\n"))}</textarea>
+      </label>
+      <label class="sample-path-label" title="Remote server: streamable-HTTP endpoint URL. Leave command empty when using a URL.">URL
+        <input data-mcp-field="url" type="text" value="${escapeHtml(text(server.url))}">
+      </label>
+      <div class="skill-setting-grid">
+        <button class="subtle-wide-btn" type="button" data-mcp-test="${index}">Test Connection</button>
+        <button class="subtle-wide-btn" type="button" data-mcp-remove="${index}">Remove</button>
+      </div>
+      <p class="field-hint mcp-test-result" data-mcp-result="${index}"></p>
+    </div>
+  `).join("");
+}
+
+function readMcpRowField(index, field, rawValue) {
+  const servers = stagedMcpServers();
+  const server = servers[index];
+  if (!server) return;
+  if (field === "args") {
+    const args = rawValue.split("\n").map((line) => line.trim()).filter(Boolean);
+    if (args.length) server.args = args;
+    else delete server.args;
+  } else if (field === "tool_timeout") {
+    if (rawValue === "") delete server.tool_timeout;
+    else server.tool_timeout = Number(rawValue);
+  } else {
+    const value = rawValue.trim();
+    if (value) server[field] = value;
+    else delete server[field];
+  }
+}
+
+async function runMcpServerTest(index) {
+  const server = mcpServersValue()[index];
+  const result = document.querySelector(`[data-mcp-result="${index}"]`);
+  const button = document.querySelector(`[data-mcp-test="${index}"]`);
+  if (!server || !result) return;
+  if (typeof api().test_mcp_server !== "function") {
+    result.textContent = "Test is unavailable in this preview environment.";
+    return;
+  }
+  if (button) button.disabled = true;
+  result.textContent = "Testing connection...";
+  try {
+    const response = await api().test_mcp_server(server);
+    if (response?.ok) {
+      const names = (response.tools || []).map((tool) => tool.name);
+      const shown = names.slice(0, 6).join(", ");
+      const more = names.length > 6 ? ` +${names.length - 6} more` : "";
+      result.textContent = `Connected: ${response.tool_count} tool${response.tool_count === 1 ? "" : "s"}${names.length ? ` — ${shown}${more}` : ""}`;
+    } else {
+      result.textContent = response?.error || "Connection failed.";
+    }
+  } catch (error) {
+    result.textContent = `Test failed: ${error?.message || error}`;
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+function bindMcpDialogControls() {
+  const rows = el("skillMcpRows");
+  rows?.addEventListener("input", (event) => {
+    const field = event.target?.dataset?.mcpField;
+    if (!field) return;
+    const row = event.target.closest("[data-mcp-index]");
+    if (!row) return;
+    readMcpRowField(Number(row.dataset.mcpIndex), field, event.target.value);
+    setDirty(hasEditableChanges());
+  });
+  rows?.addEventListener("click", (event) => {
+    const testIndex = event.target?.dataset?.mcpTest;
+    if (testIndex !== undefined) {
+      void runMcpServerTest(Number(testIndex));
+      return;
+    }
+    const removeIndex = event.target?.dataset?.mcpRemove;
+    if (removeIndex !== undefined) {
+      stagedMcpServers().splice(Number(removeIndex), 1);
+      rows.innerHTML = renderMcpServerRows();
+      setDirty(hasEditableChanges());
+    }
+  });
+  el("skillMcpAdd")?.addEventListener("click", () => {
+    stagedMcpServers().push({ name: "" });
+    if (rows) rows.innerHTML = renderMcpServerRows();
+    setDirty(hasEditableChanges());
+    const added = rows?.querySelector(`[data-mcp-index="${mcpServersValue().length - 1}"] input`);
+    added?.focus();
+  });
+}
+
 function bindSkillDialogControls(skill) {
+  if (skill?.name === "mcp") {
+    bindMcpDialogControls();
+    return;
+  }
   if (skill?.name === "dev") {
     el("skillDevTickEnabled")?.addEventListener("change", (event) => {
       setDevTickField("enabled", event.target.checked);
@@ -2928,6 +3076,7 @@ function editableSnapshot() {
       schedule_time: text(devTickValue("schedule_time", "")),
       max_rounds: devTickValue("max_rounds", 16),
     },
+    mcp_servers: JSON.parse(JSON.stringify(mcpServersValue())),
     heartbeat: {
       interval_minutes: el("hbInterval").value,
       interval_min_minutes: el("hbMin").value,
@@ -3122,6 +3271,11 @@ function collectEditableChanges() {
     }
   }
 
+  // Absent = untouched; the backend replaces the whole list when present.
+  if (JSON.stringify(current.mcp_servers) !== JSON.stringify(original.mcp_servers || [])) {
+    changes.mcp_servers = current.mcp_servers;
+  }
+
   return changes;
 }
 
@@ -3138,7 +3292,8 @@ function hasEditableChanges() {
     || Object.keys(changes.paths).length > 0
     || Object.keys(changes.context).length > 0
     || Object.keys(changes.dev_tick).length > 0
-    || Object.keys(changes.heartbeat).length > 0;
+    || Object.keys(changes.heartbeat).length > 0
+    || changes.mcp_servers !== undefined;
 }
 
 function validateHeartbeatFields() {
