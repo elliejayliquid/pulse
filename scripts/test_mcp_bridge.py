@@ -13,7 +13,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from skills.mcp_bridge import McpBridgeSkill  # noqa: E402
+from skills.mcp import McpBridgeSkill  # noqa: E402
 
 PASS = 0
 FAIL = 0

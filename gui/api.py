@@ -115,6 +115,7 @@ SKILL_ICONS = {
     "journal": "📖",
     "lantern": "🕯",
     "lor": "🌐",
+    "mcp": "🔌",
     "memory": "🧠",
     "paint": "🎨",
     "schedule": "⏰",
