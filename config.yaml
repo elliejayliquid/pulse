@@ -181,6 +181,21 @@ skills:
     enabled: true                 # compact current-state signal
   sticker:
     enabled: true                 # send_sticker — mood-matched Telegram stickers
+  mcp:
+    enabled: true                 # bridge to external MCP servers (no-op until servers are configured)
+    # Connect your companion to Model Context Protocol servers — the same
+    # servers Claude Desktop uses. Discovered tools become on-demand tools
+    # (found via search_tools), prefixed with the server name.
+    # SECURITY: a server entry is arbitrary code execution by config, and its
+    # tool output flows into an autonomous agent. Only add servers you trust.
+    # servers:
+    #   - name: "memory"                      # stdio server: Pulse spawns it
+    #     command: "python"
+    #     args: ["D:/path/to/mcp_server.py"]
+    #     env: {}                             # optional extra env vars
+    #     tool_timeout: 60                    # optional, seconds per call
+    #   - name: "docs"                        # remote streamable-HTTP server
+    #     url: "http://127.0.0.1:8765/mcp"
 
 # --- Context Injection ---
 #context:

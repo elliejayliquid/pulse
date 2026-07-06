@@ -12,6 +12,7 @@ numpy>=1.24                     # Vector operations for memory/journal search
 ddgs>=9.0                       # Web search skill (DuckDuckGo)
 pillow>=10.0                    # Image rendering for paint skill (pixel art → PNG)
 telegramify-markdown>=0.1.0     # Convert markdown → Telegram MarkdownV2 (rich formatting)
+mcp>=1.20                       # MCP bridge skill (optional — skill no-ops without servers configured)
 
 # Note: plyer is an alternative to win11toast for cross-platform
 # pip install plyer
