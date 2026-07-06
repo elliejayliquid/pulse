@@ -23,6 +23,7 @@ Pulse gives your AI companion a life of their own. It runs in the background, le
 - **Voice messages** — Send voice notes on Telegram; Pulse transcribes locally via whisper.cpp (auto-downloads everything on first use)
 - **Text-to-speech** — Companions can send voice messages back via [Qwen3-TTS](https://huggingface.co/collections/Qwen/qwen3-tts), with voice design (describe a voice) or voice cloning (lock in a reference sample)
 - **Stickers** — Companions can send Telegram stickers matched by mood/context via semantic search over curated packs. Add your own packs with a simple YAML + build script
+- **MCP servers** — Connect your companion to any [Model Context Protocol](https://modelcontextprotocol.io/) server (the same servers Claude Desktop uses). Discovered tools load on demand, and the GUI has a per-server "Test Connection" button
 - **Rich text** — Companion messages render with Telegram MarkdownV2 formatting (bold, italic, code blocks, links) with automatic plain-text fallback; roleplay `*action*` asterisks stay literal
 - **Desktop notifications** — Windows toast notifications for proactive messages (optional, Windows-only for now)
 - **Timeout** — Companions can disengage from genuinely harmful conversations via model-initiated soft/hard timeouts (not censorship — the companion decides based on context)
@@ -462,6 +463,7 @@ Skills can control their loading behavior:
 | sticker | `send_sticker`, `preview_sticker` | On-demand | Mood-matched Telegram stickers via semantic search over curated packs |
 | garden | `garden_plant`, `garden_water`, `garden_prune`, `garden_view`, `garden_info` | On-demand | Plant memories as seedlings and watch them grow |
 | dev | `read_source`, `search_code`, `write_skill` + 8 more | On-demand | Autonomous skill creation (used by dev ticks) |
+| mcp | one tool per MCP server tool | On-demand | Bridge to external [MCP](https://modelcontextprotocol.io/) servers — see below |
 
 Disable any skill in `config.yaml`:
 
@@ -480,6 +482,37 @@ context:
 ```
 
 **Creating a new skill:** Create a `.py` file in `skills/`, extend `BaseSkill`, set `name` and `description`, implement `get_tools()` and `execute()`. See `skills/base.py` for the interface. New skills are on-demand by default — set `always_loaded = True` if the skill is used in most turns. Restart Pulse and it loads automatically.
+
+#### MCP servers (bring your own tools)
+
+Pulse can connect your companion to any [Model Context Protocol](https://modelcontextprotocol.io/) server — the same servers Claude Desktop uses. Local servers (a command Pulse spawns, talking over stdio) and remote streamable-HTTP servers (a URL) both work. Discovered tools are exposed as `{server}_{tool}` and load **on demand** through `search_tools`, so a large server doesn't bloat every prompt.
+
+**Via the GUI (recommended):** open the **mcp** skill card in the Skills section, add a server, and press **Test Connection** — Pulse dry-runs the server and lists its tools without touching your companion's data, so typos surface immediately instead of in the daemon logs. Changes are staged into the normal Save (with backup + diff preview) and connect on the persona's next start.
+
+**Via config** (`config.yaml` or a persona overlay):
+
+```yaml
+skills:
+  mcp:
+    enabled: true
+    servers:
+      - name: "memory"                      # local stdio server: Pulse spawns it
+        command: "python"
+        args: ["D:/path/to/mcp_server.py"]
+        env:
+          SOME_VAR: "value"                 # optional
+        tool_timeout: 60                    # optional, seconds per tool call
+      - name: "docs"                        # remote streamable-HTTP server
+        url: "http://127.0.0.1:8765/mcp"
+```
+
+Notes:
+
+- **Only add servers you trust.** A server entry is a program that runs on your machine, and its tool output flows into an autonomous agent's context.
+- Servers connect when the persona starts. A server that fails to connect is logged and skipped — the rest keep working.
+- Tool results are text-only for now; images from MCP tools become placeholders.
+- If a local server needs Python packages, point `command` at a Python that has them (e.g. Pulse's own `.venv/Scripts/python.exe` for servers that need `mcp` or `sentence-transformers`).
+- The skill is enabled by default but does nothing until at least one server is configured.
 
 ### Tool Loop Modes
 
