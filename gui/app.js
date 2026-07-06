@@ -1263,6 +1263,9 @@ function renderMcpServerRows() {
       <label class="sample-path-label" title="Remote server: streamable-HTTP endpoint URL. Leave command empty when using a URL.">URL
         <input data-mcp-field="url" type="text" value="${escapeHtml(text(server.url))}">
       </label>
+      <label class="sample-path-label" title="Extra environment variables for local servers, KEY=value, one per line.">Env Vars (KEY=value, one per line)
+        <textarea data-mcp-field="env" rows="2">${escapeHtml(Object.entries(server.env || {}).map(([key, value]) => `${key}=${value}`).join("\n"))}</textarea>
+      </label>
       <div class="skill-setting-grid">
         <button class="subtle-wide-btn" type="button" data-mcp-test="${index}">Test Connection</button>
         <button class="subtle-wide-btn" type="button" data-mcp-remove="${index}">Remove</button>
@@ -1280,6 +1283,17 @@ function readMcpRowField(index, field, rawValue) {
     const args = rawValue.split("\n").map((line) => line.trim()).filter(Boolean);
     if (args.length) server.args = args;
     else delete server.args;
+  } else if (field === "env") {
+    const env = {};
+    for (const line of rawValue.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      const eq = trimmed.indexOf("=");
+      if (eq <= 0) continue;
+      env[trimmed.slice(0, eq).trim()] = trimmed.slice(eq + 1).trim();
+    }
+    if (Object.keys(env).length) server.env = env;
+    else delete server.env;
   } else if (field === "tool_timeout") {
     if (rawValue === "") delete server.tool_timeout;
     else server.tool_timeout = Number(rawValue);
