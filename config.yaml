@@ -181,6 +181,8 @@ skills:
     enabled: true                 # compact current-state signal
   sticker:
     enabled: true                 # send_sticker — mood-matched Telegram stickers
+  documents:
+    enabled: true                 # list_documents, read_document — files sent over Telegram
   mcp:
     enabled: true                 # bridge to external MCP servers (no-op until servers are configured)
     # Connect your companion to Model Context Protocol servers — the same

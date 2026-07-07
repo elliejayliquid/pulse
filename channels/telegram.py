@@ -107,6 +107,10 @@ class TelegramChannel(Channel):
         # Voice review: pending transcriptions awaiting Send/Cancel.
         # Maps bot_message_id -> {"text": str, "user_msg": Message}
         self._pending_transcriptions: dict[int, dict] = {}
+        # Incoming documents (PDF, text, code) are saved here; small ones are
+        # also injected inline into the conversation.
+        from core.documents import inbox_dir
+        self._inbox_dir = inbox_dir(config)
 
     def set_engine(self, engine):
         """Connect the engine so incoming messages can trigger responses."""
@@ -174,6 +178,12 @@ class TelegramChannel(Channel):
         self.app.add_handler(MessageHandler(
             filters.PHOTO,
             self._on_photo
+        ))
+
+        # Document handler — attached files (PDF, text, code, ...)
+        self.app.add_handler(MessageHandler(
+            filters.Document.ALL,
+            self._on_document
         ))
 
         # Callback query handler — for inline buttons (e.g. 🔊 voice button)
@@ -1133,6 +1143,111 @@ class TelegramChannel(Channel):
             logger.error(f"Photo handler crashed: {e}", exc_info=True)
             try:
                 await update.message.reply_text("(Something went wrong processing that image — check the logs!)")
+            except Exception:
+                pass
+
+    def _compose_document_message(self, saved, caption: str) -> str:
+        """Build the model-visible message for an incoming document.
+
+        Small extracted text goes inline (like a paste); longer documents get
+        a head slice plus a pointer to the documents skill; unreadable files
+        get an honest note. The human's caption always comes last.
+        """
+        from core.documents import extract_text
+
+        inline_limit = 8000
+        head_chars = 3500
+        text, note = extract_text(saved)
+        name = saved.name
+
+        if text and len(text) <= inline_limit:
+            block = (
+                f"[Your human sent a document: {name}]\n---\n{text}\n---\n"
+                f"[End of document.]"
+            )
+        elif text:
+            block = (
+                f"[Your human sent a document: {name} — {len(text)} characters. "
+                f"It begins:]\n---\n{text[:head_chars]}\n---\n"
+                f"[Document continues. Read the rest with "
+                f"read_document(filename=\"{name}\") — load the documents "
+                f"tools via search_tools first if they aren't loaded.]"
+            )
+        else:
+            block = (
+                f"[Your human sent a file: {name}. It is saved in your inbox, "
+                f"but its text could not be read: {note}]"
+            )
+
+        if caption.strip():
+            return f"{block}\n\nTheir message with it: {caption.strip()}"
+        return block
+
+    async def _on_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle incoming file attachments — save to inbox, extract text, respond."""
+        try:
+            if not self._engine:
+                await update.message.reply_text("I'm still starting up, give me a moment...")
+                return
+
+            from core.documents import MAX_DOCUMENT_BYTES, save_to_inbox
+
+            doc = update.message.document
+            filename = doc.file_name or "document"
+            size = doc.file_size or 0
+            caption = update.message.caption or ""
+            logger.info(f"Telegram document from user: {filename} ({size} bytes)")
+
+            if size > MAX_DOCUMENT_BYTES:
+                await self._reply_with_retry(
+                    update.message,
+                    "(That file is too large for me — Telegram only lets bots "
+                    "download files up to ~19MB.)"
+                )
+                return
+
+            typing_task = self._start_typing_loop(update.effective_chat)
+            try:
+                # Same retry helper as photos — works for any attachment.
+                data = await self._download_photo_with_retry(doc)
+                saved = save_to_inbox(self._inbox_dir, filename, bytes(data))
+                logger.info(f"Document saved to inbox: {saved.name} ({len(data)} bytes)")
+
+                message = self._compose_document_message(saved, caption)
+                self._last_user_message = message
+
+                reply, tools_used, reasoning, msg_db_ids = await self._engine.handle_message(
+                    message, source="telegram",
+                    channel_message_id=update.message.message_id
+                )
+            finally:
+                typing_task.cancel()
+
+            voice_sent = await self._send_pending_skill_output(
+                update.message, reply or "", tools_used
+            )
+            if self._show_reasoning and reasoning:
+                await self._send_reasoning(update.message, reasoning)
+            if tools_used:
+                tool_names = ", ".join(dict.fromkeys(tools_used))
+                await self._reply_with_retry(update.message, f"🔧 {tool_names}")
+            if reply:
+                sent = await self._reply_with_retry(
+                    update.message, reply, reply_markup=self._voice_markup(),
+                    markdown=True
+                )
+                if sent and msg_db_ids:
+                    self._engine.db.update_message_channel_id(msg_db_ids[-1], sent.message_id)
+            elif not voice_sent:
+                await self._reply_with_retry(
+                    update.message,
+                    f"(I couldn't respond right now, but '{saved.name}' is saved "
+                    "in my inbox — ask me about it again later.)"
+                )
+        except Exception as e:
+            logger.error(f"Document handler crashed: {e}", exc_info=True)
+            try:
+                await update.message.reply_text("(Something went wrong with that file — check the logs!)")
             except Exception:
                 pass
 
