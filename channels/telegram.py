@@ -682,9 +682,11 @@ class TelegramChannel(Channel):
             return
 
         active_schedules = self._engine.scheduler.list_active()
+        quiet = getattr(self._engine, "_manual_quiet", False)
         status_lines = [
             "Pulse Status:",
-            f"  Heartbeat: every {self._engine.interval // 60}m",
+            f"  Heartbeat: {'paused (quiet mode)' if quiet else f'every {self._engine.interval // 60}m'}",
+            f"  Quiet mode: {'on — /quiet to resume' if quiet else 'off'}",
             f"  LLM server: {'connected' if self._engine.llm._available else 'disconnected'}",
             f"  Active schedules: {len(active_schedules)}",
         ]
@@ -694,12 +696,13 @@ class TelegramChannel(Channel):
         await update.message.reply_text("\n".join(status_lines))
 
     async def _cmd_quiet(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /quiet — toggle manual quiet mode (no heartbeats until next message)."""
+        """Handle /quiet — sticky toggle for manual quiet mode (no heartbeats)."""
         if self._engine:
             self._engine._manual_quiet = not self._engine._manual_quiet
             if self._engine._manual_quiet:
                 await update.message.reply_text(
-                    "Quiet mode on — I'll stop proactive messages until you message me again."
+                    "Quiet mode on — no proactive messages, even while we chat. "
+                    "Send /quiet again to turn it back off (check /status anytime)."
                 )
             else:
                 await update.message.reply_text(

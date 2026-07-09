@@ -167,6 +167,21 @@ All `{name}` and `{user_name}` placeholders are resolved automatically. YAML is 
 3. Set `telegram.enabled: true` in `config.yaml`
 4. Send `/start` to your bot
 
+#### Telegram commands
+
+| Command | What it does |
+|---------|--------------|
+| `/start` | Register this chat so the companion can reach you |
+| `/status` | Show heartbeat interval, quiet-mode state, LLM status, and active schedules |
+| `/quiet` | Sticky toggle — stop all proactive messages (even while you chat). Send again to resume; check state with `/status` |
+| `/ping` | Instant "is the bot alive?" check (no LLM call) |
+| `/remind <text>` | Quick reminder via the scheduler |
+| `/tasks`, `/tasks_clear` | Show or clear the companion's task list |
+| `/garden` | Show the companion's garden (if the garden skill is enabled) |
+| `/timeout` | Check or clear an active model-initiated timeout |
+| `/retry` | Re-process your last message after an LLM/API error |
+| `/resend` | Re-deliver the last reply without re-calling the LLM |
+
 ### Run
 
 ```bash
