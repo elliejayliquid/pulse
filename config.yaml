@@ -102,6 +102,15 @@ heartbeat:
 #   conversation: 16000           # pin conversation budget (tokens)
 #   recent_tail_exchanges: 2      # exchanges (user+assistant pairs) kept after summarization
 
+# --- Passive recall of memories ---
+context:
+  recall:
+    enabled: true          # false -> exactly the old behavior
+    top_k: 6
+    min_similarity: 0.30
+    core_importance: 8
+    heartbeat_query: false
+
 # --- Data Paths ---
 paths:
   memories: "data/memories"             # memory JSON files (MCP-compatible)

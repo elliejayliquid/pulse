@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import Optional
 
 import yaml
+import numpy as np
+from core.embeddings import blob_to_vec, embedding_to_blob, chunk_text, max_similarity
 
 logger = logging.getLogger(__name__)
 
@@ -535,12 +537,77 @@ You decide when to lift the timeout — not the human."""
             return text
         return text[:max_chars] + "\n... (truncated)"
 
-    def _load_memories(self, limit: int = 5) -> str:
+    def _load_memories(self, query: str = None) -> str:
         """Load recent and important memories from DB (or JSON fallback)."""
-        # DB path — use shared DB (memories are shared for Claude personas)
         db = self._shared_db or self._db
-        if db:
-            memories = db.get_all_memories()
+        
+        # Check recall configuration
+        context_cfg = self.config.get("context", {})
+        enabled = False
+        if "recall" in context_cfg:
+            recall_cfg = context_cfg["recall"]
+            enabled = recall_cfg.get("enabled", True)
+        else:
+            recall_cfg = {}
+
+        model = _get_embedding_model()
+
+        # If DB not configured, or recall is disabled, or query is empty, or model is not loaded:
+        if not db or not enabled or not query or not model:
+            if db:
+                memories = db.get_all_memories()
+                if not memories:
+                    return ""
+
+                session_logs = sorted(
+                    [m for m in memories if m.get("type") == "session_log"],
+                    key=lambda x: x.get("date", ""),
+                    reverse=True
+                )
+                facts = [m for m in memories if m.get("type") == "fact"]
+                current_facts = [
+                    m for m in facts
+                    if m.get("status") != "historical" and not self._memory_is_expired(m)
+                ]
+                historical_facts = [
+                    m for m in facts
+                    if m.get("status") == "historical" or self._memory_is_expired(m)
+                ]
+
+                lines = ["## Recent Memories"]
+                if session_logs:
+                    latest = session_logs[0]
+                    lines.append(f"\nLast session ({latest.get('date', 'unknown')[:10]}):")
+                    lines.append(latest.get("text", ""))
+                if current_facts:
+                    lines.append("\nStored facts (dated; old facts may be historical, not current):")
+                    for fact in current_facts:
+                        tags = fact.get("tags", [])
+                        tag_str = f" [{', '.join(tags)}]" if tags else ""
+                        lines.append(f"- {self._memory_date_prefix(fact)} {fact.get('text', '')}{tag_str}")
+                if historical_facts:
+                    lines.append("\nHistorical/expired facts (use as background, not current truth):")
+                    for fact in historical_facts:
+                        tags = fact.get("tags", [])
+                        tag_str = f" [{', '.join(tags)}]" if tags else ""
+                        lines.append(f"- {self._memory_date_prefix(fact)} {fact.get('text', '')}{tag_str}")
+
+                return "\n".join(lines) if len(lines) > 1 else ""
+
+            # JSON fallback
+            memory_dir = self.paths.get("memories", "")
+            if not memory_dir or not Path(memory_dir).exists():
+                return ""
+
+            memories = []
+            for filepath in glob.glob(str(Path(memory_dir) / "memory_*.json")):
+                try:
+                    with open(filepath, "r", encoding="utf-8") as f:
+                        mem = json.load(f)
+                        memories.append(mem)
+                except (json.JSONDecodeError, IOError):
+                    continue
+
             if not memories:
                 return ""
 
@@ -579,57 +646,140 @@ You decide when to lift the timeout — not the human."""
 
             return "\n".join(lines) if len(lines) > 1 else ""
 
-        # JSON fallback
-        memory_dir = self.paths.get("memories", "")
-        if not memory_dir or not Path(memory_dir).exists():
-            return ""
+        # Chunk the query
+        chunks = chunk_text(query)
+        if not chunks:
+            # Fall back to default behavior if query is filtered out / empty
+            return self._load_memories(None)
 
-        memories = []
-        for filepath in glob.glob(str(Path(memory_dir) / "memory_*.json")):
-            try:
-                with open(filepath, "r", encoding="utf-8") as f:
-                    mem = json.load(f)
-                    memories.append(mem)
-            except (json.JSONDecodeError, IOError):
-                continue
+        # Encode chunks in batch
+        query_vecs = [np.array(v) for v in model.encode(chunks)]
 
+        # Get all memories from DB
+        memories = db.get_all_memories()
         if not memories:
             return ""
 
+        # Load all chunk embeddings
+        try:
+            chunk_rows = db.get_all_memory_chunks()
+        except Exception as e:
+            logger.warning(f"Failed to load memory chunks: {e}")
+            chunk_rows = []
+
+        chunks_by_mem = {}
+        for r in chunk_rows:
+            mem_id = r["memory_id"]
+            emb_blob = r["embedding"]
+            vec = blob_to_vec(emb_blob)
+            if vec is not None:
+                if mem_id not in chunks_by_mem:
+                    chunks_by_mem[mem_id] = []
+                chunks_by_mem[mem_id].append(vec)
+
+        # Partition memories into core and pool
         session_logs = sorted(
             [m for m in memories if m.get("type") == "session_log"],
             key=lambda x: x.get("date", ""),
             reverse=True
         )
-        facts = [m for m in memories if m.get("type") == "fact"]
-        current_facts = [
-            m for m in facts
-            if m.get("status") != "historical" and not self._memory_is_expired(m)
-        ]
-        historical_facts = [
-            m for m in facts
-            if m.get("status") == "historical" or self._memory_is_expired(m)
-        ]
+        latest_session_log = session_logs[0] if session_logs else None
 
+        core_importance = recall_cfg.get("core_importance", 8)
+        core_facts = []
+        pool_memories = []
+
+        for m in memories:
+            m_id = m.get("id")
+            m_type = m.get("type")
+            
+            # Check if it's the latest session log (goes to core)
+            if latest_session_log and m_id == latest_session_log.get("id"):
+                continue
+
+            if m_type == "fact":
+                is_historical = (m.get("status") == "historical") or self._memory_is_expired(m)
+                importance = m.get("importance", 5)
+                if not is_historical and importance >= core_importance:
+                    core_facts.append(m)
+                else:
+                    pool_memories.append(m)
+            else:
+                pool_memories.append(m)
+
+        # Score the pool against query
+        scored_pool = []
+        min_similarity = recall_cfg.get("min_similarity", 0.30)
+
+        for m in pool_memories:
+            m_id = m.get("id")
+            importance = m.get("importance", 5)
+
+            # Collect candidate vectors for this memory
+            candidate_vecs = []
+            emb = m.get("embedding")
+            main_vec = blob_to_vec(emb)
+            if main_vec is not None:
+                candidate_vecs.append(main_vec)
+
+            if m_id in chunks_by_mem:
+                candidate_vecs.extend(chunks_by_mem[m_id])
+
+            if not candidate_vecs:
+                continue
+
+            base_score = max_similarity(query_vecs, candidate_vecs)
+            if base_score >= min_similarity:
+                importance_boost = importance * 0.002
+                final_score = base_score + importance_boost
+                scored_pool.append((final_score, base_score, m))
+
+        # Sort pool by final_score DESC
+        scored_pool.sort(key=lambda x: x[0], reverse=True)
+
+        top_k = recall_cfg.get("top_k", 6)
+        pool_hits = [item[2] for item in scored_pool[:top_k]]
+
+        # Log recall statistics
+        top_score = scored_pool[0][0] if scored_pool else 0.0
+        top_base = scored_pool[0][1] if scored_pool else 0.0
+        logger.info(
+            f"Passive recall: chunks={len(chunks)}, pool={len(pool_memories)}, "
+            f"hits_above_thresh={len(scored_pool)}, top_final={top_score:.4f}, top_base={top_base:.4f}"
+        )
+
+        # Format output
         lines = ["## Recent Memories"]
-        if session_logs:
-            latest = session_logs[0]
-            lines.append(f"\nLast session ({latest.get('date', 'unknown')[:10]}):")
-            lines.append(latest.get("text", ""))
-        if current_facts:
-            lines.append("\nStored facts (dated; old facts may be historical, not current):")
-            for fact in current_facts:
-                tags = fact.get("tags", [])
-                tag_str = f" [{', '.join(tags)}]" if tags else ""
-                lines.append(f"- {self._memory_date_prefix(fact)} {fact.get('text', '')}{tag_str}")
-        if historical_facts:
-            lines.append("\nHistorical/expired facts (use as background, not current truth):")
-            for fact in historical_facts:
+
+        if latest_session_log:
+            lines.append(f"\nLast session ({latest_session_log.get('date', 'unknown')[:10]}):")
+            lines.append(latest_session_log.get("text", ""))
+
+        if core_facts:
+            lines.append("\nKey facts (always with you):")
+            for fact in core_facts:
                 tags = fact.get("tags", [])
                 tag_str = f" [{', '.join(tags)}]" if tags else ""
                 lines.append(f"- {self._memory_date_prefix(fact)} {fact.get('text', '')}{tag_str}")
 
-        return "\n".join(lines)
+        if pool_hits:
+            lines.append("\nPossibly relevant to this moment (retrieved by similarity — treat as hints, verify before asserting):")
+            for mem in pool_hits:
+                m_type = mem.get("type")
+                tags = mem.get("tags", [])
+                tag_str = f" [{', '.join(tags)}]" if tags else ""
+
+                if m_type == "session_log":
+                    text = mem.get("text", "")
+                    if len(text) > 300:
+                        text = text[:300] + "…"
+                    lines.append(f"- {self._memory_date_prefix(mem)} (from an old session summary) {text}{tag_str}")
+                else:
+                    is_historical = (mem.get("status") == "historical") or self._memory_is_expired(mem)
+                    caveat = " (historical — may no longer be current)" if is_historical else ""
+                    lines.append(f"- {self._memory_date_prefix(mem)} {mem.get('text', '')}{caveat}{tag_str}")
+
+        return "\n".join(lines) if len(lines) > 1 else ""
 
     def _load_schedules(self) -> str:
         """Load pending schedules and reminders from DB (or JSON fallback)."""
@@ -866,6 +1016,16 @@ You decide when to lift the timeout — not the human."""
                 status="historical", source="system"
             )
             logger.info(f"Conversation summary saved to DB memory (ID: {mem_id})")
+            if model:
+                try:
+                    from core.embeddings import chunk_text, embedding_to_blob
+                    chunks = chunk_text(summary)
+                    if len(chunks) > 1:
+                        chunk_vecs = model.encode(chunks)
+                        chunk_blobs = [embedding_to_blob(vec) for vec in chunk_vecs]
+                        db.save_memory_chunks(mem_id, chunk_blobs)
+                except Exception as e:
+                    logger.warning(f"Failed to save chunk embeddings for conversation summary: {e}")
             return True
 
         # JSON fallback
@@ -941,9 +1101,24 @@ You decide when to lift the timeout — not the human."""
             f"{local_now.strftime('%A, %B %d, %Y at %I:%M %p')}\n"
         )
 
+        # Retrieve recent conversation for heartbeat query extraction
+        recent_convo = self._load_conversation()
+
+        # Determine query for heartbeat if heartbeat_query is enabled
+        heartbeat_query = False
+        context_cfg = self.config.get("context", {})
+        if "recall" in context_cfg:
+            heartbeat_query = context_cfg["recall"].get("heartbeat_query", False)
+
+        query = None
+        if heartbeat_query and recent_convo:
+            user_msgs = [msg.get("content", "") for msg in recent_convo if msg.get("role") == "user"]
+            if user_msgs:
+                query = "\n\n".join(user_msgs[-2:])
+
         # Memories
         memories_block = self._truncate_to_budget(
-            self._load_memories(),
+            self._load_memories(query),
             self.budget.get("memories", 3000)
         )
 
@@ -973,7 +1148,7 @@ You decide when to lift the timeout — not the human."""
         # handles overall context size, and clipping messages to 150 chars was
         # destroying meaning for negligible token savings, causing the model to
         # latch onto older memory summaries instead of the actual conversation.
-        recent_convo = self._load_conversation()
+        # (recent_convo already loaded above)
         convo_block = ""
         if recent_convo:
             tail_exchanges = self.config.get("context_budget", {}).get(
@@ -1159,7 +1334,7 @@ You decide when to lift the timeout — not the human."""
             ("time", time_block),
             ("timeout", timeout_block),
             ("injected_skills", injected_block),
-            ("memories", memories_block),
+            ("relevant_memories", memories_block),
             ("journal", journal_block),
             ("schedules", schedules_block),
             ("due_tasks", due_block),
@@ -1243,7 +1418,7 @@ You decide when to lift the timeout — not the human."""
 
         # Memories (compact for conversation)
         memories_block = self._truncate_to_budget(
-            self._load_memories(),
+            self._load_memories(user_message),
             self.budget.get("memories", 2000)
         )
 
@@ -1343,7 +1518,7 @@ You decide when to lift the timeout — not the human."""
             ("timeout", timeout_block),
             ("injected_skills", injected_block),
             ("journal", journal_block),
-            ("memories", memories_block),
+            ("relevant_memories", memories_block),
             ("conversation_tail", trimmed),
             ("current_marker", f"{self.user_name}'s new message:"),
             ("current_message", current_message_measure),
