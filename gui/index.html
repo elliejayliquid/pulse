@@ -64,7 +64,7 @@
         <div class="section-body">
           <div class="field-grid three">
             <label>Name<input id="identityName" type="text"></label>
-            <label>User<input id="identityUser" type="text"></label>
+            <label>Human<input id="identityUser" type="text"></label>
             <label title="A friendly label for this companion's model, shown in the UI only. Cosmetic — the real model is set in the Provider section.">Display Model Name<input id="identityModel" type="text"></label>
           </div>
           <label class="block-field">System Prompt<textarea id="systemPrompt"></textarea></label>
@@ -148,7 +148,7 @@
               <div class="continuity-copy">
                 <h3>Core</h3>
                 <p>Pinned identity anchors</p>
-                <small>Edit self, user, and relationship journal anchors.</small>
+                <small>Edit self, human, and relationship journal anchors.</small>
               </div>
               <div class="continuity-actions">
                 <button class="continuity-btn compact core-anchor-btn" type="button" data-continuity-action="core-self" data-core-anchor="_self" title="View companion core anchor">
@@ -157,7 +157,7 @@
                 </button>
                 <button class="continuity-btn compact core-anchor-btn" type="button" data-continuity-action="core-user" data-core-anchor="_user" title="View human core anchor">
                   <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"></circle><path d="M5 21a7 7 0 0 1 14 0"></path></svg>
-                  <span>User</span>
+                  <span>Human</span>
                 </button>
                 <button class="continuity-btn compact core-anchor-btn" type="button" data-continuity-action="core-relationship" data-core-anchor="_relationship" title="View relationship core anchor">
                   <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="9" r="3"></circle><circle cx="16" cy="9" r="3"></circle><path d="M3 21a5 5 0 0 1 10 0"></path><path d="M11 21a5 5 0 0 1 10 0"></path></svg>
@@ -615,7 +615,7 @@
       <div class="new-persona-body">
         <label>Display Name<input id="newPersonaName" type="text" autocomplete="off" placeholder="Kai"></label>
         <label>Folder Slug<input id="newPersonaSlug" type="text" autocomplete="off" placeholder="kai"></label>
-        <label>User Name<input id="newPersonaUser" type="text" autocomplete="off" placeholder="Lena"></label>
+        <label>Human Name<input id="newPersonaUser" type="text" autocomplete="off" placeholder="Lena"></label>
         <label class="new-persona-import-toggle">
           <input id="newPersonaImportEnabled" type="checkbox">
           Import OpenRouter transcript

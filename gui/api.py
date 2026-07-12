@@ -421,7 +421,7 @@ class PulseAPI:
             raise ValueError("Persona details must be an object.")
 
         display_name = self._clean_short_text(payload.get("display_name") or payload.get("name"), "Display name")
-        user_name = self._clean_short_text(payload.get("user_name") or payload.get("user"), "User name")
+        user_name = self._clean_short_text(payload.get("user_name") or payload.get("user"), "Human name")
         slug = str(payload.get("slug") or "").strip().lower()
         if not slug:
             slug = self._slug_from_display_name(display_name)

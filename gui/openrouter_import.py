@@ -72,7 +72,7 @@ def parse_openrouter_chat(path: Path) -> OpenRouterImport:
             imported.append((role, content, _parse_timestamp(message.get("createdAt"))))
 
     if not imported:
-        raise ValueError("No visible user/assistant messages found in OpenRouter export.")
+        raise ValueError("No visible human/companion messages found in OpenRouter export.")
 
     messages = _assign_timestamps(imported)
     return OpenRouterImport(
