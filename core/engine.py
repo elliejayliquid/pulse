@@ -175,7 +175,7 @@ class PulseEngine:
         self._last_tick_summary = None
         self._last_error = None
         self._tts_ready = True
-        self._manual_quiet = False  # /quiet toggle — cleared on next user message
+        self._manual_quiet = False  # /quiet sticky toggle — only /quiet clears it
 
 
         # Action log — tracks what the companion does each heartbeat
@@ -702,10 +702,9 @@ class PulseEngine:
         # Reset heartbeat timer — conversation is active, re-roll interval
         self.interval = self._roll_heartbeat_interval()
         self._mark_activity()
-        # Clear manual quiet mode — user is talking, companion wakes up
-        if self._manual_quiet:
-            self._manual_quiet = False
-            logger.info("Manual quiet mode cleared — user sent a message.")
+        # Manual quiet mode is sticky: it stays on across messages so the
+        # companion can chat without free-think ticks. Only /quiet again
+        # (or a restart) turns it back off.
 
         # Check timeout state
         timeout_state = self._check_timeout_state()

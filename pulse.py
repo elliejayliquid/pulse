@@ -399,7 +399,9 @@ async def main(config_path: str, persona_name: str | None = None):
         for name, channel in channels.items():
             await channel.shutdown()
         # Free TTS model VRAM before llama-server finishes winding down,
-        # so the LLM has extra headroom for in-flight inference.
+        # so the LLM has extra headroom for in-flight inference. Then give
+        # every other skill with a shutdown() hook (e.g. the MCP bridge's
+        # server subprocesses) a chance to clean up.
         if engine.skill_registry:
             tts_skill = engine.skill_registry.get_skill("tts")
             if tts_skill and hasattr(tts_skill, "shutdown"):
@@ -407,6 +409,13 @@ async def main(config_path: str, persona_name: str | None = None):
                     tts_skill.shutdown()
                 except Exception as e:
                     logger.warning(f"TTS shutdown failed: {e}")
+            for skill_name, skill in engine.skill_registry.skills.items():
+                if skill_name == "tts" or not hasattr(skill, "shutdown"):
+                    continue
+                try:
+                    skill.shutdown()
+                except Exception as e:
+                    logger.warning(f"Skill '{skill_name}' shutdown failed: {e}")
         # Stop the server if we started one (waits for in-flight inference)
         if server:
             await server.stop()
