@@ -705,7 +705,7 @@ def test_gui_api_preview_claude_import_is_dry_run():
         assert empty_conv["message_count"] == 0
         assert empty_conv["skipped_message_count"] == 1
         assert empty_conv["default_choice"] == "exclude"
-        assert "No visible user/assistant text." in empty_conv["warnings"]
+        assert "No visible human/companion text." in empty_conv["warnings"]
         empty_detail = api.get_import_preview_conversation(preview["preview_id"], empty_conv["id"])
         assert empty_detail["ok"] is True
         assert empty_detail["conversation"]["messages"][0]["role"] == "user"
@@ -729,7 +729,109 @@ def test_gui_api_preview_claude_import_is_dry_run():
         assert duplicate_messages[0]["duplicate_cluster_count"] == 3
         assert duplicate_messages[0]["duplicate_representative"] is True
         assert duplicate_messages[1]["duplicate_representative"] is False
-        assert "Duplicate User resend cluster" in duplicate_detail["conversation"]["review_issues"][0]["label"]
+        assert "Duplicate Human resend cluster" in duplicate_detail["conversation"]["review_issues"][0]["label"]
+
+
+def test_gui_api_preview_chatgpt_follows_canonical_thread():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        export_path = root / "conversations.json"
+
+        def node(node_id, message, parent, children):
+            return {"id": node_id, "message": message, "parent": parent, "children": children}
+
+        def chat_message(msg_id, role, parts, content_type="text", recipient="all", create_time=None):
+            return {
+                "id": msg_id,
+                "author": {"role": role},
+                "create_time": create_time,
+                "content": {"content_type": content_type, "parts": parts},
+                "recipient": recipient,
+            }
+
+        image_part = {"content_type": "image_asset_pointer", "asset_pointer": "file-service://file-abc"}
+        export_path.write_text(json.dumps([
+            {
+                "id": "conv-branchy",
+                "title": "Branchy Chat",
+                "create_time": 1767225600,
+                "update_time": 1767229200,
+                "current_node": "a4",
+                "mapping": {
+                    "root": node("root", None, None, ["u1"]),
+                    "u1": node("u1", chat_message("u1", "user", ["Tell me a story."], create_time=1767225600), "root", ["a1", "a2"]),
+                    # Abandoned regeneration branch — must NOT be imported.
+                    "a1": node("a1", chat_message("a1", "assistant", ["Old abandoned draft."]), "u1", []),
+                    "a2": node("a2", chat_message("a2", "assistant", ["Final story."], create_time=1767225660), "u1", ["u2"]),
+                    "u2": node("u2", chat_message("u2", "user", ['Here is JSON with "prompt": "value" inside.'], create_time=1767225720), "a2", ["dalle"]),
+                    # Tool-directed image request — internal traffic, skipped.
+                    "dalle": node("dalle", chat_message("dalle", "assistant", ['{"prompt": "a cat"}'], content_type="code", recipient="dalle.text2im"), "u2", ["tool1"]),
+                    # Tool response with image pointer — internal, skipped.
+                    "tool1": node("tool1", chat_message("tool1", "tool", [image_part], content_type="multimodal_text"), "dalle", ["a3"]),
+                    "a3": node("a3", chat_message("a3", "assistant", ["Here is your image."], create_time=1767225780), "tool1", ["u4"]),
+                    # Human image upload with no text — attachment placeholder.
+                    "u4": node("u4", chat_message("u4", "user", [image_part], content_type="multimodal_text", create_time=1767225840), "a3", ["a4"]),
+                    "a4": node("a4", chat_message("a4", "assistant", ["Nice photo."], create_time=1767225900), "u4", []),
+                },
+            },
+        ]), encoding="utf-8")
+
+        api = PulseAPI(root)
+        preview = api.preview_conversation_import("conversations.json")
+        assert preview["ok"] is True
+        assert preview["batch"]["source"] == "chatgpt"
+        assert preview["batch"]["skipped_counts"]["edited_branch_messages"] == 1
+
+        conv = preview["batch"]["conversations"][0]
+        assert conv["source_id"] == "conv-branchy"
+        assert any("edited/regenerated branches" in warning for warning in conv["warnings"])
+        assert conv["review_issue_count"] == 0
+
+        detail = api.get_import_preview_conversation(preview["preview_id"], conv["id"])
+        assert detail["ok"] is True
+        contents = [(msg["role"], msg["content"]) for msg in detail["conversation"]["messages"]]
+        assert contents == [
+            ("user", "Tell me a story."),
+            ("assistant", "Final story."),
+            ("user", 'Here is JSON with "prompt": "value" inside.'),
+            ("assistant", "Here is your image."),
+            ("user", "[Human sent an image. Image content was not included in this export.]"),
+            ("assistant", "Nice photo."),
+        ]
+        assert "Old abandoned draft." not in json.dumps(detail)
+        assert detail["conversation"]["messages"][4]["attachment_placeholder"] is True
+
+
+def test_gui_api_preview_double_text_is_one_exchange():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        export_path = root / "export.json"
+        export_path.write_text(json.dumps([
+            {
+                "id": "double-text",
+                "title": "Double Text",
+                "messages": [
+                    {"role": "user", "content": "One.", "created_at": "2026-07-01T00:00:00Z"},
+                    {"role": "user", "content": "Two, actually.", "created_at": "2026-07-01T00:00:05Z"},
+                    {"role": "assistant", "content": "Both heard.", "created_at": "2026-07-01T00:00:10Z"},
+                    {"role": "user", "content": "Dangling last word.", "created_at": "2026-07-01T00:01:00Z"},
+                ],
+            },
+        ]), encoding="utf-8")
+
+        api = PulseAPI(root)
+        preview = api.preview_conversation_import("export.json")
+        assert preview["ok"] is True
+        conv = preview["batch"]["conversations"][0]
+        assert conv["message_count"] == 4
+        # The double-text is one healthy exchange; only the dangling tail
+        # without a companion reply is review-marked.
+        assert conv["review_issue_count"] == 1
+        detail = api.get_import_preview_conversation(preview["preview_id"], conv["id"])
+        issues = detail["conversation"]["review_issues"]
+        assert len(issues) == 1
+        assert issues[0]["message_index"] == 3
+        assert "No companion reply in this exchange." in issues[0]["warnings"]
 
 
 def test_gui_api_standard_provider_env_fallback():
@@ -1785,6 +1887,8 @@ if __name__ == "__main__":
     test_gui_api_create_persona_from_template_initializes_db()
     test_gui_api_import_openrouter_chat_visible_messages_only()
     test_gui_api_preview_claude_import_is_dry_run()
+    test_gui_api_preview_chatgpt_follows_canonical_thread()
+    test_gui_api_preview_double_text_is_one_exchange()
     test_gui_api_standard_provider_env_fallback()
     test_gui_api_get_lantern_read_only()
     test_gui_api_lantern_update_and_dim_write_safely()

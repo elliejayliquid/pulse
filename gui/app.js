@@ -4038,15 +4038,12 @@ function buildImportExchanges(messages, issues = []) {
       current = { id: `ex${messageIndex}`, startIndex: messageIndex, endIndex: messageIndex, messages: [message], warnings: [], reviewIssues: [] };
       return;
     }
-    const roles = current.messages.map((item) => item.role === "assistant" ? "assistant" : "user");
-    const hasUser = roles.includes("user");
-    const hasAssistant = roles.includes("assistant");
-    if (role === "user" && (hasUser || hasAssistant)) {
-      finish();
-      current = { id: `ex${messageIndex}`, startIndex: messageIndex, endIndex: messageIndex, messages: [message], warnings: [], reviewIssues: [] };
-      return;
-    }
-    if (role === "assistant" && hasAssistant && !hasUser) {
+    // One exchange = a run of human messages followed by a run of companion
+    // replies. Double-texting stays inside the exchange; a new human message
+    // after a companion reply starts the next one. Mirrors
+    // build_review_exchanges in gui/import_preview.py.
+    const hasAssistant = current.messages.some((item) => item.role === "assistant");
+    if (role === "user" && hasAssistant) {
       finish();
       current = { id: `ex${messageIndex}`, startIndex: messageIndex, endIndex: messageIndex, messages: [message], warnings: [], reviewIssues: [] };
       return;
@@ -4059,23 +4056,21 @@ function buildImportExchanges(messages, issues = []) {
   return exchanges;
 }
 
+function importRoleLabel(role) {
+  return role === "assistant" ? "Companion" : "Human";
+}
+
 function exchangeWarnings(messages) {
   const warnings = [];
   const duplicate = messages.find((message) => Number(message.duplicate_cluster_count || 0) > 1);
   if (duplicate) {
-    warnings.push(`Duplicate ${humanizeMemoryBadge(duplicate.role)} resend cluster (${duplicate.duplicate_cluster_count} copies).`);
+    warnings.push(`Duplicate ${importRoleLabel(duplicate.role)} resend cluster (${duplicate.duplicate_cluster_count} copies).`);
     return warnings;
   }
   const roles = messages.map((message) => message.role === "assistant" ? "assistant" : "user");
   if (messages.some((message) => message.skipped)) warnings.push("Contains skipped empty message.");
-  if (!roles.includes("user")) warnings.push("No user message in this exchange.");
-  if (!roles.includes("assistant")) warnings.push("No assistant reply in this exchange.");
-  for (let i = 1; i < roles.length; i += 1) {
-    if (roles[i] === roles[i - 1]) {
-      warnings.push(`Consecutive ${humanizeMemoryBadge(roles[i])} messages.`);
-      break;
-    }
-  }
+  if (!roles.includes("user")) warnings.push("No human message in this exchange.");
+  if (!roles.includes("assistant")) warnings.push("No companion reply in this exchange.");
   return warnings;
 }
 
@@ -4111,7 +4106,7 @@ function renderImportMessage(message) {
   return `
     <article class="import-message ${role}${skipped ? " skipped" : ""}${attachment ? " attachment" : ""}${duplicateCount > 1 ? " duplicate" : ""}">
       <div>
-        <strong>${escapeHtml(humanizeMemoryBadge(role))}</strong>
+        <strong>${escapeHtml(importRoleLabel(role))}</strong>
         <span>${escapeHtml(formatImportDate(message.created_at))}</span>
         ${skippedPill}
         ${attachmentPill}

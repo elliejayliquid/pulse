@@ -70,7 +70,7 @@ class PreviewConversation:
         if skipped_count:
             warnings.append(f"{skipped_count} empty/skipped message{'s' if skipped_count != 1 else ''}.")
         if not visible_messages:
-            warnings.append("No visible user/assistant text.")
+            warnings.append("No visible human/companion text.")
         return {
             "id": self.id,
             "source_id": self.source_id,
@@ -143,6 +143,7 @@ class PreviewBatch:
         )
         conversations = sort_conversations_recent_first(self.conversations)
         models = sorted({conv.model for conv in conversations if conv.model})
+        summaries = [conv.to_summary_dict() for conv in conversations]
         return {
             "source": self.source,
             "source_version": self.source_version,
@@ -151,13 +152,11 @@ class PreviewBatch:
             "conversation_count": len(self.conversations),
             "message_count": message_count,
             "skipped_message_count": skipped_message_count,
-            "estimated_tokens": sum(
-                conv.to_summary_dict()["estimated_tokens"] for conv in conversations
-            ),
+            "estimated_tokens": sum(summary["estimated_tokens"] for summary in summaries),
             "models": models,
             "warnings": self.warnings,
             "skipped_counts": self.skipped_counts,
-            "conversations": [conv.to_summary_dict() for conv in conversations],
+            "conversations": summaries,
         }
 
 
@@ -280,19 +279,47 @@ def _preview_chatgpt(file_name: str, file_size: int, payload: list[Any]) -> Prev
     conversations: list[PreviewConversation] = []
     skipped_internal = 0
     skipped_empty = 0
+    skipped_branches = 0
     for index, conv in enumerate(payload):
         if not isinstance(conv, dict):
             continue
+        walked, branch_count = walk_chatgpt_messages(
+            conv.get("mapping") or {},
+            str(conv.get("current_node") or ""),
+        )
+        skipped_branches += branch_count
         messages = []
-        for msg_index, msg in enumerate(walk_chatgpt_messages(conv.get("mapping") or {})):
+        for msg_index, msg in enumerate(walked):
             role = normalize_role(msg.get("role"))
             text = msg.get("content", "").strip()
+            recipient = msg.get("recipient", "")
             if not role:
+                skipped_internal += 1
+                continue
+            if recipient and recipient != "all":
+                # Tool-directed traffic (dalle.text2im, python, browser, ...)
                 skipped_internal += 1
                 continue
             if not text:
                 if is_chatgpt_internal_content(msg.get("content_type")):
                     skipped_internal += 1
+                    continue
+                attachment_kinds = msg.get("attachment_kinds") or []
+                if role == "user" and attachment_kinds:
+                    placeholder = (
+                        "[Human sent an image. Image content was not included in this export.]"
+                        if any("image" in kind.lower() for kind in attachment_kinds)
+                        else "[Human sent an attachment. Attachment content was not included in this export.]"
+                    )
+                    messages.append(PreviewMessage(
+                        id=str(msg.get("id") or f"m{msg_index}"),
+                        role=role,
+                        source_role=str(msg.get("role") or ""),
+                        content=placeholder,
+                        created_at=normalize_timestamp(msg.get("created_at")),
+                        model=extract_model_hint(msg),
+                        attachment_placeholder=True,
+                    ))
                     continue
                 skipped_empty += 1
                 messages.append(make_skipped_message(
@@ -314,15 +341,22 @@ def _preview_chatgpt(file_name: str, file_size: int, payload: list[Any]) -> Prev
             ))
         if not messages:
             skipped_empty += 1
+        warnings = []
+        if branch_count:
+            warnings.append(
+                f"{branch_count} message{'s' if branch_count != 1 else ''} from edited/regenerated branches left out."
+            )
+        source_id = conv.get("id") or conv.get("conversation_id") or index
         created_at = normalize_timestamp(conv.get("create_time"), from_epoch=True)
         conversations.append(PreviewConversation(
-            id=f"chatgpt:{conv.get('id') or index}",
-            source_id=str(conv.get("id") or index),
+            id=f"chatgpt:{source_id}",
+            source_id=str(source_id),
             title=clean_title(conv.get("title"), fallback=f"Untitled ChatGPT Conversation {index + 1}"),
             created_at=created_at,
             updated_at=normalize_timestamp(conv.get("update_time"), from_epoch=True),
             model=extract_model_hint(conv),
             messages=messages,
+            warnings=warnings,
         ))
     return PreviewBatch(
         source="chatgpt",
@@ -333,6 +367,7 @@ def _preview_chatgpt(file_name: str, file_size: int, payload: list[Any]) -> Prev
         skipped_counts={
             "internal_or_unknown_messages": skipped_internal,
             "empty_messages_or_conversations": skipped_empty,
+            "edited_branch_messages": skipped_branches,
         },
     )
 
@@ -393,7 +428,7 @@ def _preview_openrouter(file_name: str, file_size: int, payload: dict[str, Any])
         ))
 
     if not messages:
-        raise ValueError("No visible user/assistant messages found in OpenRouter export.")
+        raise ValueError("No visible human/companion messages found in OpenRouter export.")
 
     title = clean_title(payload.get("title"), fallback="OpenRouter Chat")
     conv = PreviewConversation(
@@ -477,7 +512,7 @@ def _preview_markdown(path: Path) -> PreviewBatch:
             model=str(metadata.get("model") or metadata.get("model_slug") or "").strip(),
         ))
     if not messages:
-        raise ValueError("No visible user/assistant messages found in Markdown export.")
+        raise ValueError("No visible human/companion messages found in Markdown export.")
     title = clean_title(metadata.get("title"), fallback=path.stem)
     conv = PreviewConversation(
         id=f"markdown:{slug_id(path.stem)}",
@@ -579,8 +614,7 @@ def conversation_review_issues(messages: list[PreviewMessage]) -> list[dict[str,
     }
     for cluster in duplicate_clusters:
         count = cluster["count"]
-        role = cluster["role"]
-        role_label = role[:1].upper() + role[1:]
+        role_label = "Companion" if cluster["role"] == "assistant" else "Human"
         issues.append({
             "id": f"duplicate-{cluster['start_index']}",
             "exchange_index": len(issues) + 1,
@@ -685,18 +719,11 @@ def build_review_exchanges(messages: list[PreviewMessage]) -> list[dict[str, Any
             }
             continue
 
-        roles = ["assistant" if item.role == "assistant" else "user" for item in current["messages"]]
-        has_user = "user" in roles
-        has_assistant = "assistant" in roles
-        if role == "user" and (has_user or has_assistant):
-            finish()
-            current = {
-                "start_index": index,
-                "end_index": index,
-                "messages": [message],
-            }
-            continue
-        if role == "assistant" and has_assistant and not has_user:
+        # One exchange = a run of human messages followed by a run of
+        # companion replies. Double-texting stays inside the exchange; a new
+        # human message after a companion reply starts the next one.
+        has_assistant = any(item.role == "assistant" for item in current["messages"])
+        if role == "user" and has_assistant:
             finish()
             current = {
                 "start_index": index,
@@ -717,13 +744,9 @@ def exchange_review_warnings(messages: list[PreviewMessage]) -> list[str]:
     if any(message.skipped for message in messages):
         warnings.append("Contains skipped empty message.")
     if "user" not in roles:
-        warnings.append("No user message in this exchange.")
+        warnings.append("No human message in this exchange.")
     if "assistant" not in roles:
-        warnings.append("No assistant reply in this exchange.")
-    for index in range(1, len(roles)):
-        if roles[index] == roles[index - 1]:
-            warnings.append(f"Consecutive {roles[index]} messages.")
-            break
+        warnings.append("No companion reply in this exchange.")
     return warnings
 
 
@@ -763,23 +786,79 @@ def claude_attachment_placeholder(msg: dict[str, Any]) -> str:
     ]
     names = [name for name in names if name]
     if names:
-        return f"[User sent an attachment: {', '.join(names[:3])}. File content was not included in this export.]"
+        return f"[Human sent an attachment: {', '.join(names[:3])}. File content was not included in this export.]"
     if any("image" in kind.lower() for kind in non_text_blocks):
-        return "[User sent an image. Image content was not included in this export.]"
-    return "[User sent an attachment. Attachment content was not included in this export.]"
+        return "[Human sent an image. Image content was not included in this export.]"
+    return "[Human sent an attachment. Attachment content was not included in this export.]"
 
 
-def walk_chatgpt_messages(mapping: dict[str, Any]) -> list[dict[str, Any]]:
+def walk_chatgpt_messages(mapping: dict[str, Any], current_node: str = "") -> tuple[list[dict[str, Any]], int]:
+    """Return (messages, skipped_branch_count) for the canonical thread.
+
+    ChatGPT stores every edit/regeneration as a sibling branch in the mapping
+    tree; the live thread is the parent chain above ``current_node``. Walking
+    anything else imports ghost messages from abandoned branches.
+    """
     if not isinstance(mapping, dict):
+        return [], 0
+    node_ids = chatgpt_canonical_node_ids(mapping, current_node)
+    if not node_ids:
+        node_ids = chatgpt_bfs_node_ids(mapping)
+    messages = []
+    for node_id in node_ids:
+        node = mapping.get(node_id)
+        if not isinstance(node, dict):
+            continue
+        msg = node.get("message")
+        if not isinstance(msg, dict):
+            continue
+        author = msg.get("author") or {}
+        role = author.get("role")
+        raw_content = msg.get("content") or {}
+        content = chatgpt_content_text(raw_content)
+        created_at = normalize_timestamp(msg.get("create_time"), from_epoch=True)
+        messages.append({
+            "id": msg.get("id") or node_id,
+            "role": role,
+            "content": content,
+            "content_type": raw_content.get("content_type") if isinstance(raw_content, dict) else "",
+            "recipient": str(msg.get("recipient") or ""),
+            "attachment_kinds": chatgpt_attachment_kinds(raw_content),
+            "created_at": created_at,
+        })
+    total_message_nodes = sum(
+        1 for node in mapping.values()
+        if isinstance(node, dict) and isinstance(node.get("message"), dict)
+    )
+    skipped_branches = max(0, total_message_nodes - len(messages))
+    return messages, skipped_branches
+
+
+def chatgpt_canonical_node_ids(mapping: dict[str, Any], current_node: str) -> list[str]:
+    node_id = str(current_node or "")
+    if node_id not in mapping:
         return []
+    path: list[str] = []
+    seen: set[str] = set()
+    while node_id and node_id in mapping and node_id not in seen:
+        seen.add(node_id)
+        path.append(node_id)
+        node = mapping.get(node_id)
+        parent = node.get("parent") if isinstance(node, dict) else None
+        node_id = parent if isinstance(parent, str) else ""
+    path.reverse()
+    return path
+
+
+def chatgpt_bfs_node_ids(mapping: dict[str, Any]) -> list[str]:
     all_children: set[str] = set()
     for node in mapping.values():
         if isinstance(node, dict):
             all_children.update(child for child in node.get("children", []) if isinstance(child, str))
     roots = [key for key in mapping if key not in all_children] or list(mapping.keys())
     queue = list(roots)
-    seen = set()
-    messages = []
+    seen: set[str] = set()
+    ordered = []
     while queue:
         node_id = queue.pop(0)
         if node_id in seen:
@@ -788,54 +867,55 @@ def walk_chatgpt_messages(mapping: dict[str, Any]) -> list[dict[str, Any]]:
         node = mapping.get(node_id)
         if not isinstance(node, dict):
             continue
-        msg = node.get("message")
-        if isinstance(msg, dict):
-            author = msg.get("author") or {}
-            role = author.get("role")
-            raw_content = msg.get("content") or {}
-            content = chatgpt_content_text(raw_content)
-            created_at = normalize_timestamp(msg.get("create_time"), from_epoch=True)
-            messages.append({
-                "id": msg.get("id") or node_id,
-                "role": role,
-                "content": content,
-                "content_type": raw_content.get("content_type") if isinstance(raw_content, dict) else "",
-                "created_at": created_at,
-            })
+        ordered.append(node_id)
         queue.extend(child for child in node.get("children", []) if isinstance(child, str))
-    return messages
+    return ordered
 
 
 def is_chatgpt_internal_content(content_type: Any) -> bool:
-    return str(content_type or "") in {"system_error", "user_editable_context", "thoughts"}
+    # code/execution_output is code-interpreter and image-generation tool
+    # traffic, not dialogue. Never surface it as fake transcript text.
+    return str(content_type or "") in {
+        "system_error",
+        "user_editable_context",
+        "thoughts",
+        "code",
+        "execution_output",
+    }
 
 
 def chatgpt_content_text(content: Any) -> str:
     if not isinstance(content, dict):
         return ""
-    content_type = content.get("content_type")
-    if content_type in {"system_error", "user_editable_context", "thoughts"}:
+    if is_chatgpt_internal_content(content.get("content_type")):
         return ""
-    if content_type in {"code", "execution_output"}:
-        return "[IMAGE_PROMPT]"
-    if content_type == "multimodal_text":
-        return sanitize_chatgpt_text("".join(str(part) for part in content.get("parts") or []))
-    if content_type == "text":
-        return sanitize_chatgpt_text("".join(str(part) for part in content.get("parts") or []))
-    if "parts" in content:
-        return sanitize_chatgpt_text("".join(str(part) for part in content.get("parts") or []))
-    return ""
+    parts = []
+    for part in content.get("parts") or []:
+        if isinstance(part, str):
+            if part.strip():
+                parts.append(part.strip())
+        elif isinstance(part, dict):
+            # audio_transcription and similar parts carry their text inline;
+            # image_asset_pointer and other binary parts do not.
+            text = part.get("text")
+            if isinstance(text, str) and text.strip():
+                parts.append(text.strip())
+    return "\n\n".join(parts)
 
 
-def sanitize_chatgpt_text(text: str) -> str:
-    lowered = text.lower()
-    if "do not say or show anything" in lowered or "please end this turn now" in lowered:
-        return ""
-    if "content_type" in text and "image_asset_pointer" in text:
-        return "[IMAGE]"
-    if '"prompt":' in text or "'prompt':" in text:
-        return "[IMAGE_PROMPT]"
-    return text.strip()
+def chatgpt_attachment_kinds(content: Any) -> list[str]:
+    """Content-part types that carry no inline text (images, files, audio)."""
+    if not isinstance(content, dict):
+        return []
+    kinds = []
+    for part in content.get("parts") or []:
+        if not isinstance(part, dict):
+            continue
+        text = part.get("text")
+        if isinstance(text, str) and text.strip():
+            continue
+        kinds.append(str(part.get("content_type") or "attachment"))
+    return kinds
 
 
 def openrouter_item_ids(message: dict[str, Any]) -> list[str]:
@@ -920,7 +1000,7 @@ def normalize_timestamp(value: Any, from_epoch: bool = False) -> str:
             dt = dt.replace(tzinfo=timezone.utc)
         return dt.astimezone(timezone.utc).isoformat()
     except (TypeError, ValueError, OSError):
-        return str(value)
+        return ""
 
 
 def sort_conversations_recent_first(conversations: list[PreviewConversation]) -> list[PreviewConversation]:

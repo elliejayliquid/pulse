@@ -49,10 +49,20 @@ Implemented:
 - Consecutive duplicate same-role resend clusters are detected and visually collapsed in preview.
 - A placeholder background-enrichment progress row exists.
 
+Added 2026-07-12 (Debugger review fixes):
+
+- ChatGPT parsing follows the export's `current_node` canonical thread. Edited/regenerated branch messages are counted (`edited_branch_messages`), surfaced as a conversation warning, and never imported as dialogue. BFS over the whole mapping remains only as a fallback for exports missing `current_node`.
+- ChatGPT tool traffic is detected structurally instead of by text substrings: recipient-directed messages (`dalle.text2im`, `python`, `browser`), `code`/`execution_output` content, and tool-role messages are skipped as internal. The old `"prompt":`/`image_asset_pointer` substring heuristics are gone — real messages containing those strings import verbatim.
+- Image-only ChatGPT human messages (image_asset_pointer parts, no text) become neutral attachment placeholders, matching the Claude behavior.
+- Exchange grouping matches this design: a run of human messages plus the following companion replies is one exchange. Double-texting is no longer review-flagged; only skipped empties, human-less, and companion-less exchanges are.
+- Reader-facing preview language says Human/Companion everywhere (labels, warnings, placeholders). Wire-level role keys stay `user`/`assistant` for export, DB, and LLM API compatibility.
+- Unparseable timestamps normalize to empty string instead of leaking raw source text into `created_at`.
+
 Known rough edges:
 
 - Duplicate resend collapse is preview-only; future commit sanitation should decide whether to store one copy, all copies, or an explicit retry-cluster record.
-- Attachment placeholder detection is implemented for Claude file metadata, but other platform export shapes still need real samples and source-specific handling.
+- Attachment placeholder detection is implemented for Claude file metadata and ChatGPT image parts; other platform export shapes still need real samples and source-specific handling.
+- Messages with an unrecognized role but non-empty text are dropped without a dedicated skip counter (Claude and OpenRouter paths). Surfacing them needs a small "assign as human/companion" UI decision first.
 - Review issues are shown and navigable, but future import commit should define which issue types block living-context landing.
 - Completely empty conversations should default to exclude and should be sanitized out even if the user leaves them marked keep.
 - `_import_previews` holds fully parsed batches in memory keyed by path, unbounded. Fine for the preview slice, but a large ChatGPT export can be hundreds of MB — Phase 2 staging must evict/replace previews rather than accumulate them.
