@@ -393,15 +393,34 @@ class LLMClient:
 
     @staticmethod
     def _merge_leading_system_messages(messages: list[dict]) -> list[dict]:
-        """Merge consecutive system messages at the start into one.
+        """Normalize ContextManager messages for OpenAI-compatible endpoints.
 
-        OpenAI/OpenRouter automatic prompt caching is prefix-based — the
-        cache key is the token sequence from the start of the request.
-        Multiple system messages can break this because some providers
-        restart the prefix counter at each system boundary. Merging them
-        into a single block gives the largest possible stable prefix for
-        cache hits.
+        - Strips "cache_hint" markers (Anthropic-only prompt-cache breakpoints;
+          some providers reject unknown message fields).
+        - Merges consecutive user messages into one (the heartbeat prompt splits
+          stable/volatile context into two user turns for Anthropic caching;
+          chat templates expect alternating roles).
+        - Merges consecutive system messages at the start into one. OpenAI/
+          OpenRouter automatic prompt caching is prefix-based — the cache key is
+          the token sequence from the start of the request. Multiple system
+          messages can break this because some providers restart the prefix
+          counter at each system boundary. Merging them into a single block
+          gives the largest possible stable prefix for cache hits.
         """
+        normalized = []
+        for msg in messages:
+            if "cache_hint" in msg:
+                msg = {k: v for k, v in msg.items() if k != "cache_hint"}
+            prev = normalized[-1] if normalized else None
+            if (prev is not None
+                    and msg.get("role") == "user" and prev.get("role") == "user"
+                    and isinstance(msg.get("content"), str)
+                    and isinstance(prev.get("content"), str)):
+                normalized[-1] = {**prev, "content": prev["content"] + "\n\n" + msg["content"]}
+            else:
+                normalized.append(msg)
+        messages = normalized
+
         if not messages or messages[0].get("role") != "system":
             return messages
         system_parts = []

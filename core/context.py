@@ -747,6 +747,13 @@ You decide when to lift the timeout — not the human."""
             f"Passive recall: chunks={len(chunks)}, pool={len(pool_memories)}, "
             f"hits_above_thresh={len(scored_pool)}, top_final={top_score:.4f}, top_base={top_base:.4f}"
         )
+        # One line per surfaced hit — this is the record for threshold tuning
+        # (scripts/check_recall.py aggregates these; nobody has to watch live).
+        for score, base, mem in scored_pool[:top_k]:
+            preview = str(mem.get("text", "")).replace("\n", " ")[:80]
+            logger.info(
+                f"Passive recall hit: score={score:.3f} id={mem.get('id', '?')} \"{preview}\""
+            )
 
         # Format output
         lines = ["## Recent Memories"]
@@ -1210,22 +1217,29 @@ You decide when to lift the timeout — not the human."""
                 "This is your time. Reflect, journal, do what you need. You don't owe anyone an explanation for needing space."
             )
 
-        # Assemble the user message with all context.
-        # Order matters for attention: older/background context first (memories,
-        # schedules), recent conversation LAST — right before "Your Turn".
-        # This mirrors natural reading order (chronological) and ensures the
-        # model's attention weighs the most recent exchanges most heavily.
+        # Assemble the context in two halves, split by VOLATILITY (prompt
+        # caching is a prefix match — per-tick churn placed early invalidates
+        # everything after it). Stable-ish context first (memories, journal,
+        # schedules — change a few times a day), then per-tick context (time,
+        # action log, recent conversation) closest to "Your Turn". That also
+        # matches the attention ordering we want: background first, the most
+        # recent/current material last.
+        stable_parts = []
+        if memories_block:
+            stable_parts.append(memories_block)
+        if journal_block:
+            stable_parts.append(journal_block)
+        if schedules_block:
+            stable_parts.append(schedules_block)
+
+        # Injected skill context is volatile by nature — lantern ages by the
+        # minute, garden ticks, LoR unread counts move. Keep it out of the
+        # cached prefix.
         context_parts = [time_block]
         if timeout_block:
             context_parts.append(timeout_block)
         if injected_block:
             context_parts.append(injected_block)
-        if memories_block:
-            context_parts.append(memories_block)
-        if journal_block:
-            context_parts.append(journal_block)
-        if schedules_block:
-            context_parts.append(schedules_block)
         if due_block:
             context_parts.append(due_block)
 
@@ -1325,18 +1339,27 @@ You decide when to lift the timeout — not the human."""
         )
         context_parts.append(your_turn)
 
-        messages = [
-            {"role": "system", "content": system},
-            {"role": "user", "content": "\n\n".join(context_parts)}
-        ]
+        messages = [{"role": "system", "content": system}]
+        if stable_parts:
+            # Separate user message with a cache breakpoint: heartbeats fire
+            # every 30-60 min, so with a 1h cache TTL the next tick reads
+            # system + stable context at ~0.1x instead of rewriting it at 2x.
+            # The Anthropic client honors cache_hint; other clients merge the
+            # consecutive user messages back into one.
+            messages.append({
+                "role": "user",
+                "content": "\n\n".join(stable_parts),
+                "cache_hint": True,
+            })
+        messages.append({"role": "user", "content": "\n\n".join(context_parts)})
         self._log_context_breakdown("heartbeat", messages, [
             ("stable_system", system),
-            ("time", time_block),
-            ("timeout", timeout_block),
-            ("injected_skills", injected_block),
             ("relevant_memories", memories_block),
             ("journal", journal_block),
             ("schedules", schedules_block),
+            ("time", time_block),
+            ("timeout", timeout_block),
+            ("injected_skills", injected_block),
             ("due_tasks", due_block),
             ("action_log", action_log_block),
             ("recent_conversation", convo_block),
@@ -1455,24 +1478,35 @@ You decide when to lift the timeout — not the human."""
                 "- ESCALATE to hard if it gets worse: [TIMEOUT:hard:1h:reason] / [TIMEOUT:hard:4h:reason] / [TIMEOUT:hard:12h:reason]"
             )
 
-        # Split into stable system (persona+instructions, cacheable) and dynamic context
-        # (time, memories, journal — changes every call). Two system messages let the
-        # Anthropic client cache the stable prefix without the dynamic content busting it.
-        context_parts = [time_block]
-        if timeout_block:
-            context_parts.append(timeout_block)
-        if injected_block:
-            context_parts.append(injected_block)
+        # Split context by VOLATILITY, not just by kind. Prompt caching is a
+        # strict prefix match: anything that changes per call invalidates every
+        # token after it. So stable context (journal, injected skill state —
+        # changes a few times a day at most) stays in the system prefix where it
+        # caches with the persona, while volatile context (timestamp, passive
+        # recall hits — changes EVERY message) moves below the conversation
+        # history, next to the current message. Attention-wise that placement is
+        # also better: "possibly relevant right now" hints sit closest to the
+        # message they relate to.
+        stable_parts = []
         if journal_block:
-            context_parts.append(journal_block)
-        if memories_block:
-            context_parts.append(memories_block)
-        dynamic_context = "--- Context ---\n" + "\n\n".join(context_parts)
+            stable_parts.append(journal_block)
 
-        messages = [
-            {"role": "system", "content": conv_system},
-            {"role": "system", "content": dynamic_context},
-        ]
+        # Injected skill context is volatile by nature — it's state-of-the-
+        # moment (lantern renders "(N mins ago)" which changes every minute,
+        # garden ticks, LoR unread counts move). Keep it out of the cached
+        # prefix.
+        volatile_parts = [time_block]
+        if timeout_block:
+            volatile_parts.append(timeout_block)
+        if injected_block:
+            volatile_parts.append(injected_block)
+        if memories_block:
+            volatile_parts.append(memories_block)
+
+        messages = [{"role": "system", "content": conv_system}]
+        if stable_parts:
+            messages.append({"role": "system",
+                             "content": "--- Context ---\n" + "\n\n".join(stable_parts)})
 
         # Add conversation history (filter out system messages — many models
         # only support one system message and choke on extras in the middle)
@@ -1489,10 +1523,19 @@ You decide when to lift the timeout — not the human."""
                 trimmed.insert(0, msg)
                 total_chars += msg_chars
             messages.extend(trimmed)
+            # Cache breakpoint at the end of history: the next message reuses
+            # the whole prefix (system + stable context + history) at cache-read
+            # price instead of rewriting it. Copy — don't mutate the caller's
+            # history dicts.
+            messages[-1] = {**trimmed[-1], "cache_hint": True}
 
-        # Add a separator so the model clearly sees where history ends
-        # and the current message begins — prevents attention drift to older turns
-        messages.append({"role": "system", "content": f"{self.user_name}'s new message:"})
+        # Volatile context + separator so the model clearly sees where history
+        # ends and the current message begins — prevents attention drift.
+        # This block sits AFTER the cache breakpoint, so its churn is free.
+        messages.append({"role": "system", "content": (
+            "--- Current Context ---\n" + "\n\n".join(volatile_parts)
+            + f"\n\n{self.user_name}'s new message:"
+        )})
 
         # Add the current message (with optional image for vision models)
         if image_url:
@@ -1514,12 +1557,12 @@ You decide when to lift the timeout — not the human."""
         self._log_context_breakdown("conversation", messages, [
             ("stable_system", conv_system),
             ("tool_menu", skill_menu),
+            ("journal", journal_block),
+            ("conversation_tail", trimmed),
             ("time", time_block),
             ("timeout", timeout_block),
             ("injected_skills", injected_block),
-            ("journal", journal_block),
             ("relevant_memories", memories_block),
-            ("conversation_tail", trimmed),
             ("current_marker", f"{self.user_name}'s new message:"),
             ("current_message", current_message_measure),
         ])

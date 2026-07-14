@@ -46,7 +46,8 @@ def _openai_tools_to_anthropic(tools: list[dict]) -> list[dict]:
     return converted
 
 
-def _convert_messages(messages: list[dict]) -> tuple[list[str], list[dict]]:
+def _convert_messages(messages: list[dict],
+                      cache_control: dict = None) -> tuple[list[str], list[dict]]:
     """Convert OpenAI-format messages to Anthropic format.
 
     Key differences:
@@ -54,16 +55,27 @@ def _convert_messages(messages: list[dict]) -> tuple[list[str], list[dict]]:
     - Anthropic doesn't support "system" role in messages array
     - Tool results use "tool_result" content blocks
 
+    Messages carrying "cache_hint": True (set by ContextManager at
+    stable/volatile boundaries) become content blocks with cache_control
+    attached, creating a prompt-cache breakpoint at that position. Requires
+    cache_control to be passed; ignored otherwise.
+
     Returns (system_parts, anthropic_messages).
     system_parts is an ordered list so the caller can apply cache_control
-    selectively (e.g. only on the first stable block).
+    selectively (e.g. only on the stable blocks).
     """
     system_parts = []
     anthropic_msgs = []
 
+    def _hinted_blocks(text: str) -> list[dict]:
+        """Wrap string content in a text block carrying the cache breakpoint."""
+        return [{"type": "text", "text": text, "cache_control": cache_control}]
+
     for msg in messages:
         role = msg.get("role", "")
         content = msg.get("content", "")
+        # Cache breakpoint requested and usable (needs non-empty content)
+        hinted = bool(msg.get("cache_hint") and cache_control and content)
 
         if role == "system":
             if anthropic_msgs:
@@ -100,7 +112,10 @@ def _convert_messages(messages: list[dict]) -> tuple[list[str], list[dict]]:
                     })
                 anthropic_msgs.append({"role": "assistant", "content": blocks})
             else:
-                anthropic_msgs.append({"role": "assistant", "content": content or ""})
+                anthropic_msgs.append({
+                    "role": "assistant",
+                    "content": _hinted_blocks(content) if hinted else (content or ""),
+                })
 
         elif role == "tool":
             # OpenAI tool results → Anthropic tool_result content block
@@ -155,9 +170,14 @@ def _convert_messages(messages: list[dict]) -> tuple[list[str], list[dict]]:
                                     "url": url,
                                 },
                             })
+                if hinted and blocks:
+                    blocks[-1] = {**blocks[-1], "cache_control": cache_control}
                 anthropic_msgs.append({"role": "user", "content": blocks})
             else:
-                anthropic_msgs.append({"role": "user", "content": content or ""})
+                anthropic_msgs.append({
+                    "role": "user",
+                    "content": _hinted_blocks(content) if hinted else (content or ""),
+                })
 
     return system_parts, anthropic_msgs
 
@@ -429,21 +449,26 @@ class AnthropicClient:
     def _build_system_blocks(self, system_parts: list[str]) -> list[dict]:
         """Build system prompt as content blocks with selective caching.
 
-        Only the FIRST block (stable persona/instructions) gets cache_control.
-        Subsequent blocks (dynamic context: time, memories, journal) are left
-        uncached so they don't bust the prefix hash every call.
+        The FIRST and LAST blocks get cache_control. ContextManager only puts
+        stable content in system parts (persona, then journal/injected skill
+        context — changes a few times a day at most), so the last-block
+        breakpoint caches the whole system prefix; the first-block one keeps a
+        partial hit alive for the persona when the outer context does change.
+        Per-call volatile content (time, recalled memories) lives in the
+        messages array, after the history, where it can't bust this prefix.
         """
         if not system_parts:
             return []
 
         blocks = []
-        for i, text in enumerate(system_parts):
+        for text in system_parts:
             if not text:
                 continue
-            block = {"type": "text", "text": text}
-            if self._enable_caching and i == 0:
-                block["cache_control"] = self._cache_control()
-            blocks.append(block)
+            blocks.append({"type": "text", "text": text})
+        if blocks and self._enable_caching:
+            blocks[0]["cache_control"] = self._cache_control()
+            if len(blocks) > 1:
+                blocks[-1]["cache_control"] = self._cache_control()
         return blocks
 
     def chat(self, messages: list[dict]) -> Optional[PulseResponse]:
@@ -453,7 +478,10 @@ class AnthropicClient:
         """
         self.last_error = ""
         try:
-            system_parts, anthropic_msgs = _convert_messages(messages)
+            system_parts, anthropic_msgs = _convert_messages(
+                messages,
+                cache_control=self._cache_control() if self._enable_caching else None,
+            )
             system_blocks = self._build_system_blocks(system_parts)
             diagnostics_key = self._diagnostics_key(system_blocks)
 
@@ -518,7 +546,10 @@ class AnthropicClient:
         Returns:
             Tuple of (final response text, list of tool names used)
         """
-        system_parts, anthropic_msgs = _convert_messages(messages)
+        system_parts, anthropic_msgs = _convert_messages(
+            messages,
+            cache_control=self._cache_control() if self._enable_caching else None,
+        )
         anthropic_tools = _openai_tools_to_anthropic(tools) if tools else []
         tools_used = []
         # Reset captured reasoning and error per call so a previous chain

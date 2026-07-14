@@ -131,6 +131,33 @@ provider:
 
 Supported provider types: `local` (default), `openai`, `openrouter`, `anthropic`, `custom` (any OpenAI-compatible endpoint). When using a cloud provider, llama-server is not started — embeddings for memory search still run locally.
 
+#### Anthropic prompt caching (cost behavior worth knowing)
+
+Pulse structures prompts so Anthropic's prompt cache re-reads the expensive
+parts (persona, journal, conversation history) at ~10% of input price instead
+of re-sending them at full price on every call. Two things follow from how
+that cache works:
+
+- **Conversations and heartbeats are separate cache lineages.** They have
+  different prompt shapes, so a heartbeat never refreshes (or breaks) the
+  conversation's cache entry, and vice versa. Each lineage only stays warm if
+  a request *of the same shape* recurs within the cache TTL.
+- **The TTL clock is per lineage.** With `cache_ttl: "1h"`, a conversation
+  cache entry expires one hour after the last *message* — heartbeats in
+  between don't count. Symmetrically, a heartbeat entry expires one hour
+  after the last *heartbeat*, and because messages postpone the next
+  heartbeat ("fire after N minutes of silence"), an active conversation will
+  routinely let the heartbeat lineage go cold. The penalty is one full-price
+  cache write on the next call of that shape (a few tens of cents on Opus,
+  cents on smaller models), then it's warm again.
+
+Practical guidance: keep `heartbeat.interval_max_minutes` at or below 60 when
+using `cache_ttl: "1h"`, and don't bother trying to keep both lineages alive
+by alternating messages and heartbeats — they don't refresh each other.
+Watch the `Prompt cache:` log lines (reads vs. writes) to see it working;
+`cache_diagnostics: true` logs *why* a call missed (`system_changed`,
+`messages_changed`).
+
 Edit `persona.yaml` (or `persona.json`) to name your companion:
 
 ```yaml
