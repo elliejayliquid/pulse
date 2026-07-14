@@ -103,6 +103,9 @@ heartbeat:
 #   recent_tail_exchanges: 2      # exchanges (user+assistant pairs) kept after summarization
 
 # --- Passive recall of memories ---
+# NOTE: this is the ONLY `context:` section — YAML silently drops duplicate
+# top-level keys (last one wins), so adding another `context:` further down
+# would disable everything here. inject_skills belongs in this block too.
 context:
   recall:
     enabled: true          # false -> exactly the old behavior
@@ -110,6 +113,8 @@ context:
     min_similarity: 0.30
     core_importance: 8
     heartbeat_query: false
+  inject_skills:
+    - lantern
 
 # --- Data Paths ---
 paths:
@@ -209,11 +214,12 @@ skills:
     #     url: "http://127.0.0.1:8765/mcp"
 
 # --- Context Injection ---
-#context:
-#  inject_skills: ["garden"] -> this would let your persona see the garden stats in their prompt on every turn.
-context:
-  inject_skills:
-    - lantern
+# inject_skills lives under the SINGLE `context:` section near the top of this
+# file (next to `recall:`). YAML silently drops duplicate top-level keys — a
+# second `context:` block here shadowed the recall config for months
+# (discovered 2026-07-14; passive recall was silently disabled for everyone).
+# Example: context.inject_skills: ["garden"] lets your persona see garden
+# stats in their prompt on every turn.
 # --- Timeout (model-initiated disengagement) ---
 # Lets the model disengage from genuinely harmful conversations.
 # NOT censorship — the model decides based on context, not keywords.

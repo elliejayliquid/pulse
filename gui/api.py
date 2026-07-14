@@ -24,6 +24,7 @@ from typing import Any
 
 import yaml
 
+from core import yaml_loader
 from gui.backup import BackupManager
 from gui.config_editor import ConfigEditor
 from gui.openrouter_import import parse_openrouter_chat
@@ -149,7 +150,7 @@ def _load_yaml(path: Path) -> dict:
     if not path.exists():
         return {}
     with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
+        return yaml_loader.safe_load(f) or {}
 
 
 def _parse_env(path: Path) -> dict[str, str]:
