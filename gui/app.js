@@ -3859,6 +3859,14 @@ function renderImportPreview() {
     .filter(([, count]) => Number(count) > 0)
     .map(([name, count]) => `${humanizeMemoryBadge(name)}: ${count}`)
     .join(" / ");
+  const flagged = flaggedImportConversations();
+  const flaggedNav = flagged.length
+    ? `<span class="import-summary-warning import-flagged-nav"><strong>${escapeHtml(flagged.length)}</strong> flagged
+        <span class="import-issue-nav">
+          <button type="button" data-import-flagged-nav="prev" title="Previous flagged conversation" aria-label="Previous flagged conversation"></button>
+          <button type="button" data-import-flagged-nav="next" title="Next flagged conversation" aria-label="Next flagged conversation"></button>
+        </span></span>`
+    : "";
   el("importSubtitle").textContent = `${humanizeMemoryBadge(batch.source)} export / ${batch.conversation_count || 0} conversations`;
   el("importSummary").classList.remove("hidden");
   el("importSummary").innerHTML = `
@@ -3866,8 +3874,47 @@ function renderImportPreview() {
     <span><strong>${escapeHtml(batch.message_count || 0)}</strong> messages</span>
     ${Number(batch.skipped_message_count || 0) ? `<span class="import-summary-warning"><strong>${escapeHtml(batch.skipped_message_count || 0)}</strong> skipped/empty</span>` : ""}
     <span><strong>${escapeHtml(batch.estimated_tokens || 0)}</strong> est. tokens</span>
-    ${skipped ? `<span>${escapeHtml(skipped)}</span>` : ""}`;
+    ${skipped ? `<span>${escapeHtml(skipped)}</span>` : ""}
+    ${flaggedNav}`;
+  el("importSummary").querySelectorAll("[data-import-flagged-nav]").forEach((button) => {
+    button.addEventListener("click", () => {
+      void jumpToFlaggedImportConversation(button.dataset.importFlaggedNav);
+    });
+  });
   renderImportConversationList();
+}
+
+function flaggedImportConversations() {
+  return (state.importPreview.batch?.conversations || []).filter((conversation) => (
+    Number(conversation.skipped_message_count || 0) > 0
+    || Number(conversation.review_issue_count || 0) > 0
+    || Number(conversation.message_count || 0) === 0
+  ));
+}
+
+async function jumpToFlaggedImportConversation(direction) {
+  const flagged = flaggedImportConversations();
+  if (!flagged.length) return;
+  const currentIndex = flagged.findIndex((conversation) => conversation.id === state.importPreview.selectedId);
+  let next;
+  if (currentIndex === -1) {
+    next = direction === "prev" ? flagged.length - 1 : 0;
+  } else {
+    next = direction === "prev"
+      ? (currentIndex - 1 + flagged.length) % flagged.length
+      : (currentIndex + 1) % flagged.length;
+  }
+  const conversationId = flagged[next].id;
+  await selectImportConversation(conversationId);
+  const safeId = typeof CSS !== "undefined" && CSS.escape
+    ? CSS.escape(conversationId)
+    : String(conversationId).replace(/"/g, '\\"');
+  const card = el("importConversations")?.querySelector(`[data-conversation-id="${safeId}"]`);
+  if (card) {
+    card.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    card.classList.add("pulse-highlight");
+    setTimeout(() => card.classList.remove("pulse-highlight"), 1400);
+  }
 }
 
 function renderImportConversationList() {

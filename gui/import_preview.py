@@ -337,11 +337,16 @@ def _preview_chatgpt(file_name: str, file_size: int, payload: list[Any]) -> Prev
                     # empties — the exchange stays coherent for review and
                     # for any future landing.
                     sender = "Human" if role == "user" else "Companion"
-                    placeholder = (
-                        f"[{sender} sent an image. Image content was not included in this export.]"
-                        if has_image
-                        else f"[{sender} sent an attachment. Attachment content was not included in this export.]"
-                    )
+                    names = msg.get("attachment_names") or []
+                    if names:
+                        placeholder = (
+                            f"[{sender} sent an attachment: {', '.join(names[:3])}. "
+                            "File content was not included in this export.]"
+                        )
+                    elif has_image:
+                        placeholder = f"[{sender} sent an image. Image content was not included in this export.]"
+                    else:
+                        placeholder = f"[{sender} sent an attachment. Attachment content was not included in this export.]"
                     messages.append(PreviewMessage(
                         id=str(msg.get("id") or f"m{msg_index}"),
                         role=role,
@@ -857,13 +862,27 @@ def walk_chatgpt_messages(mapping: dict[str, Any], current_node: str = "") -> tu
         raw_content = msg.get("content") or {}
         content = chatgpt_content_text(raw_content)
         created_at = normalize_timestamp(msg.get("create_time"), from_epoch=True)
+        # File/document uploads live in metadata.attachments, not in the
+        # content parts — an "empty" human message often carried a file.
+        meta_attachments = [
+            item for item in (metadata.get("attachments") or []) if isinstance(item, dict)
+        ]
+        attachment_kinds = chatgpt_attachment_kinds(raw_content) + [
+            str(item.get("mimeType") or item.get("mime_type") or "attachment")
+            for item in meta_attachments
+        ]
         messages.append({
             "id": msg.get("id") or node_id,
             "role": role,
             "content": content,
             "content_type": raw_content.get("content_type") if isinstance(raw_content, dict) else "",
             "recipient": str(msg.get("recipient") or ""),
-            "attachment_kinds": chatgpt_attachment_kinds(raw_content),
+            "attachment_kinds": attachment_kinds,
+            "attachment_names": [
+                str(item.get("name") or "").strip()
+                for item in meta_attachments
+                if str(item.get("name") or "").strip()
+            ],
             "hidden": bool(metadata.get("is_visually_hidden_from_conversation")),
             "model": str(metadata.get("model_slug") or ""),
             "created_at": created_at,

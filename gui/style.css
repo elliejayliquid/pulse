@@ -3205,12 +3205,29 @@ textarea {
   border-bottom: 2px solid currentColor;
 }
 
-.import-issue-nav button[data-import-issue-nav="prev"]::before {
+.import-issue-nav button[data-import-issue-nav="prev"]::before,
+.import-issue-nav button[data-import-flagged-nav="prev"]::before {
   transform: rotate(45deg);
 }
 
-.import-issue-nav button[data-import-issue-nav="next"]::before {
+.import-issue-nav button[data-import-issue-nav="next"]::before,
+.import-issue-nav button[data-import-flagged-nav="next"]::before {
   transform: rotate(225deg);
+}
+
+.import-flagged-nav {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.import-flagged-nav .import-issue-nav {
+  display: inline-flex;
+}
+
+.import-flagged-nav .import-issue-nav button {
+  min-height: 22px;
+  width: 22px;
 }
 
 .import-issue-nav button:hover,

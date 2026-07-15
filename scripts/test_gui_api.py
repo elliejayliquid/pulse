@@ -757,7 +757,7 @@ def test_gui_api_preview_chatgpt_follows_canonical_thread():
                 "title": "Branchy Chat",
                 "create_time": 1767225600,
                 "update_time": 1767229200,
-                "current_node": "a5",
+                "current_node": "a6",
                 "mapping": {
                     "root": node("root", None, None, ["u1"]),
                     "u1": node("u1", chat_message("u1", "user", ["Tell me a story."], create_time=1767225600), "root", ["a1", "a2"]),
@@ -779,7 +779,10 @@ def test_gui_api_preview_chatgpt_follows_canonical_thread():
                     "a4": node("a4", chat_message("a4", "assistant", ["Nice photo."], create_time=1767225900), "u4", ["hid"]),
                     # Hidden platform context injection — never the human's words.
                     "hid": node("hid", chat_message("hid", "user", ["Hidden memory blob the human never typed."], create_time=1767225930, metadata={"is_visually_hidden_from_conversation": True}), "a4", ["a5"]),
-                    "a5": node("a5", chat_message("a5", "assistant", ["After the hidden context."], create_time=1767225960), "hid", []),
+                    "a5": node("a5", chat_message("a5", "assistant", ["After the hidden context."], create_time=1767225960), "hid", ["u5"]),
+                    # Document upload with no text — file lives in metadata.attachments.
+                    "u5": node("u5", chat_message("u5", "user", [""], create_time=1767225990, metadata={"attachments": [{"id": "file-1", "name": "notes.txt", "mimeType": "text/plain"}]}), "a5", ["a6"]),
+                    "a6": node("a6", chat_message("a6", "assistant", ["Read your notes."], create_time=1767226020), "u5", []),
                 },
             },
         ]), encoding="utf-8")
@@ -809,6 +812,8 @@ def test_gui_api_preview_chatgpt_follows_canonical_thread():
             ("user", "[Human sent an image. Image content was not included in this export.]"),
             ("assistant", "Nice photo."),
             ("assistant", "After the hidden context."),
+            ("user", "[Human sent an attachment: notes.txt. File content was not included in this export.]"),
+            ("assistant", "Read your notes."),
         ]
         serialized = json.dumps(detail)
         assert "Old abandoned draft." not in serialized
@@ -816,6 +821,7 @@ def test_gui_api_preview_chatgpt_follows_canonical_thread():
         assert detail["conversation"]["messages"][3]["attachment_placeholder"] is True
         assert detail["conversation"]["messages"][4]["attachment_placeholder"] is True
         assert detail["conversation"]["messages"][6]["attachment_placeholder"] is True
+        assert detail["conversation"]["messages"][9]["attachment_placeholder"] is True
         assert preview["batch"]["skipped_counts"]["hidden_context_messages"] == 1
         assert preview["batch"]["skipped_counts"]["empty_companion_turns"] == 1
 
