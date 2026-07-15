@@ -282,6 +282,8 @@ def _preview_chatgpt(file_name: str, file_size: int, payload: list[Any]) -> Prev
     skipped_internal = 0
     skipped_empty = 0
     skipped_branches = 0
+    skipped_hidden = 0
+    skipped_empty_companion = 0
     for index, conv in enumerate(payload):
         if not isinstance(conv, dict):
             continue
@@ -295,6 +297,29 @@ def _preview_chatgpt(file_name: str, file_size: int, payload: list[Any]) -> Prev
             role = normalize_role(msg.get("role"))
             text = msg.get("content", "").strip()
             recipient = msg.get("recipient", "")
+            attachment_kinds = msg.get("attachment_kinds") or []
+            has_image = any("image" in kind.lower() for kind in attachment_kinds)
+            if msg.get("hidden"):
+                # Platform context injections (memory blobs, custom
+                # instructions) are marked visually hidden — they were never
+                # part of the visible dialogue and must not import as the
+                # human's words.
+                skipped_hidden += 1
+                continue
+            if str(msg.get("role") or "") == "tool" and has_image:
+                # Image generations surface through tool-role messages
+                # (dalle.text2im and friends). Show them as companion
+                # attachment placeholders so image exchanges stay coherent.
+                messages.append(PreviewMessage(
+                    id=str(msg.get("id") or f"m{msg_index}"),
+                    role="assistant",
+                    source_role=str(msg.get("role") or ""),
+                    content="[Companion sent an image. Image content was not included in this export.]",
+                    created_at=normalize_timestamp(msg.get("created_at")),
+                    model=msg.get("model", ""),
+                    attachment_placeholder=True,
+                ))
+                continue
             if not role:
                 skipped_internal += 1
                 continue
@@ -306,12 +331,16 @@ def _preview_chatgpt(file_name: str, file_size: int, payload: list[Any]) -> Prev
                 if is_chatgpt_internal_content(msg.get("content_type")):
                     skipped_internal += 1
                     continue
-                attachment_kinds = msg.get("attachment_kinds") or []
-                if role == "user" and attachment_kinds:
+                if attachment_kinds:
+                    # Image/attachment-only turns (human uploads, companion
+                    # image generations) become placeholders, not skipped
+                    # empties — the exchange stays coherent for review and
+                    # for any future landing.
+                    sender = "Human" if role == "user" else "Companion"
                     placeholder = (
-                        "[Human sent an image. Image content was not included in this export.]"
-                        if any("image" in kind.lower() for kind in attachment_kinds)
-                        else "[Human sent an attachment. Attachment content was not included in this export.]"
+                        f"[{sender} sent an image. Image content was not included in this export.]"
+                        if has_image
+                        else f"[{sender} sent an attachment. Attachment content was not included in this export.]"
                     )
                     messages.append(PreviewMessage(
                         id=str(msg.get("id") or f"m{msg_index}"),
@@ -319,9 +348,15 @@ def _preview_chatgpt(file_name: str, file_size: int, payload: list[Any]) -> Prev
                         source_role=str(msg.get("role") or ""),
                         content=placeholder,
                         created_at=normalize_timestamp(msg.get("created_at")),
-                        model=extract_model_hint(msg),
+                        model=msg.get("model", ""),
                         attachment_placeholder=True,
                     ))
+                    continue
+                if role == "assistant":
+                    # Empty companion text turns are pipeline artifacts
+                    # (tool dispatch wrappers, thinking-flow segments) the
+                    # ChatGPT UI never displayed. Count them, don't show them.
+                    skipped_empty_companion += 1
                     continue
                 skipped_empty += 1
                 messages.append(make_skipped_message(
@@ -329,7 +364,7 @@ def _preview_chatgpt(file_name: str, file_size: int, payload: list[Any]) -> Prev
                     role=role,
                     source_role=str(msg.get("role") or ""),
                     created_at=normalize_timestamp(msg.get("created_at")),
-                    model=extract_model_hint(msg),
+                    model=msg.get("model", ""),
                     reason="Empty message",
                 ))
                 continue
@@ -339,7 +374,7 @@ def _preview_chatgpt(file_name: str, file_size: int, payload: list[Any]) -> Prev
                 source_role=str(msg.get("role") or ""),
                 content=text,
                 created_at=normalize_timestamp(msg.get("created_at")),
-                model=extract_model_hint(msg),
+                model=msg.get("model", ""),
             ))
         if not messages:
             skipped_empty += 1
@@ -370,6 +405,8 @@ def _preview_chatgpt(file_name: str, file_size: int, payload: list[Any]) -> Prev
             "internal_or_unknown_messages": skipped_internal,
             "empty_messages_or_conversations": skipped_empty,
             "edited_branch_messages": skipped_branches,
+            "hidden_context_messages": skipped_hidden,
+            "empty_companion_turns": skipped_empty_companion,
         },
     )
 
@@ -815,6 +852,7 @@ def walk_chatgpt_messages(mapping: dict[str, Any], current_node: str = "") -> tu
         if not isinstance(msg, dict):
             continue
         author = msg.get("author") or {}
+        metadata = msg.get("metadata") or {}
         role = author.get("role")
         raw_content = msg.get("content") or {}
         content = chatgpt_content_text(raw_content)
@@ -826,6 +864,8 @@ def walk_chatgpt_messages(mapping: dict[str, Any], current_node: str = "") -> tu
             "content_type": raw_content.get("content_type") if isinstance(raw_content, dict) else "",
             "recipient": str(msg.get("recipient") or ""),
             "attachment_kinds": chatgpt_attachment_kinds(raw_content),
+            "hidden": bool(metadata.get("is_visually_hidden_from_conversation")),
+            "model": str(metadata.get("model_slug") or ""),
             "created_at": created_at,
         })
     total_message_nodes = sum(
@@ -876,11 +916,14 @@ def chatgpt_bfs_node_ids(mapping: dict[str, Any]) -> list[str]:
 
 def is_chatgpt_internal_content(content_type: Any) -> bool:
     # code/execution_output is code-interpreter and image-generation tool
-    # traffic, not dialogue. Never surface it as fake transcript text.
+    # traffic; thoughts/reasoning_recap are thinking-model UI chrome
+    # ("Thought for 34s"). None of it is dialogue — never surface it as
+    # transcript text.
     return str(content_type or "") in {
         "system_error",
         "user_editable_context",
         "thoughts",
+        "reasoning_recap",
         "code",
         "execution_output",
     }

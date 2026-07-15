@@ -67,6 +67,14 @@ Added 2026-07-15 (Phase 2 staging slice, Debugger):
 - GUI: footer shows a "Preview only" / "Staged archive" badge; "Stage this import" persists batch + choices; opening Continuity > Import auto-resumes the latest staged batch; curation changes (conversation choices, continuation, exchange exclusions) save automatically once staged; "Delete staged" is confirm-guarded and never touches the export file.
 - Exchange exclusions persist as per-message `excluded` flags (positions), rebuilt into exchange-level choices on resume — no fragile exchange-id mapping between frontend and backend.
 
+Added 2026-07-15, later (validated against a real 62 MB ChatGPT export):
+
+- Messages marked `is_visually_hidden_from_conversation` (platform memory/context injections) are skipped and counted (`hidden_context_messages`) — they must never import as the human's words.
+- Tool-role messages carrying `image_asset_pointer` parts (dalle.text2im and successors) become "[Companion sent an image...]" attachment placeholders, so image-generation exchanges stay coherent; the same placeholder covers image-only assistant turns.
+- `reasoning_recap` ("Thought for 34s" chrome) joined the internal content types.
+- Empty companion text turns (tool-dispatch wrappers, thinking-flow segments the ChatGPT UI never displayed) are counted (`empty_companion_turns`) instead of shown as red skipped placeholders. Real-export effect: 1,435 red placeholders → 4; review-flagged conversations 270 → 7.
+- Per-message `model_slug` now populates the message model chip.
+
 Known rough edges:
 
 - Duplicate resend collapse is preview-only; future commit sanitation should decide whether to store one copy, all copies, or an explicit retry-cluster record.

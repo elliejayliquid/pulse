@@ -740,13 +740,14 @@ def test_gui_api_preview_chatgpt_follows_canonical_thread():
         def node(node_id, message, parent, children):
             return {"id": node_id, "message": message, "parent": parent, "children": children}
 
-        def chat_message(msg_id, role, parts, content_type="text", recipient="all", create_time=None):
+        def chat_message(msg_id, role, parts, content_type="text", recipient="all", create_time=None, metadata=None):
             return {
                 "id": msg_id,
                 "author": {"role": role},
                 "create_time": create_time,
                 "content": {"content_type": content_type, "parts": parts},
                 "recipient": recipient,
+                "metadata": metadata or {},
             }
 
         image_part = {"content_type": "image_asset_pointer", "asset_pointer": "file-service://file-abc"}
@@ -756,22 +757,29 @@ def test_gui_api_preview_chatgpt_follows_canonical_thread():
                 "title": "Branchy Chat",
                 "create_time": 1767225600,
                 "update_time": 1767229200,
-                "current_node": "a4",
+                "current_node": "a5",
                 "mapping": {
                     "root": node("root", None, None, ["u1"]),
                     "u1": node("u1", chat_message("u1", "user", ["Tell me a story."], create_time=1767225600), "root", ["a1", "a2"]),
                     # Abandoned regeneration branch — must NOT be imported.
                     "a1": node("a1", chat_message("a1", "assistant", ["Old abandoned draft."]), "u1", []),
-                    "a2": node("a2", chat_message("a2", "assistant", ["Final story."], create_time=1767225660), "u1", ["u2"]),
-                    "u2": node("u2", chat_message("u2", "user", ['Here is JSON with "prompt": "value" inside.'], create_time=1767225720), "a2", ["dalle"]),
+                    "a2": node("a2", chat_message("a2", "assistant", ["Final story."], create_time=1767225660), "u1", ["aempty"]),
+                    # Empty companion text turn — pipeline artifact, counted not shown.
+                    "aempty": node("aempty", chat_message("aempty", "assistant", [""], create_time=1767225665), "a2", ["u2"]),
+                    "u2": node("u2", chat_message("u2", "user", ['Here is JSON with "prompt": "value" inside.'], create_time=1767225720), "aempty", ["dalle"]),
                     # Tool-directed image request — internal traffic, skipped.
                     "dalle": node("dalle", chat_message("dalle", "assistant", ['{"prompt": "a cat"}'], content_type="code", recipient="dalle.text2im"), "u2", ["tool1"]),
-                    # Tool response with image pointer — internal, skipped.
-                    "tool1": node("tool1", chat_message("tool1", "tool", [image_part], content_type="multimodal_text"), "dalle", ["a3"]),
-                    "a3": node("a3", chat_message("a3", "assistant", ["Here is your image."], create_time=1767225780), "tool1", ["u4"]),
+                    # Tool-role image result — companion attachment placeholder.
+                    "tool1": node("tool1", chat_message("tool1", "tool", [image_part], content_type="multimodal_text"), "dalle", ["aimg"]),
+                    # Companion image generation with no text — attachment placeholder.
+                    "aimg": node("aimg", chat_message("aimg", "assistant", [image_part], content_type="multimodal_text", create_time=1767225770), "tool1", ["a3"]),
+                    "a3": node("a3", chat_message("a3", "assistant", ["Here is your image."], create_time=1767225780), "aimg", ["u4"]),
                     # Human image upload with no text — attachment placeholder.
                     "u4": node("u4", chat_message("u4", "user", [image_part], content_type="multimodal_text", create_time=1767225840), "a3", ["a4"]),
-                    "a4": node("a4", chat_message("a4", "assistant", ["Nice photo."], create_time=1767225900), "u4", []),
+                    "a4": node("a4", chat_message("a4", "assistant", ["Nice photo."], create_time=1767225900), "u4", ["hid"]),
+                    # Hidden platform context injection — never the human's words.
+                    "hid": node("hid", chat_message("hid", "user", ["Hidden memory blob the human never typed."], create_time=1767225930, metadata={"is_visually_hidden_from_conversation": True}), "a4", ["a5"]),
+                    "a5": node("a5", chat_message("a5", "assistant", ["After the hidden context."], create_time=1767225960), "hid", []),
                 },
             },
         ]), encoding="utf-8")
@@ -790,16 +798,26 @@ def test_gui_api_preview_chatgpt_follows_canonical_thread():
         detail = api.get_import_preview_conversation(preview["preview_id"], conv["id"])
         assert detail["ok"] is True
         contents = [(msg["role"], msg["content"]) for msg in detail["conversation"]["messages"]]
+        companion_image = "[Companion sent an image. Image content was not included in this export.]"
         assert contents == [
             ("user", "Tell me a story."),
             ("assistant", "Final story."),
             ("user", 'Here is JSON with "prompt": "value" inside.'),
+            ("assistant", companion_image),
+            ("assistant", companion_image),
             ("assistant", "Here is your image."),
             ("user", "[Human sent an image. Image content was not included in this export.]"),
             ("assistant", "Nice photo."),
+            ("assistant", "After the hidden context."),
         ]
-        assert "Old abandoned draft." not in json.dumps(detail)
+        serialized = json.dumps(detail)
+        assert "Old abandoned draft." not in serialized
+        assert "Hidden memory blob" not in serialized
+        assert detail["conversation"]["messages"][3]["attachment_placeholder"] is True
         assert detail["conversation"]["messages"][4]["attachment_placeholder"] is True
+        assert detail["conversation"]["messages"][6]["attachment_placeholder"] is True
+        assert preview["batch"]["skipped_counts"]["hidden_context_messages"] == 1
+        assert preview["batch"]["skipped_counts"]["empty_companion_turns"] == 1
 
 
 def test_gui_api_preview_double_text_is_one_exchange():
