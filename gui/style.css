@@ -2825,6 +2825,7 @@ textarea {
 
 .import-summary {
   display: flex;
+  align-items: center;
   gap: 8px;
   flex-wrap: wrap;
   margin: 0 0 12px;
@@ -3219,6 +3220,8 @@ textarea {
   display: inline-flex;
   align-items: center;
   gap: 7px;
+  padding-top: 3px;
+  padding-bottom: 3px;
 }
 
 .import-flagged-nav .import-issue-nav {
@@ -3226,8 +3229,12 @@ textarea {
 }
 
 .import-flagged-nav .import-issue-nav button {
-  min-height: 22px;
-  width: 22px;
+  min-height: 20px;
+  width: 20px;
+}
+
+.import-flagged-nav .import-issue-nav span {
+  color: inherit;
 }
 
 .import-issue-nav button:hover,

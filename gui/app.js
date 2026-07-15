@@ -3861,9 +3861,10 @@ function renderImportPreview() {
     .join(" / ");
   const flagged = flaggedImportConversations();
   const flaggedNav = flagged.length
-    ? `<span class="import-summary-warning import-flagged-nav"><strong>${escapeHtml(flagged.length)}</strong> flagged
+    ? `<span class="import-summary-warning import-flagged-nav">Flagged
         <span class="import-issue-nav">
           <button type="button" data-import-flagged-nav="prev" title="Previous flagged conversation" aria-label="Previous flagged conversation"></button>
+          <span data-import-flagged-label>${escapeHtml(importFlaggedNavLabel(flagged))}</span>
           <button type="button" data-import-flagged-nav="next" title="Next flagged conversation" aria-label="Next flagged conversation"></button>
         </span></span>`
     : "";
@@ -3892,6 +3893,17 @@ function flaggedImportConversations() {
   ));
 }
 
+function importFlaggedNavLabel(flagged) {
+  const currentIndex = flagged.findIndex((conversation) => conversation.id === state.importPreview.selectedId);
+  return currentIndex >= 0 ? `${currentIndex + 1} of ${flagged.length}` : `${flagged.length} total`;
+}
+
+function updateImportFlaggedNavLabel() {
+  const label = el("importSummary")?.querySelector("[data-import-flagged-label]");
+  if (!label) return;
+  label.textContent = importFlaggedNavLabel(flaggedImportConversations());
+}
+
 async function jumpToFlaggedImportConversation(direction) {
   const flagged = flaggedImportConversations();
   if (!flagged.length) return;
@@ -3906,6 +3918,7 @@ async function jumpToFlaggedImportConversation(direction) {
   }
   const conversationId = flagged[next].id;
   await selectImportConversation(conversationId);
+  updateImportFlaggedNavLabel();
   const safeId = typeof CSS !== "undefined" && CSS.escape
     ? CSS.escape(conversationId)
     : String(conversationId).replace(/"/g, '\\"');
@@ -4018,6 +4031,7 @@ async function selectImportConversation(conversationId, force = false, resetDeta
   const previousDetailScroll = el("importDetail").scrollTop;
   state.importPreview.selectedId = conversationId;
   renderImportConversationList();
+  updateImportFlaggedNavLabel();
   el("importDetail").dataset.conversationId = conversationId;
   el("importDetail").dataset.messageOffset = String(offset);
   el("importDetail").innerHTML = `<div class="memory-empty">Loading conversation...</div>`;
