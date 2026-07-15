@@ -2766,7 +2766,7 @@ textarea {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 8px;
-  margin: 0 0 12px;
+  margin: 0 0 10px;
 }
 
 .import-file-row {
@@ -2780,31 +2780,28 @@ textarea {
 
 .import-progress {
   display: grid;
-  gap: 8px;
-  margin: 0 0 12px;
-  padding: 10px 12px;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 10px;
+  padding: 7px 12px;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--surface-raised);
 }
 
-.import-progress-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.import-progress-head strong {
+.import-progress strong {
   color: var(--text-primary);
   font: 700 11px/1 var(--body);
+  white-space: nowrap;
 }
 
-.import-progress-head span {
+.import-progress > span {
   color: var(--text-tertiary);
   font: 700 10px/1 var(--mono);
   text-transform: uppercase;
   letter-spacing: 0.06em;
+  white-space: nowrap;
 }
 
 .import-progress-track {
@@ -2828,7 +2825,7 @@ textarea {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
-  margin: 0 0 12px;
+  margin: 0 0 10px;
 }
 
 .import-summary span {

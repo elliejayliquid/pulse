@@ -3872,10 +3872,9 @@ function renderImportPreview() {
   el("importSummary").classList.remove("hidden");
   el("importSummary").innerHTML = `
     <span><strong>${escapeHtml(batch.conversation_count || 0)}</strong> conversations</span>
-    <span><strong>${escapeHtml(batch.message_count || 0)}</strong> messages</span>
+    <span ${skipped ? `title="Left out of the preview — ${escapeHtml(skipped)}"` : ""}><strong>${escapeHtml(batch.message_count || 0)}</strong> messages</span>
     ${Number(batch.skipped_message_count || 0) ? `<span class="import-summary-warning"><strong>${escapeHtml(batch.skipped_message_count || 0)}</strong> skipped/empty</span>` : ""}
     <span><strong>${escapeHtml(batch.estimated_tokens || 0)}</strong> est. tokens</span>
-    ${skipped ? `<span>${escapeHtml(skipped)}</span>` : ""}
     ${flaggedNav}`;
   el("importSummary").querySelectorAll("[data-import-flagged-nav]").forEach((button) => {
     button.addEventListener("click", () => {
