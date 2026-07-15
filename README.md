@@ -131,6 +131,33 @@ provider:
 
 Supported provider types: `local` (default), `openai`, `openrouter`, `anthropic`, `custom` (any OpenAI-compatible endpoint). When using a cloud provider, llama-server is not started — embeddings for memory search still run locally.
 
+#### Anthropic prompt caching (cost behavior worth knowing)
+
+Pulse structures prompts so Anthropic's prompt cache re-reads the expensive
+parts (persona, journal, conversation history) at ~10% of input price instead
+of re-sending them at full price on every call. Two things follow from how
+that cache works:
+
+- **Conversations and heartbeats are separate cache lineages.** They have
+  different prompt shapes, so a heartbeat never refreshes (or breaks) the
+  conversation's cache entry, and vice versa. Each lineage only stays warm if
+  a request *of the same shape* recurs within the cache TTL.
+- **The TTL clock is per lineage.** With `cache_ttl: "1h"`, a conversation
+  cache entry expires one hour after the last *message* — heartbeats in
+  between don't count. Symmetrically, a heartbeat entry expires one hour
+  after the last *heartbeat*, and because messages postpone the next
+  heartbeat ("fire after N minutes of silence"), an active conversation will
+  routinely let the heartbeat lineage go cold. The penalty is one full-price
+  cache write on the next call of that shape (a few tens of cents on Opus,
+  cents on smaller models), then it's warm again.
+
+Practical guidance: keep `heartbeat.interval_max_minutes` at or below 60 when
+using `cache_ttl: "1h"`, and don't bother trying to keep both lineages alive
+by alternating messages and heartbeats — they don't refresh each other.
+Watch the `Prompt cache:` log lines (reads vs. writes) to see it working;
+`cache_diagnostics: true` logs *why* a call missed (`system_changed`,
+`messages_changed`).
+
 Edit `persona.yaml` (or `persona.json`) to name your companion:
 
 ```yaml
@@ -311,6 +338,46 @@ Legacy search uses a multi-signal scoring formula:
 - **Conversation length (5%)** — longer conversations get a small boost
 
 Results are deduplicated by session and include drill-down hints to expand into the raw message history.
+
+### Passive memory recall
+
+Your companion doesn't just remember what's *important* — it remembers what's *relevant*. When a message arrives, Pulse embeds it and surfaces the most similar memories directly into the prompt, alongside a small core of always-on high-importance facts. Mention the garden and the gardening memories come back on their own — no tool call needed.
+
+**How it works:**
+
+- The incoming message is split into paragraph-sized chunks and each chunk is embedded separately, so a topic buried in your last paragraph retrieves just as well as one in your first.
+- Memories are scored by the best match between any message chunk and any of the memory's embeddings, then the top hits above a similarity threshold are injected as *"Possibly relevant to this moment"* hints.
+- Long memories (like multi-paragraph session summaries) also store **chunk-level embeddings**, so they can be found by their later paragraphs — not just the part that fits the embedding model's 256-token window.
+- High-importance facts (importance ≥ 8) and the latest session summary are always included, regardless of the message.
+
+Recall happens at prompt-build time inside the running daemon — it applies to conversation replies out of the box, and to heartbeats if `heartbeat_query` is enabled.
+
+**Configuration (`config.yaml`):**
+
+```yaml
+context:
+  recall:
+    enabled: true          # false -> old behavior (all facts, importance-sorted)
+    top_k: 6               # max "possibly relevant" hits injected per message
+    min_similarity: 0.30   # cosine threshold — raise if you see noise, lower if too quiet
+    core_importance: 8     # facts at or above this importance are always shown
+    heartbeat_query: false # also run recall on heartbeats (query = recent user messages)
+```
+
+If the `recall` block is missing from config entirely, recall is disabled and memory loading behaves exactly as before.
+
+**Backfilling existing memories:**
+
+New memories get chunk embeddings automatically as they're saved. Memories created before the upgrade need a one-time backfill per database. The script is standalone — the persona does **not** need to be running (and it's cleanest to run while it's stopped):
+
+```bash
+python scripts/backfill_memory_chunks.py                          # uses paths from config.yaml
+python scripts/backfill_memory_chunks.py --db path/to/shared.db   # explicit DB path
+```
+
+The script is idempotent and insert-only — safe to re-run, never modifies memory text.
+
+**Tuning:** watch the log lines (`Passive recall: chunks=… hits_above_thresh=… top_base=…`) for a few days. If companions bring up irrelevant memories, nudge `min_similarity` toward 0.35; if they never surface anything, drop it toward 0.25.
 
 ### Heartbeat (`config.yaml`)
 

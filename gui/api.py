@@ -25,6 +25,7 @@ from typing import Any
 
 import yaml
 
+from core import yaml_loader
 from gui.backup import BackupManager
 from gui.config_editor import ConfigEditor
 from gui.import_preview import preview_import_file
@@ -151,7 +152,7 @@ def _load_yaml(path: Path) -> dict:
     if not path.exists():
         return {}
     with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
+        return yaml_loader.safe_load(f) or {}
 
 
 def _parse_env(path: Path) -> dict[str, str]:
@@ -468,7 +469,7 @@ class PulseAPI:
             raise ValueError("Persona details must be an object.")
 
         display_name = self._clean_short_text(payload.get("display_name") or payload.get("name"), "Display name")
-        user_name = self._clean_short_text(payload.get("user_name") or payload.get("user"), "User name")
+        user_name = self._clean_short_text(payload.get("user_name") or payload.get("user"), "Human name")
         slug = str(payload.get("slug") or "").strip().lower()
         if not slug:
             slug = self._slug_from_display_name(display_name)

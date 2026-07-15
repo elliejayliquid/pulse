@@ -3539,7 +3539,7 @@ async function submitNewPersona() {
   const userName = el("newPersonaUser").value.trim();
   const importPath = el("newPersonaImportEnabled").checked ? el("newPersonaImportPath").value.trim() : "";
   if (!displayName || !slug || !userName) {
-    showNewPersonaError("Display name, slug, and user name are required.");
+    showNewPersonaError("Display name, slug, and human name are required.");
     return;
   }
   if (el("newPersonaImportEnabled").checked && !importPath) {
@@ -5190,7 +5190,7 @@ function renderMemoryEditor(memory, current, sourceNote = "", mode = "edit") {
     ? "New memory"
     : `#${escapeHtml(memory.id)}${current ? " / Current" : ""}`;
   const meta = mode === "add"
-    ? "Fact / user-defined"
+    ? "Fact / human-defined"
     : `${escapeHtml(memory.date_display || "unknown")} / ${escapeHtml(memory.age_label || "unknown age")}`;
   return `
     <article class="memory-version memory-editor-card ${current ? "current" : ""}">
@@ -5503,6 +5503,7 @@ function renderMemoryDetailSourceNote(memory) {
 }
 
 function humanizeMemoryBadge(value) {
+  if (value === "user_defined") return "Human Defined";
   return text(value)
     .replace(/_/g, " ")
     .replace(/\b\w/g, (ch) => ch.toUpperCase());
@@ -6100,7 +6101,7 @@ function setCoreAnchorIndicator(anchorId, hasContent) {
 function coreAnchorLabel(anchorId) {
   return {
     _self: "Core Self",
-    _user: "Core User",
+    _user: "Core Human",
     _relationship: "Core Relationship",
   }[anchorId] || "Core Anchor";
 }

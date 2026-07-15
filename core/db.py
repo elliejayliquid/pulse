@@ -379,6 +379,8 @@ class PulseDatabase:
             "UPDATE memories SET embedding = ? WHERE id = ?",
             (embedding, memory_id),
         )
+        if embedding is None:
+            self.conn.execute("DELETE FROM memory_chunks WHERE memory_id = ?", (memory_id,))
         self.conn.commit()
         return cur.rowcount > 0
 
@@ -438,9 +440,31 @@ class PulseDatabase:
 
     def delete_memory(self, memory_id: int) -> bool:
         """Delete a memory by id. Returns True if a row was deleted."""
+        self.conn.execute("DELETE FROM memory_chunks WHERE memory_id = ?", (memory_id,))
         cur = self.conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
         self.conn.commit()
         return cur.rowcount > 0
+
+    def save_memory_chunks(self, memory_id: int, chunk_blobs: list[bytes]) -> None:
+        """Insert or replace memory chunks."""
+        self.conn.execute("DELETE FROM memory_chunks WHERE memory_id = ?", (memory_id,))
+        for i, blob in enumerate(chunk_blobs):
+            self.conn.execute(
+                "INSERT INTO memory_chunks (memory_id, chunk_index, embedding) "
+                "VALUES (?, ?, ?)",
+                (memory_id, i, blob)
+            )
+        self.conn.commit()
+
+    def delete_memory_chunks(self, memory_id: int) -> None:
+        """Delete all chunks for a memory ID."""
+        self.conn.execute("DELETE FROM memory_chunks WHERE memory_id = ?", (memory_id,))
+        self.conn.commit()
+
+    def get_all_memory_chunks(self) -> list[dict]:
+        """Get all memory chunks for scoring."""
+        rows = self.conn.execute("SELECT memory_id, embedding FROM memory_chunks").fetchall()
+        return [{"memory_id": r["memory_id"], "embedding": r["embedding"]} for r in rows]
 
     # ── Schedules ────────────────────────────────────────────
 
@@ -1100,5 +1124,14 @@ CREATE TABLE IF NOT EXISTS lor_read_state (
     scope        TEXT PRIMARY KEY,
     last_seen_at TEXT,
     updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Memory chunk embeddings (for passive recall of long memories)
+CREATE TABLE IF NOT EXISTS memory_chunks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    memory_id INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    chunk_index INTEGER NOT NULL,
+    embedding BLOB NOT NULL,
+    UNIQUE(memory_id, chunk_index)
 );
 """

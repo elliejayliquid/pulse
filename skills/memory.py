@@ -425,6 +425,16 @@ class MemorySkill(BaseSkill):
                 importance=5, embedding=embedding_blob
             )
             logger.info(f"Memory saved to DB (ID: {mem_id}) — {text[:50]}...")
+            if model:
+                try:
+                    from core.embeddings import chunk_text, embedding_to_blob
+                    chunks = chunk_text(text.strip())
+                    if len(chunks) > 1:
+                        chunk_vecs = model.encode(chunks)
+                        chunk_blobs = [embedding_to_blob(vec) for vec in chunk_vecs]
+                        self._db.save_memory_chunks(mem_id, chunk_blobs)
+                except Exception as e:
+                    logger.warning(f"Failed to save memory chunk embeddings: {e}")
             return f"Remembered (ID: {mem_id}): '{text}'"
 
         # JSON fallback
@@ -484,6 +494,16 @@ class MemorySkill(BaseSkill):
             )
             self._db.update_memory_metadata(parsed_id, status="superseded")
             logger.info(f"Memory updated: #{old_id} -> #{new_id} — {text[:50]}...")
+            if model:
+                try:
+                    from core.embeddings import chunk_text, embedding_to_blob
+                    chunks = chunk_text(text.strip())
+                    if len(chunks) > 1:
+                        chunk_vecs = model.encode(chunks)
+                        chunk_blobs = [embedding_to_blob(vec) for vec in chunk_vecs]
+                        self._db.save_memory_chunks(new_id, chunk_blobs)
+                except Exception as e:
+                    logger.warning(f"Failed to save chunk embeddings for updated memory: {e}")
             return f"Memory updated: #{old_id} superseded by #{new_id}: '{text}'"
 
         # JSON fallback
@@ -568,6 +588,17 @@ class MemorySkill(BaseSkill):
                 if embedding is None:
                     raise ValueError("model returned empty embedding")
                 if self._db.update_memory_embedding(mem_id, embedding):
+                    try:
+                        from core.embeddings import chunk_text, embedding_to_blob
+                        chunks = chunk_text(text)
+                        if len(chunks) > 1:
+                            chunk_vecs = model.encode(chunks)
+                            chunk_blobs = [embedding_to_blob(vec) for vec in chunk_vecs]
+                            self._db.save_memory_chunks(mem_id, chunk_blobs)
+                        else:
+                            self._db.delete_memory_chunks(mem_id)
+                    except Exception as ce:
+                        logger.warning(f"Failed to save chunk embeddings during repair for #{mem_id}: {ce}")
                     recomputed += 1
             except Exception as e:
                 self._embedding_repair_failures.add(mem_id)

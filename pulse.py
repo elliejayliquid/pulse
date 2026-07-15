@@ -26,6 +26,7 @@ from pathlib import Path
 import yaml
 from dotenv import load_dotenv
 
+from core import yaml_loader
 from core.engine import PulseEngine
 from core.server import LlamaServer
 from channels.toast import ToastChannel
@@ -84,10 +85,10 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 def load_config(path: str) -> dict:
-    """Load configuration from YAML file."""
+    """Load configuration from YAML file. Duplicate top-level keys are an error."""
     try:
         with open(path, "r", encoding="utf-8") as f:
-            return yaml.safe_load(f)
+            return yaml_loader.safe_load(f)
     except FileNotFoundError:
         logger.error(f"Config file not found: {path}")
         sys.exit(1)

@@ -47,6 +47,10 @@ def _convert_messages_for_responses(messages: list[dict]) -> list[dict]:
     """
     converted = []
     for msg in messages:
+        if "cache_hint" in msg:
+            # Anthropic-only prompt-cache breakpoint marker — strip it so the
+            # Responses API doesn't see an unknown message field.
+            msg = {k: v for k, v in msg.items() if k != "cache_hint"}
         role = msg.get("role", "user")
         content = msg.get("content", "")
 

@@ -14,7 +14,7 @@ from gui.backup import BackupManager, IDENTITY_FILES
 
 IDENTITY_FIELDS = {
     "name": "Companion Name",
-    "user_name": "User Name",
+    "user_name": "Human Name",
     "model": "Display Model Name",
     "system_prompt": "System Prompt",
     "relationship_context": "Relationship Context",
