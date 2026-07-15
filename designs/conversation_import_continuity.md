@@ -58,14 +58,24 @@ Added 2026-07-12 (Debugger review fixes):
 - Reader-facing preview language says Human/Companion everywhere (labels, warnings, placeholders). Wire-level role keys stay `user`/`assistant` for export, DB, and LLM API compatibility.
 - Unparseable timestamps normalize to empty string instead of leaking raw source text into `created_at`.
 
+Added 2026-07-15 (Phase 2 staging slice, Debugger):
+
+- `_import_previews` evicts on every new preview: at most one parsed batch lives in memory.
+- `gui/import_staging.py` adds quarantine tables to the persona DB: `import_batches`, `import_conversations`, `import_messages` (with `schema_version`, per-conversation `choice`, per-message `excluded`). The engine never reads these tables.
+- `gui/api.py` endpoints: `stage_import` (replace semantics per batch id), `list_import_batches`, `resume_import_batch` (loads staged rows back into the preview cache), `update_import_curation`, `delete_import_batch`.
+- Staging forces empty conversations to `choice = 'exclude'` regardless of the requested choice.
+- GUI: footer shows a "Preview only" / "Staged archive" badge; "Stage this import" persists batch + choices; opening Continuity > Import auto-resumes the latest staged batch; curation changes (conversation choices, continuation, exchange exclusions) save automatically once staged; "Delete staged" is confirm-guarded and never touches the export file.
+- Exchange exclusions persist as per-message `excluded` flags (positions), rebuilt into exchange-level choices on resume — no fragile exchange-id mapping between frontend and backend.
+
 Known rough edges:
 
 - Duplicate resend collapse is preview-only; future commit sanitation should decide whether to store one copy, all copies, or an explicit retry-cluster record.
 - Attachment placeholder detection is implemented for Claude file metadata and ChatGPT image parts; other platform export shapes still need real samples and source-specific handling.
 - Messages with an unrecognized role but non-empty text are dropped without a dedicated skip counter (Claude and OpenRouter paths). Surfacing them needs a small "assign as human/companion" UI decision first.
 - Review issues are shown and navigable, but future import commit should define which issue types block living-context landing.
-- Completely empty conversations should default to exclude and should be sanitized out even if the user leaves them marked keep.
-- `_import_previews` holds fully parsed batches in memory keyed by path, unbounded. Fine for the preview slice, but a large ChatGPT export can be hundreds of MB — Phase 2 staging must evict/replace previews rather than accumulate them.
+- Commit sanitation (Phase 3) must still drop true empty messages and excluded-at-staging content even if curation rows say keep.
+- Deleting a staged batch has confirm-but-no-undo; the export file remains the recovery path. Revisit if staging ever holds curation work that can't be redone cheaply.
+- Staged batches resume fully into memory; fine for realistic exports, but a future lazy-load path could read conversation details straight from the staging tables.
 
 ## Phase 1 UX: Read-Only GUI Import Preview
 
@@ -565,6 +575,13 @@ Status:
 - Store a normalized import artifact/cache with schema version, choices, and issue locations.
 - Default completely empty conversations to excluded.
 - Make commit sanitation drop true empty messages even if a user leaves them marked keep.
+
+Status (2026-07-15):
+
+- Staging tables, stage/list/resume/delete/update endpoints, and GUI staging flow exist (see Current Implementation Slice).
+- SQLite tables were chosen over JSONL artifact files — one persona DB carries everything.
+- Issue locations are recomputed on load rather than stored; revisit only if recompute cost ever matters.
+- Commit sanitation itself is Phase 3 work.
 
 ### Phase 3: Commit and Landing
 

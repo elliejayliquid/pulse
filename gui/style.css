@@ -3002,6 +3002,31 @@ textarea {
   font: 700 10px/1 var(--body) !important;
 }
 
+.import-modal-actions {
+  align-items: center;
+}
+
+.import-modal-actions .import-staged-badge {
+  flex: 0 0 auto;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font: 700 10px/1.4 var(--body);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.import-staged-badge.preview {
+  border: 1px solid rgba(245, 158, 11, 0.36);
+  background: rgba(245, 158, 11, 0.1);
+  color: #fbbf24;
+}
+
+.import-staged-badge.staged {
+  border: 1px solid rgba(74, 222, 128, 0.34);
+  background: rgba(74, 222, 128, 0.1);
+  color: #86efac;
+}
+
 .import-duplicate-pill {
   padding: 3px 7px;
   border: 1px solid rgba(245, 158, 11, 0.38);

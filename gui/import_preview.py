@@ -29,6 +29,7 @@ class PreviewMessage:
     skipped: bool = False
     skip_reason: str = ""
     attachment_placeholder: bool = False
+    excluded: bool = False
 
     def to_dict(self, include_content: bool = True) -> dict:
         data = {
@@ -40,6 +41,7 @@ class PreviewMessage:
             "skipped": self.skipped,
             "skip_reason": self.skip_reason,
             "attachment_placeholder": self.attachment_placeholder,
+            "excluded": self.excluded,
             "char_count": len(self.content),
         }
         if include_content:

@@ -29,6 +29,14 @@ from core import yaml_loader
 from gui.backup import BackupManager
 from gui.config_editor import ConfigEditor
 from gui.import_preview import preview_import_file
+from gui.import_staging import (
+    clean_curation,
+    delete_batch,
+    list_batches,
+    load_batch,
+    stage_batch,
+    update_curation,
+)
 from gui.openrouter_import import parse_openrouter_chat
 from core.db import PulseDatabase
 from core.scheduler import (
@@ -428,6 +436,9 @@ class PulseAPI:
             batch = preview_import_file(export_path)
             preview_id = self._preview_id(export_path)
             batch_dict = batch.to_dict()
+            # One preview at a time: a parsed batch can be hundreds of MB, so
+            # a new preview evicts the previous one instead of accumulating.
+            self._import_previews.clear()
             self._import_previews[preview_id] = {
                 "path": str(export_path),
                 "batch": batch,
@@ -459,6 +470,134 @@ class PulseAPI:
                     "conversation": conversation.to_detail_dict(message_offset, message_limit),
                 }
         return {"ok": False, "error": "Conversation not found in this preview."}
+
+    def stage_import(self, persona: str, preview_id: str, curation: Any = None) -> dict:
+        """Persist the current preview into the persona's staging tables.
+
+        Writes only to the import_* quarantine tables — never to live
+        sessions, messages, memories, journal, or context. Re-staging the
+        same export replaces its previous staged rows.
+        """
+        validation = self._validate_persona_for_db_write(persona)
+        if not validation["ok"]:
+            return validation
+        entry = self._import_previews.get(str(preview_id or ""))
+        if not entry:
+            return {"ok": False, "error": "Import preview expired. Choose the export again."}
+        try:
+            cleaned = clean_curation(curation)
+            db_path = self._persona_database_path(persona)
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+            conn = _connect_sqlite(db_path)
+            try:
+                result = stage_batch(conn, str(preview_id), entry["batch"], entry["path"], cleaned)
+                conn.commit()
+            finally:
+                conn.close()
+            entry["staged_persona"] = persona
+            return {"ok": True, "batch_id": str(preview_id), **result}
+        except (ValueError, OSError, sqlite3.Error) as e:
+            return {"ok": False, "error": str(e)}
+
+    def list_import_batches(self, persona: str) -> dict:
+        validation = self._validate_persona_for_db_write(persona)
+        if not validation["ok"]:
+            return validation
+        try:
+            db_path = self._persona_database_path(persona)
+            if not db_path.is_file():
+                return {"ok": True, "batches": []}
+            conn = _connect_sqlite(db_path)
+            try:
+                return {"ok": True, "batches": list_batches(conn)}
+            finally:
+                conn.close()
+        except (OSError, sqlite3.Error) as e:
+            return {"ok": False, "error": str(e)}
+
+    def resume_import_batch(self, persona: str, batch_id: str = "") -> dict:
+        """Load a staged batch back into the preview cache for browsing."""
+        validation = self._validate_persona_for_db_write(persona)
+        if not validation["ok"]:
+            return validation
+        try:
+            db_path = self._persona_database_path(persona)
+            if not db_path.is_file():
+                return {"ok": False, "error": "No staged imports for this persona yet."}
+            conn = _connect_sqlite(db_path)
+            try:
+                if not batch_id:
+                    batches = list_batches(conn)
+                    if not batches:
+                        return {"ok": False, "error": "No staged imports for this persona yet."}
+                    batch_id = batches[0]["id"]
+                loaded = load_batch(conn, str(batch_id))
+            finally:
+                conn.close()
+            if not loaded:
+                return {"ok": False, "error": "Staged import not found."}
+            self._import_previews.clear()
+            self._import_previews[str(batch_id)] = {
+                "path": loaded["file_path"],
+                "batch": loaded["batch"],
+                "staged_persona": persona,
+            }
+            return {
+                "ok": True,
+                "preview_id": str(batch_id),
+                "path": loaded["file_path"],
+                "staged": True,
+                "staged_at": loaded["staged_at"],
+                "choices": loaded["choices"],
+                "continuation_id": loaded["continuation_id"],
+                "batch": loaded["batch"].to_dict(),
+            }
+        except (OSError, sqlite3.Error) as e:
+            return {"ok": False, "error": str(e)}
+
+    def update_import_curation(self, persona: str, batch_id: str, curation: Any = None) -> dict:
+        validation = self._validate_persona_for_db_write(persona)
+        if not validation["ok"]:
+            return validation
+        try:
+            cleaned = clean_curation(curation)
+            db_path = self._persona_database_path(persona)
+            if not db_path.is_file():
+                return {"ok": False, "error": "Staged import not found."}
+            conn = _connect_sqlite(db_path)
+            try:
+                updated = update_curation(conn, str(batch_id or ""), cleaned)
+                conn.commit()
+            finally:
+                conn.close()
+            if not updated:
+                return {"ok": False, "error": "Staged import not found."}
+            return {"ok": True, "batch_id": str(batch_id)}
+        except (ValueError, OSError, sqlite3.Error) as e:
+            return {"ok": False, "error": str(e)}
+
+    def delete_import_batch(self, persona: str, batch_id: str) -> dict:
+        validation = self._validate_persona_for_db_write(persona)
+        if not validation["ok"]:
+            return validation
+        try:
+            db_path = self._persona_database_path(persona)
+            if not db_path.is_file():
+                return {"ok": False, "error": "Staged import not found."}
+            conn = _connect_sqlite(db_path)
+            try:
+                removed = delete_batch(conn, str(batch_id or ""))
+                conn.commit()
+            finally:
+                conn.close()
+            if not removed:
+                return {"ok": False, "error": "Staged import not found."}
+            entry = self._import_previews.get(str(batch_id or ""))
+            if entry:
+                entry.pop("staged_persona", None)
+            return {"ok": True}
+        except (OSError, sqlite3.Error) as e:
+            return {"ok": False, "error": str(e)}
 
     def _clean_new_persona_fields(self, fields: Any) -> dict[str, str]:
         if isinstance(fields, str):

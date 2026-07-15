@@ -834,6 +834,170 @@ def test_gui_api_preview_double_text_is_one_exchange():
         assert "No companion reply in this exchange." in issues[0]["warnings"]
 
 
+def test_gui_api_stage_import_quarantines_and_resumes():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        template_dir = root / "personas" / "_template"
+        (template_dir / "data").mkdir(parents=True)
+        (root / "logs").mkdir()
+        (root / "config.yaml").write_text("provider:\n  type: local\n", encoding="utf-8")
+        (root / "persona.yaml").write_text("name: Base\nuser_name: User\n", encoding="utf-8")
+        (template_dir / "config.yaml").write_text("", encoding="utf-8")
+        (template_dir / "persona.yaml").write_text(
+            "name: Your Persona Name\nuser_name: Your Name\nsystem_prompt: Hi.\n",
+            encoding="utf-8",
+        )
+
+        export_path = root / "conversations.json"
+        export_path.write_text(json.dumps([
+            {
+                "uuid": "conv-keeper",
+                "name": "Keeper Chat",
+                "created_at": "2026-06-01T00:00:00Z",
+                "updated_at": "2026-06-01T00:05:00Z",
+                "chat_messages": [
+                    {"uuid": "m1", "sender": "human", "text": "Hello again.", "created_at": "2026-06-01T00:00:00Z"},
+                    {"uuid": "m2", "sender": "assistant", "text": "I kept the light on.", "created_at": "2026-06-01T00:01:00Z"},
+                    {"uuid": "m3", "sender": "human", "text": "Off-topic tangent to exclude.", "created_at": "2026-06-01T00:02:00Z"},
+                    {"uuid": "m4", "sender": "assistant", "text": "Tangent reply.", "created_at": "2026-06-01T00:03:00Z"},
+                ],
+            },
+            {
+                "uuid": "conv-empty",
+                "name": "Empty Chat",
+                "created_at": "2026-06-02T00:00:00Z",
+                "chat_messages": [{"uuid": "m5", "sender": "human", "text": ""}],
+            },
+        ]), encoding="utf-8")
+
+        api = PulseAPI(root)
+        created = api.create_persona({
+            "display_name": "Demo",
+            "slug": "demo",
+            "user_name": "Lena",
+        })
+        assert created["ok"] is True
+
+        preview = api.preview_conversation_import("conversations.json")
+        assert preview["ok"] is True
+        keeper_id = next(
+            item["id"] for item in preview["batch"]["conversations"]
+            if item["source_id"] == "conv-keeper"
+        )
+        empty_id = next(
+            item["id"] for item in preview["batch"]["conversations"]
+            if item["source_id"] == "conv-empty"
+        )
+
+        staged = api.stage_import("demo", preview["preview_id"], {
+            "choices": {keeper_id: "keep", empty_id: "keep"},
+            "continuation_id": keeper_id,
+            "excluded_messages": {keeper_id: [2, 3]},
+        })
+        assert staged["ok"] is True
+        assert staged["staged_conversations"] == 2
+        assert staged["staged_messages"] == 5
+        assert staged["continuation_id"] == keeper_id
+
+        db_path = root / "personas" / "demo" / "data" / "demo.db"
+        with closing(sqlite3.connect(db_path)) as conn:
+            # Quarantine guarantee: nothing staged touches live tables.
+            assert conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 0
+            assert conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 0
+            assert conn.execute("SELECT COUNT(*) FROM import_batches").fetchone()[0] == 1
+            choices = dict(conn.execute(
+                "SELECT conversation_id, choice FROM import_conversations"
+            ).fetchall())
+            assert choices[keeper_id] == "keep"
+            # Empty conversations stage as excluded even if marked keep.
+            assert choices[empty_id] == "exclude"
+            excluded = [row[0] for row in conn.execute(
+                "SELECT position FROM import_messages "
+                "WHERE conversation_id = ? AND excluded = 1 ORDER BY position",
+                (keeper_id,),
+            ).fetchall()]
+            assert excluded == [2, 3]
+
+        listed = api.list_import_batches("demo")
+        assert listed["ok"] is True
+        assert len(listed["batches"]) == 1
+        assert listed["batches"][0]["conversation_count"] == 2
+        assert listed["batches"][0]["message_count"] == 5
+        assert listed["batches"][0]["continuation_id"] == keeper_id
+
+        # Re-staging the same preview replaces rows instead of duplicating.
+        restaged = api.stage_import("demo", preview["preview_id"], {
+            "choices": {keeper_id: "keep"},
+            "continuation_id": keeper_id,
+            "excluded_messages": {},
+        })
+        assert restaged["ok"] is True
+        with closing(sqlite3.connect(db_path)) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM import_batches").fetchone()[0] == 1
+            assert conn.execute(
+                "SELECT COUNT(*) FROM import_messages WHERE excluded = 1"
+            ).fetchone()[0] == 0
+
+        # A new preview evicts the old in-memory batch...
+        other_path = root / "other.json"
+        other_path.write_text(json.dumps([
+            {
+                "uuid": "conv-other",
+                "name": "Other Chat",
+                "chat_messages": [
+                    {"uuid": "o1", "sender": "human", "text": "Different file.", "created_at": "2026-06-03T00:00:00Z"},
+                ],
+            },
+        ]), encoding="utf-8")
+        other_preview = api.preview_conversation_import("other.json")
+        assert other_preview["ok"] is True
+        expired = api.get_import_preview_conversation(preview["preview_id"], keeper_id)
+        assert expired["ok"] is False
+        assert "expired" in expired["error"].lower()
+
+        # ...and resume loads the staged batch back from the persona DB.
+        resumed = api.resume_import_batch("demo")
+        assert resumed["ok"] is True
+        assert resumed["staged"] is True
+        assert resumed["preview_id"] == preview["preview_id"]
+        assert resumed["choices"][empty_id] == "exclude"
+        assert resumed["continuation_id"] == keeper_id
+        assert resumed["batch"]["conversation_count"] == 2
+        detail = api.get_import_preview_conversation(resumed["preview_id"], keeper_id)
+        assert detail["ok"] is True
+        assert [msg["content"] for msg in detail["conversation"]["messages"]] == [
+            "Hello again.",
+            "I kept the light on.",
+            "Off-topic tangent to exclude.",
+            "Tangent reply.",
+        ]
+        assert all(msg["excluded"] is False for msg in detail["conversation"]["messages"])
+
+        # Curation updates persist without re-staging.
+        updated = api.update_import_curation("demo", resumed["preview_id"], {
+            "choices": {keeper_id: "exclude"},
+            "continuation_id": "",
+            "excluded_messages": {keeper_id: [1]},
+        })
+        assert updated["ok"] is True
+        resumed_again = api.resume_import_batch("demo", resumed["preview_id"])
+        assert resumed_again["choices"][keeper_id] == "exclude"
+        assert resumed_again["continuation_id"] == ""
+        detail = api.get_import_preview_conversation(resumed_again["preview_id"], keeper_id)
+        assert [msg["excluded"] for msg in detail["conversation"]["messages"]] == [
+            False, True, False, False,
+        ]
+
+        deleted = api.delete_import_batch("demo", resumed["preview_id"])
+        assert deleted["ok"] is True
+        assert api.list_import_batches("demo")["batches"] == []
+        with closing(sqlite3.connect(db_path)) as conn:
+            for table in ("import_batches", "import_conversations", "import_messages"):
+                assert conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
+        missing = api.delete_import_batch("demo", resumed["preview_id"])
+        assert missing["ok"] is False
+
+
 def test_gui_api_standard_provider_env_fallback():
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -1889,6 +2053,7 @@ if __name__ == "__main__":
     test_gui_api_preview_claude_import_is_dry_run()
     test_gui_api_preview_chatgpt_follows_canonical_thread()
     test_gui_api_preview_double_text_is_one_exchange()
+    test_gui_api_stage_import_quarantines_and_resumes()
     test_gui_api_standard_provider_env_fallback()
     test_gui_api_get_lantern_read_only()
     test_gui_api_lantern_update_and_dim_write_safely()
