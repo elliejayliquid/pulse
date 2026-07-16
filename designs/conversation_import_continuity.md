@@ -5,6 +5,7 @@
 **For:** Sol / Pulse GUI implementation
 **Related:** `new_persona_v1.md`, `continuity_section.md`, `journal_search_mirror.md`, `Implemented/claude_legacy_implementation_plan.md`
 **Reviewed:** 2026-07-04 (Debugger) — architecture confirmed sound; additive gaps folded in below (identity sources, public inbound format, drop-zone trust copy, parser fixtures, preview cache eviction).
+**Updated:** 2026-07-16 (Lena + Sol + Debugger) — three-layer model (staging → archive → live) formalized, continuation semantics decided, legacy.db migration decided. See "Three Layers: Staging, Archive, Live". Same day: enrichment tier ladder decided (Tier 0 keyword / Tier 1 local embeddings / Tier 2 LLM summaries), see "Enrichment Tiers".
 
 ## Goal
 
@@ -75,13 +76,25 @@ Added 2026-07-15, later (validated against a real 62 MB ChatGPT export):
 - Empty companion text turns (tool-dispatch wrappers, thinking-flow segments the ChatGPT UI never displayed) are counted (`empty_companion_turns`) instead of shown as red skipped placeholders. Real-export effect: 1,435 red placeholders → 4; review-flagged conversations 270 → 7.
 - Per-message `model_slug` now populates the message model chip.
 
+Added 2026-07-16 (Phase 3a staging → archive, Sol):
+
+- `core/legacy_archive.py` adds the persona-local `legacy_sessions`, `legacy_messages`, `legacy_summaries`, FTS5 index/triggers, and one-time migration ledger.
+- Archive rows preserve source IDs, ordered message positions, timestamps, model metadata, attachment markers, import-batch provenance, and the future live-session link.
+- `prepare_import_archive` computes the confirmation summary from persisted staging rows; `archive_import_batch` copies only kept, sanitized dialogue into the write-once archive.
+- The existing import window contains the temporary confirmation state for "Add kept chats to archive"; it disappears after confirmation or cancellation rather than becoming a persistent status panel. No new modal was added.
+- Archived staged conversations show an `Archived` pill and a contextual `Remove from archive` action on that conversation card; their Phase 3a import choices are locked until removal, while the staging rows remain intact for re-review and re-add. `Continue` will be unlocked separately with the Phase 3b single-continuation flow.
+- Archive correction is refused once an archive row has a `live_session_id`; undoing a living-continuation boundary requires a future, broader workflow rather than silently deleting provenance.
+- The file-picker area shows the local-privacy promise before import.
+- A configured or adjacent developer-era `legacy.db` migrates once into the persona DB, including existing summaries. The memory skill's legacy tools now read the persona DB archive.
+- Phase 3a does not write live `sessions`/`messages`, memories, journal entries, identity, or prompt context.
+
 Known rough edges:
 
-- Duplicate resend collapse is preview-only; future commit sanitation should decide whether to store one copy, all copies, or an explicit retry-cluster record.
+- Duplicate resend collapse remains preview-only; Phase 3a preserves the original ordered copies in the archive. Phase 3b continuation-seed sanitation may collapse retry clusters for model-visible context.
 - Attachment placeholder detection is implemented for Claude file metadata and ChatGPT image parts; other platform export shapes still need real samples and source-specific handling.
 - Messages with an unrecognized role but non-empty text are dropped without a dedicated skip counter (Claude and OpenRouter paths). Surfacing them needs a small "assign as human/companion" UI decision first.
 - Review issues are shown and navigable, but future import commit should define which issue types block living-context landing.
-- Commit sanitation (Phase 3) must still drop true empty messages and excluded-at-staging content even if curation rows say keep.
+- Phase 3a sanitation drops true empty messages and excluded-at-staging content even if a surrounding conversation remains kept.
 - Deleting a staged batch has confirm-but-no-undo; the export file remains the recovery path. Revisit if staging ever holds curation work that can't be redone cheaply.
 - Staged batches resume fully into memory; fine for realistic exports, but a future lazy-load path could read conversation details straight from the staging tables.
 
@@ -123,7 +136,7 @@ Success criteria:
 
 Default product direction: use one database per persona for imported archive, staging, summaries, embeddings, and live conversation data.
 
-`legacy.db` can remain useful for personal migrations, old scripts, and developer workflows, but it should not be the normal-user architecture.
+`legacy.db` is a developer-era artifact. Decided 2026-07-16: its contents get a one-time migration into the persona DB, and the memory skill's legacy search tools point at the persona DB from then on. No dual-read fallback, no second source of truth.
 
 Reasons:
 
@@ -149,6 +162,46 @@ Possible future tables:
 - `import_summaries`: session, chunk, landing, and candidate-memory summaries with provenance.
 
 These names are directional, not final schema.
+
+## Three Layers: Staging, Archive, Live
+
+Decided 2026-07-16 (Lena + Sol + Debugger). Earlier drafts used "commit" for two different boundaries; there are three layers with different rights:
+
+| Layer | Tables | Meaning |
+|---|---|---|
+| Staging | `import_batches`, `import_conversations`, `import_messages` | Mutable review workspace; never model-visible |
+| Archive | `legacy_sessions`, `legacy_messages` | Accepted, sanitized history; searchable but not active context |
+| Live | `sessions`, `messages` | The current conversation and prompt history |
+
+User-facing language never says "commit". The three actions are:
+
+- **Stage this import** — parse the export into staging; review, exclude, and curate indefinitely.
+- **Add kept chats to archive** — copy accepted, sanitized conversations into the archive.
+- **Continue from this chat** — promote one archived conversation into a live landing session.
+
+### Staging → archive
+
+- Only accepted, sanitized conversations cross the boundary. Hidden reasoning, excluded exchanges, true empties, and internal tool traffic never enter archive tables.
+- Useful attachment placeholders are preserved in the faithful archive and surrounding drill-down context, but generic placeholder text is filtered out of direct raw keyword-search hits.
+- Excluded and empty messages stay in staging — they are not deleted — so re-review remains possible.
+- Archive rows are **write-once per conversation**, protected by a unique `(source, source_conversation_id)` key. Correcting a curation mistake after archiving means delete-from-archive + add-again from staging. There is deliberately no two-way sync between layers.
+- The delete-and-re-add correction path is conversation-level and confirmation-guarded. It deletes archive messages and derived summaries, never the staging copy or source export, and is unavailable after that archive row has produced a live continuation.
+- The confirmation step is a state inside the existing import window, not a new modal. The backend computes the summary from staged rows: conversations and messages to be added, exclusions, internals to be omitted, and the selected continuation candidate if any.
+- The archive schema is designed fresh rather than copied from the old `scripts/import_chatgpt.py` minimal schema: provenance fields, stable source IDs, ordered positions, model/timestamp metadata, attachment markers, and import-batch linkage.
+- Putting something in `legacy_messages` does not make the companion "remember" it in every prompt. The archive is historical background reachable through search tools and enrichment.
+
+### Archive → live ("Continue from this chat")
+
+- **Continuation is optional.** Adding chats to the archive with no continuation selected is a complete, valid outcome — "make my history searchable" is a legitimate goal on its own.
+- **One continuation at a time.** The UI uses single-select (radio) semantics for the continuation candidate — never checkboxes. Nothing is lost by this: any archived conversation can be continued later, from the archive, with the same action. "One per turn", not "one forever".
+- User-facing promise, verbatim: *"Your current session will be summarized and closed, and you'll continue your conversation from the selected thread."*
+- Mechanically this reuses the existing conversation lifecycle (summarize → JSONL archive → memory → close), invoked explicitly instead of by budget pressure. If the current session is fresh or empty, the summary is skipped silently — no empty memory entries.
+- The landing session is built from the sanitized continuation seed per the Landing Strategy section: bridge summary plus recent clean tail for long conversations, never a raw copy of thousands of messages.
+- The archive row records which live session was created from it; the legacy copy remains intact.
+
+### Enrichment reads from the archive
+
+Background summarization, embeddings, and RAG import read from `legacy_messages`, not from the raw export file. The archive is the canonical sanitized source, so curation decisions (exclusions, sanitation) automatically apply to enrichment — one pipeline, no drift between what the user reviewed and what the models see.
 
 ## Normalized Import Model
 
@@ -398,6 +451,37 @@ them Pulse sees the whole companion, not just the chat log.
 
 There should be multiple summary types, not one generic summary.
 
+### Enrichment Tiers
+
+Decided 2026-07-16. Background enrichment is the productized version of the RAG prototype (`scripts/rag_import.py`): session + chunk summaries plus embeddings over the archive. But enrichment is two different jobs with very different costs, and the design must serve people who cannot run a local model:
+
+| Tier | What | Requires | Cost |
+|---|---|---|---|
+| 0 | Keyword search (FTS5) | Nothing | Free, instant after archive add |
+| 1 | Embeddings of raw messages/exchange chunks | Nothing (MiniLM on CPU, ships with Pulse) | Free, local |
+| 2 | LLM summaries (session + chunk) + their embeddings | Local LLM **or** API provider | Local compute or API credits |
+
+Key facts behind the ladder:
+
+- The embedding model (all-MiniLM-L6-v2) is the same one `core/context.py` already uses: CPU-only, small, no GPU, no API, no llama-server. Semantic search over raw archive messages works for **everyone**, locally and privately, out of the box.
+- MiniLM's 256-token cap means Tier 1 embeds exchange-level chunks, aligned with the passive recall design's chunking approach — not whole conversations.
+- Only summaries (Tier 2) need an LLM. A user without a local model either lives on Tier 1 (honest, workable semantic recall) or opts into Tier 2 via an API provider.
+
+Defaults:
+
+- **Tier 0 and Tier 1 are on by default** — free, local, nothing to ask the user.
+- **Tier 2 is explicit opt-in** with provider selection and a cost estimate shown before running.
+
+Privacy consequence (this is the "unless" in the drop-zone promise):
+
+- The drop-zone copy promises "everything stays on this computer unless you later choose an enrichment provider." API-based Tier 2 is exactly that exception. At the moment of provider selection — not in fine print — the UI must say plainly: "Your chat text will be sent to <provider> to generate summaries."
+- Tier 0 and Tier 1 never send anything anywhere and fall fully under the promise.
+
+Productization note:
+
+- `rag_import.py` already speaks an OpenAI-compatible endpoint (`--endpoint` CLI flag). Productizing Tier 2 means wiring it to the existing provider abstraction (OpenRouter / Anthropic / OpenAI clients) instead of a CLI flag, and reading from the persona-DB archive (`legacy_messages`) per "Three Layers" — the prototype predates that decision and must be retargeted before it runs.
+- Cheap API models (DeepSeek/Haiku-class) are adequate for archive summaries; on a realistic archive (hundreds of sessions) the cost is on the order of a couple of dollars. Landing bridge summaries still prefer the companion model per "Landing Bridge Summary" below.
+
 ### Archive Summary
 
 Used for search and orientation across old conversations.
@@ -457,14 +541,25 @@ User-facing copy should make the tradeoff clear:
 Your chats are imported. Keyword search works now. Deeper recall improves as Pulse summarizes and embeds the archive in the background. This can take time and may use API credits depending on the model you choose.
 ```
 
-Settings:
+Settings (these map onto the Enrichment Tiers above — Tier 0/1 always on, this list configures Tier 2):
 
-- Off: import raw archive only; keyword search remains available.
+- Off: keyword search (Tier 0) and local embedding search (Tier 1) remain available; no summaries.
 - Local/private: use local model for summaries where configured.
-- Cheap API: use a cheaper configured model for backfill.
-- Companion model: use the same model as the companion for higher fidelity.
+- Cheap API: use a cheaper configured model for backfill. Requires the explicit "your chat text will be sent to <provider>" disclosure at selection time.
+- Companion model: use the same model as the companion for higher fidelity. Same disclosure if it is an API model.
 
 DeepSeek or similar cheap models can be recommended as examples in docs or hints, but the UI should stay provider-neutral and show whatever providers Pulse actually supports.
+
+Enrichment settings window:
+
+Enrichment needs its own small settings surface — a dedicated panel/window opened from the Continuity > Import area (following the STYLE_GUIDE modal conventions), not settings scattered across the import flow. It holds:
+
+- Tier 2 mode selection (Off / Local / Cheap API / Companion model) with provider + model pickers where relevant.
+- The privacy disclosure line, shown at the moment an API option is selected.
+- Cost estimate for the pending archive before starting.
+- Pause/resume and the progress detail that does not fit the compact progress row.
+
+The compact progress row stays in the import panel; the window is where choices are made and details live.
 
 ## Search Behavior
 
@@ -591,19 +686,37 @@ Status (2026-07-15):
 - Issue locations are recomputed on load rather than stored; revisit only if recompute cost ever matters.
 - Commit sanitation itself is Phase 3 work.
 
-### Phase 3: Commit and Landing
+### Phase 3a: Staging → Archive
 
-- Commit selected archive conversations.
-- Create active landing session from the selected continuation conversation.
+- Define the `legacy_sessions`/`legacy_messages` archive schema and sanitation rules (see "Three Layers").
+- Implement "Add kept chats to archive" with a backend-computed confirmation summary inside the existing import window.
+- Enforce write-once semantics and the unique `(source, source_conversation_id)` key; delete-and-re-add is the correction path.
+- One-time migration of existing `legacy.db` content into the persona DB; point the memory skill's legacy tools at the persona DB.
+- No live `sessions`/`messages` writes in this phase.
+- **Sign-off gate:** Phase 3b does not start until 3a is reviewed.
+
+Status (2026-07-16):
+
+- Archive schema, write-once source key, FTS maintenance, backend confirmation summary, GUI confirmation state, sanitation, standalone `legacy.db` migration, and memory-skill retargeting exist.
+- Conversation-level correction exists: selected archived chats can be removed, re-reviewed in staging, and added again; rows linked to a live session are protected.
+- Automated regression coverage verifies excluded rows stay out, archive search sees added text, repeated archive attempts do not duplicate conversations, legacy summaries migrate, and live tables remain untouched.
+- Awaiting manual GUI sign-off before Phase 3b.
+
+### Phase 3b: Archive → Live Continuation
+
+- "Continue from this chat": summarize and close the current session (skip silently if empty), then create the landing session from the sanitized continuation seed.
 - Generate or request a landing bridge summary when needed.
-- Add backup-before-commit.
+- Enforce single-select (radio) continuation semantics in the UI.
+- Record the created live session on the archive row.
+- Add backup-before-continuation.
 
 ### Phase 4: Background Enrichment
 
 - Add import job queue.
-- Add summarization provider selection.
-- Add chunk/session summary generation.
-- Add embeddings.
+- Tier 1 first: local exchange-chunk embeddings over `legacy_messages`, on by default, no configuration required.
+- Tier 2 opt-in: summarization provider selection via the existing provider abstraction (retarget `rag_import.py` logic at the persona-DB archive).
+- Add chunk/session summary generation and summary embeddings.
+- Add the enrichment settings window (mode, provider, disclosure, cost estimate).
 - Add progress UI and pause/resume.
 
 ### Phase 5: Search and Drill-Down
@@ -634,28 +747,20 @@ or dies long-term.
 ## Open Questions
 
 - Which platforms expose identity material (saved memories, custom/project instructions) in their exports, and where should the identity lane surface in the New Persona flow?
-- Should import artifacts be stored as files, SQLite rows, or both?
 - What exact threshold should trigger windowed transcript viewing?
 - Should issue navigation be exchange-index based, message-index based, or both?
 - How reliably can each platform expose attachment-only messages?
-- Should attachment placeholders be imported into archive search, continuation seed, or only the raw normalized artifact?
+- Which attachment placeholders are useful enough to retain in a Phase 3b continuation seed, versus archive/drill-down context only?
 - Should curation exclude exact messages, exchange groups, or both after the exchange-level v1?
 - Should background enrichment run only while the GUI is open, or should the engine process jobs on startup?
-- How should imported archive search be exposed to companions: existing memory skill, a dedicated archive tool, or both?
 - What is the smallest useful Grok parser once we have a real export sample?
 - What parts of the importer, if any, should be published as open source versus kept as shipped Pulse product code?
 
-## Next Practical GUI Target
+## Next Practical Slice (2026-07-16)
 
-Make the existing preview usable for large and messy conversations.
+Phase 2 staging is live; the previous "minimum next slice" is done. The revised slice:
 
-Minimum next slice:
-
-- Decide the import artifact storage shape: SQLite tables, files, or both.
-- Persist preview curation choices in staging rather than frontend memory.
-- Define commit sanitation for empty-only conversations, attachment placeholders, duplicate resend clusters, and unresolved review issues.
-- Build the dry-run-to-staged-import transition without touching live `sessions` / `messages`.
-- Add a clear "preview only" versus "staged archive" distinction in GUI copy.
-- Keep all live-context mutation behind an explicit later commit/landing action.
-
-That turns the current preview frame into a durable staging surface without putting anyone's companion data at risk.
+1. Add the local-privacy sentence at the drop zone (see "The trust moment at the drop zone").
+2. Manually sign off the Phase 3a staging → archive flow and user-facing counts.
+3. Verify one real existing `legacy.db` migration, if available, before removing its old config pointer.
+4. Do not start archive → live continuation (Phase 3b) until that sign-off.

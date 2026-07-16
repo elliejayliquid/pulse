@@ -949,6 +949,101 @@ def test_gui_api_stage_import_quarantines_and_resumes():
         assert listed["batches"][0]["message_count"] == 5
         assert listed["batches"][0]["continuation_id"] == keeper_id
 
+        prepared = api.prepare_import_archive("demo", preview["preview_id"])
+        assert prepared["ok"] is True
+        assert prepared["summary"]["conversations_to_add"] == 1
+        assert prepared["summary"]["messages_to_add"] == 2
+        assert prepared["summary"]["excluded_conversations"] == 1
+        assert prepared["summary"]["excluded_messages"] == 2
+        assert prepared["summary"]["continuation"]["title"] == "Keeper Chat"
+        assert prepared["summary"]["continuation"]["will_be_added"] is True
+
+        archived = api.archive_import_batch("demo", preview["preview_id"])
+        assert archived["ok"] is True
+        assert archived["summary"]["added_conversations"] == 1
+        assert archived["summary"]["added_messages"] == 2
+        with closing(sqlite3.connect(db_path)) as conn:
+            # Phase 3a guarantee: archive add still never touches live tables.
+            assert conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 0
+            assert conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 0
+            session = conn.execute(
+                "SELECT source, source_conversation_id, import_batch_id, title, message_count, live_session_id "
+                "FROM legacy_sessions"
+            ).fetchone()
+            assert session == (
+                "claude",
+                "conv-keeper",
+                preview["preview_id"],
+                "Keeper Chat",
+                2,
+                "",
+            )
+            messages = conn.execute(
+                "SELECT position, source_message_id, role, content, attachment_placeholder "
+                "FROM legacy_messages ORDER BY position"
+            ).fetchall()
+            assert messages == [
+                (0, "m1", "user", "Hello again.", 0),
+                (1, "m2", "assistant", "I kept the light on.", 0),
+            ]
+            assert conn.execute(
+                "SELECT COUNT(*) FROM legacy_messages_fts WHERE legacy_messages_fts MATCH 'light'"
+            ).fetchone()[0] == 1
+
+        # Archive conversations are write-once by source + source ID.
+        archived_again = api.archive_import_batch("demo", preview["preview_id"])
+        assert archived_again["ok"] is True
+        assert archived_again["summary"]["added_conversations"] == 0
+        assert archived_again["summary"]["already_archived_conversations"] == 1
+
+        status = api.get_import_archive_status("demo", preview["preview_id"])
+        assert status["ok"] is True
+        assert status["conversations"][keeper_id]["archived"] is True
+        assert status["conversations"][keeper_id]["can_remove"] is True
+        archive_id = status["conversations"][keeper_id]["archive_id"]
+        with closing(sqlite3.connect(db_path)) as conn:
+            conn.execute(
+                "INSERT INTO legacy_summaries(session_id, summary_text) VALUES (?, ?)",
+                (archive_id, "Temporary archive summary."),
+            )
+            conn.execute(
+                "UPDATE legacy_sessions SET live_session_id = ? WHERE id = ?",
+                ("live-session", archive_id),
+            )
+            conn.commit()
+        protected = api.remove_import_archive_conversation(
+            "demo", preview["preview_id"], keeper_id
+        )
+        assert protected["ok"] is False
+        assert "live session" in protected["error"]
+
+        with closing(sqlite3.connect(db_path)) as conn:
+            conn.execute(
+                "UPDATE legacy_sessions SET live_session_id = '' WHERE id = ?",
+                (archive_id,),
+            )
+            conn.commit()
+        removed = api.remove_import_archive_conversation(
+            "demo", preview["preview_id"], keeper_id
+        )
+        assert removed["ok"] is True
+        assert removed["removed_messages"] == 2
+        assert removed["removed_summaries"] == 1
+        with closing(sqlite3.connect(db_path)) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM legacy_sessions").fetchone()[0] == 0
+            assert conn.execute("SELECT COUNT(*) FROM legacy_messages").fetchone()[0] == 0
+            assert conn.execute("SELECT COUNT(*) FROM legacy_summaries").fetchone()[0] == 0
+            # Correction never removes the durable staged review copy.
+            assert conn.execute("SELECT COUNT(*) FROM import_conversations").fetchone()[0] == 2
+            assert conn.execute("SELECT COUNT(*) FROM import_messages").fetchone()[0] == 5
+        status_after_remove = api.get_import_archive_status("demo", preview["preview_id"])
+        assert status_after_remove["conversations"][keeper_id]["archived"] is False
+
+        readded = api.archive_import_batch("demo", preview["preview_id"])
+        assert readded["ok"] is True
+        assert readded["summary"]["added_conversations"] == 1
+        assert readded["summary"]["added_messages"] == 2
+
         # Re-staging the same preview replaces rows instead of duplicating.
         restaged = api.stage_import("demo", preview["preview_id"], {
             "choices": {keeper_id: "keep"},
@@ -1020,6 +1115,145 @@ def test_gui_api_stage_import_quarantines_and_resumes():
                 assert conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
         missing = api.delete_import_batch("demo", resumed["preview_id"])
         assert missing["ok"] is False
+
+
+def test_gui_api_archive_migrates_standalone_legacy_db_once():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        template_dir = root / "personas" / "_template"
+        (template_dir / "data").mkdir(parents=True)
+        (root / "logs").mkdir()
+        (root / "config.yaml").write_text(
+            "provider:\n  type: local\npaths:\n  legacy_db: legacy.db\n",
+            encoding="utf-8",
+        )
+        (root / "persona.yaml").write_text("name: Base\nuser_name: User\n", encoding="utf-8")
+        (template_dir / "config.yaml").write_text("", encoding="utf-8")
+        (template_dir / "persona.yaml").write_text(
+            "name: Your Persona Name\nuser_name: Your Name\nsystem_prompt: Hi.\n",
+            encoding="utf-8",
+        )
+
+        legacy_path = root / "legacy.db"
+        with closing(sqlite3.connect(legacy_path)) as conn:
+            conn.executescript("""
+                CREATE TABLE legacy_sessions (
+                    id TEXT PRIMARY KEY,
+                    title TEXT,
+                    source TEXT,
+                    created_at TEXT,
+                    message_count INTEGER
+                );
+                CREATE TABLE legacy_messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT,
+                    role TEXT,
+                    content TEXT,
+                    timestamp TEXT
+                );
+                CREATE TABLE legacy_summaries (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT,
+                    summary_text TEXT,
+                    summary_embedding BLOB,
+                    chunk_index INTEGER,
+                    first_msg_id INTEGER,
+                    last_msg_id INTEGER,
+                    is_topic_boundary INTEGER
+                );
+            """)
+            conn.execute(
+                "INSERT INTO legacy_sessions VALUES (?, ?, ?, ?, ?)",
+                ("chatgpt:7", "Old Archive Chat", "chatgpt", "2025-01-01", 2),
+            )
+            first = conn.execute(
+                "INSERT INTO legacy_messages(session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
+                ("chatgpt:7", "user", "Old archive question.", "2025-01-01"),
+            ).lastrowid
+            last = conn.execute(
+                "INSERT INTO legacy_messages(session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
+                ("chatgpt:7", "assistant", "Old archive answer.", "2025-01-01"),
+            ).lastrowid
+            conn.execute(
+                "INSERT INTO legacy_summaries "
+                "(session_id, summary_text, chunk_index, first_msg_id, last_msg_id, is_topic_boundary) "
+                "VALUES (?, ?, 0, ?, ?, 0)",
+                ("chatgpt:7", "An old archived exchange.", first, last),
+            )
+            conn.commit()
+
+        export_path = root / "new.json"
+        export_path.write_text(json.dumps([{
+            "uuid": "new-chat",
+            "name": "New Chat",
+            "chat_messages": [
+                {"uuid": "new-1", "sender": "human", "text": "New question."},
+                {"uuid": "new-2", "sender": "assistant", "text": "New answer."},
+            ],
+        }]), encoding="utf-8")
+
+        api = PulseAPI(root)
+        assert api.create_persona({
+            "display_name": "Demo",
+            "slug": "demo",
+            "user_name": "Lena",
+        })["ok"] is True
+        preview = api.preview_conversation_import("new.json")
+        staged = api.stage_import("demo", preview["preview_id"], {})
+        assert staged["ok"] is True
+
+        prepared = api.prepare_import_archive("demo", preview["preview_id"])
+        assert prepared["legacy_migration"]["pending"] is True
+        assert prepared["legacy_migration"]["session_count"] == 1
+        archived = api.archive_import_batch("demo", preview["preview_id"])
+        assert archived["ok"] is True
+        assert archived["legacy_migration"]["migrated"] is True
+        assert archived["legacy_migration"]["session_count"] == 1
+
+        db_path = root / "personas" / "demo" / "data" / "demo.db"
+        with closing(sqlite3.connect(db_path)) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM legacy_sessions").fetchone()[0] == 2
+            assert conn.execute("SELECT COUNT(*) FROM legacy_messages").fetchone()[0] == 4
+            migrated_summary = conn.execute(
+                "SELECT s.title, ls.summary_text, ls.first_msg_id, ls.last_msg_id "
+                "FROM legacy_summaries ls JOIN legacy_sessions s ON s.id = ls.session_id"
+            ).fetchone()
+            assert migrated_summary[0] == "Old Archive Chat"
+            assert migrated_summary[1] == "An old archived exchange."
+            assert migrated_summary[2] is not None
+            assert migrated_summary[3] is not None
+            assert conn.execute(
+                "SELECT COUNT(*) FROM legacy_archive_migrations"
+            ).fetchone()[0] == 1
+
+        # The same standalone DB is never copied a second time.
+        archived_again = api.archive_import_batch("demo", preview["preview_id"])
+        assert archived_again["legacy_migration"]["reason"] == "already_migrated"
+        prepared_again = api.prepare_import_archive("demo", preview["preview_id"])
+        assert prepared_again["legacy_migration"]["pending"] is False
+        assert prepared_again["legacy_migration"]["already_migrated"] is True
+        with closing(sqlite3.connect(db_path)) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM legacy_sessions").fetchone()[0] == 2
+
+        from core.db import PulseDatabase
+        from skills.memory import MemorySkill
+        persona_db = PulseDatabase(db_path)
+        try:
+            memory = MemorySkill({
+                "_db": persona_db,
+                "_shared_db": persona_db,
+                "paths": {"memories": str(root / "memories")},
+            })
+            tool_names = {
+                tool["function"]["name"] for tool in memory.get_tools()
+            }
+            assert {"search_legacy", "list_legacy_sessions", "get_legacy_context"}.issubset(tool_names)
+            assert "Old archive question" in memory.execute(
+                "search_legacy",
+                {"query": "question", "limit": 5},
+            )
+        finally:
+            persona_db.close()
 
 
 def test_gui_api_standard_provider_env_fallback():
@@ -2078,6 +2312,7 @@ if __name__ == "__main__":
     test_gui_api_preview_chatgpt_follows_canonical_thread()
     test_gui_api_preview_double_text_is_one_exchange()
     test_gui_api_stage_import_quarantines_and_resumes()
+    test_gui_api_archive_migrates_standalone_legacy_db_once()
     test_gui_api_standard_provider_env_fallback()
     test_gui_api_get_lantern_read_only()
     test_gui_api_lantern_update_and_dim_write_safely()

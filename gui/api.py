@@ -26,6 +26,15 @@ from typing import Any
 import yaml
 
 from core import yaml_loader
+from core.legacy_archive import (
+    archive_batch_summary,
+    archive_batch_status,
+    archive_staged_batch,
+    ensure_legacy_archive_tables,
+    legacy_migration_preview,
+    migrate_legacy_database,
+    remove_archived_conversation,
+)
 from gui.backup import BackupManager
 from gui.config_editor import ConfigEditor
 from gui.import_preview import preview_import_file
@@ -597,6 +606,123 @@ class PulseAPI:
                 entry.pop("staged_persona", None)
             return {"ok": True}
         except (OSError, sqlite3.Error) as e:
+            return {"ok": False, "error": str(e)}
+
+    def prepare_import_archive(self, persona: str, batch_id: str) -> dict:
+        """Compute the staging-to-archive confirmation without archiving rows."""
+        validation = self._validate_persona_for_db_write(persona)
+        if not validation["ok"]:
+            return validation
+        try:
+            db_path = self._persona_database_path(persona)
+            if not db_path.is_file():
+                return {"ok": False, "error": "Staged import not found."}
+            conn = _connect_sqlite(db_path)
+            try:
+                summary = archive_batch_summary(conn, str(batch_id or ""))
+                migration = legacy_migration_preview(
+                    conn,
+                    self._configured_legacy_database_path(persona),
+                )
+                conn.commit()  # Archive schema setup only; staged/live rows are unchanged.
+            finally:
+                conn.close()
+            return {"ok": True, "summary": summary, "legacy_migration": migration}
+        except (ValueError, OSError, sqlite3.Error) as e:
+            return {"ok": False, "error": str(e)}
+
+    def archive_import_batch(self, persona: str, batch_id: str) -> dict:
+        """Add kept staged chats to the persona-local searchable archive.
+
+        This is Phase 3a only: it writes legacy_* archive tables and never
+        touches live sessions/messages, memories, journal entries, or context.
+        """
+        validation = self._validate_persona_for_db_write(persona)
+        if not validation["ok"]:
+            return validation
+        try:
+            db_path = self._persona_database_path(persona)
+            if not db_path.is_file():
+                return {"ok": False, "error": "Staged import not found."}
+            conn = _connect_sqlite(db_path)
+            try:
+                ensure_legacy_archive_tables(conn)
+                conn.commit()
+                conn.execute("SAVEPOINT legacy_archive_migration")
+                try:
+                    migration = migrate_legacy_database(
+                        conn,
+                        self._configured_legacy_database_path(persona),
+                        ensure_schema=False,
+                    )
+                    conn.execute("RELEASE SAVEPOINT legacy_archive_migration")
+                except (OSError, sqlite3.Error) as migration_error:
+                    conn.execute("ROLLBACK TO SAVEPOINT legacy_archive_migration")
+                    conn.execute("RELEASE SAVEPOINT legacy_archive_migration")
+                    migration = {
+                        "migrated": False,
+                        "reason": "error",
+                        "error": str(migration_error),
+                    }
+                result = archive_staged_batch(conn, str(batch_id or ""))
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+            return {"ok": True, "summary": result, "legacy_migration": migration}
+        except (ValueError, OSError, sqlite3.Error) as e:
+            return {"ok": False, "error": str(e)}
+
+    def get_import_archive_status(self, persona: str, batch_id: str) -> dict:
+        """Return archive state for every conversation in a staged batch."""
+        validation = self._validate_persona_for_db_write(persona)
+        if not validation["ok"]:
+            return validation
+        try:
+            db_path = self._persona_database_path(persona)
+            if not db_path.is_file():
+                return {"ok": False, "error": "Staged import not found."}
+            conn = _connect_sqlite(db_path)
+            try:
+                conversations = archive_batch_status(conn, str(batch_id or ""))
+                conn.commit()
+            finally:
+                conn.close()
+            return {"ok": True, "conversations": conversations}
+        except (ValueError, OSError, sqlite3.Error) as e:
+            return {"ok": False, "error": str(e)}
+
+    def remove_import_archive_conversation(
+        self,
+        persona: str,
+        batch_id: str,
+        conversation_id: str,
+    ) -> dict:
+        """Remove one archive copy while preserving the staged review rows."""
+        validation = self._validate_persona_for_db_write(persona)
+        if not validation["ok"]:
+            return validation
+        try:
+            db_path = self._persona_database_path(persona)
+            if not db_path.is_file():
+                return {"ok": False, "error": "Staged import not found."}
+            conn = _connect_sqlite(db_path)
+            try:
+                result = remove_archived_conversation(
+                    conn,
+                    str(batch_id or ""),
+                    str(conversation_id or ""),
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+            return {"ok": True, **result}
+        except (ValueError, OSError, sqlite3.Error) as e:
             return {"ok": False, "error": str(e)}
 
     def _clean_new_persona_fields(self, fields: Any) -> dict[str, str]:
@@ -2846,6 +2972,17 @@ class PulseAPI:
         if not db_path.is_absolute():
             db_path = (self.root / db_path).resolve()
         return db_path
+
+    def _configured_legacy_database_path(self, persona: str) -> Path | None:
+        config = self._merged_config_for(persona)
+        raw = str(config.get("paths", {}).get("legacy_db") or "").strip()
+        if raw:
+            path = Path(raw)
+            if not path.is_absolute():
+                path = (self.root / path).resolve()
+            return path if path.is_file() else None
+        fallback = self._persona_data_dir(persona) / "legacy.db"
+        return fallback.resolve() if fallback.is_file() else None
 
     def _memory_journal_db_path(self, persona: str) -> Path:
         """DB that holds this persona's memories/journal entries.

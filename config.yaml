@@ -129,8 +129,8 @@ paths:
   # and the local latest.md always stay under {journal}, never shared.
   # journal_entries: "D:/Claude/memories/journal/entries"
 
-  # Optional: ChatGPT conversation archive
-  # Uncomment and set to enable search_legacy, list_legacy_sessions, get_legacy_context tools.
+  # Optional one-time source for migrating a developer-era standalone archive.
+  # New imports and archive search use this persona's main database.
   # legacy_db: "path/to/legacy.db"
   tasks: "data/tasks.json"
   dev_journal: "data/dev_journal.json"

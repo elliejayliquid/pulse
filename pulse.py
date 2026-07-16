@@ -20,6 +20,7 @@ import argparse
 import logging
 import os
 import signal
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -240,8 +241,33 @@ async def main(config_path: str, persona_name: str | None = None):
     db_path = config.get("paths", {}).get("database")
     if db_path:
         from core.db import PulseDatabase
+        from core.legacy_archive import (
+            ensure_legacy_archive_tables,
+            migrate_legacy_database,
+        )
         db = PulseDatabase(Path(db_path))
         config["_db"] = db
+        ensure_legacy_archive_tables(db.conn)
+        db.conn.commit()
+        legacy_path_value = str(config.get("paths", {}).get("legacy_db") or "").strip()
+        legacy_path = Path(legacy_path_value) if legacy_path_value else Path(db_path).with_name("legacy.db")
+        if not legacy_path.is_absolute():
+            legacy_path = (pulse_root / legacy_path).resolve()
+        try:
+            migration = migrate_legacy_database(
+                db.conn,
+                legacy_path if legacy_path.is_file() else None,
+            )
+            db.conn.commit()
+            if migration.get("migrated"):
+                logger.info(
+                    "Migrated standalone legacy archive into persona DB: "
+                    f"{migration['session_count']} sessions, "
+                    f"{migration['message_count']} messages"
+                )
+        except (OSError, sqlite3.Error) as exc:
+            db.conn.rollback()
+            logger.warning(f"Could not migrate standalone conversation archive: {exc}")
 
         # Shared database for Claude personas (memories/journals)
         shared_db_path = config.get("paths", {}).get("shared_database")

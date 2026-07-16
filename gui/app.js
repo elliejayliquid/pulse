@@ -67,6 +67,12 @@ const state = {
     issueCursors: {},
     pendingIssueId: "",
     detail: null,
+    staged: false,
+    batchId: "",
+    stagedAt: "",
+    archiveConfirm: null,
+    archiveStatus: {},
+    checkingSavedImport: false,
   },
   taskBaselines: {},
   taskDrafts: [],
@@ -217,6 +223,10 @@ const fallbackApi = {
   async resume_import_batch() { return { ok: false, error: "Run through pywebview to resume staged imports." }; },
   async update_import_curation() { return { ok: false, error: "Run through pywebview to save import choices." }; },
   async delete_import_batch() { return { ok: false, error: "Run through pywebview to manage staged imports." }; },
+  async prepare_import_archive() { return { ok: false, error: "Run through pywebview to review archive additions." }; },
+  async archive_import_batch() { return { ok: false, error: "Run through pywebview to add chats to the archive." }; },
+  async get_import_archive_status() { return { ok: false, error: "Run through pywebview to inspect the archive." }; },
+  async remove_import_archive_conversation() { return { ok: false, error: "Run through pywebview to correct the archive." }; },
   async list_reminders() { return { ok: false, error: "Run through pywebview to manage reminders." }; },
   async add_reminder() { return { ok: false, error: "Run through pywebview to manage reminders." }; },
   async delete_reminder() { return { ok: false, error: "Run through pywebview to manage reminders." }; },
@@ -3605,16 +3615,35 @@ function openImportDialog(initialPath = "") {
   renderImportPreview();
   if (!initialPath && !state.importPreview.batch) {
     void resumeLatestStagedImport();
+  } else {
+    setTimeout(() => el("importPath").focus(), 0);
   }
-  setTimeout(() => el("importPath").focus(), 0);
 }
 
 async function resumeLatestStagedImport() {
   const persona = state.current?.name;
   if (!persona || persona === "__base__") return;
-  const listed = await api().list_import_batches(persona);
-  if (!listed?.ok || !listed.batches?.length) return;
-  await resumeStagedImport(listed.batches[0].id);
+  state.importPreview.checkingSavedImport = true;
+  renderImportPreview();
+  setImportNotice("Checking for a saved import review...");
+  try {
+    const listed = await api().list_import_batches(persona);
+    if (!listed?.ok) {
+      setImportNotice(listed?.error || "Could not check for saved import reviews. You can still choose an export file.");
+      return;
+    }
+    if (!listed.batches?.length) {
+      setImportNotice("No saved import review found. Choose an export file to begin.");
+      return;
+    }
+    await resumeStagedImport(listed.batches[0].id);
+  } finally {
+    state.importPreview.checkingSavedImport = false;
+    renderImportPreview();
+    if (!state.importPreview.batch) {
+      setTimeout(() => el("importPath").focus(), 0);
+    }
+  }
 }
 
 async function resumeStagedImport(batchId) {
@@ -3640,10 +3669,14 @@ async function resumeStagedImport(batchId) {
     staged: true,
     batchId: result.preview_id || "",
     stagedAt: result.staged_at || "",
+    archiveConfirm: null,
+    archiveStatus: {},
+    checkingSavedImport: state.importPreview.checkingSavedImport,
   };
   el("importPath").value = state.importPreview.path;
+  await refreshImportArchiveStatus();
   renderImportPreview();
-  setImportNotice("Staged archive loaded. Keep/exclude choices save automatically now.");
+  setImportNotice("Staged import loaded. Keep/exclude choices save automatically now.");
   if (state.importPreview.selectedId) {
     await selectImportConversation(state.importPreview.selectedId);
   }
@@ -3686,6 +3719,9 @@ function resetImportPreviewState() {
     staged: false,
     batchId: "",
     stagedAt: "",
+    archiveConfirm: null,
+    archiveStatus: {},
+    checkingSavedImport: false,
   };
 }
 
@@ -3729,6 +3765,9 @@ async function previewImportPath(path = "") {
     staged: false,
     batchId: "",
     stagedAt: "",
+    archiveConfirm: null,
+    archiveStatus: {},
+    checkingSavedImport: false,
   };
   el("importPath").value = state.importPreview.path;
   renderImportPreview();
@@ -3737,7 +3776,7 @@ async function previewImportPath(path = "") {
   const skippedCount = Number(state.importPreview.batch?.skipped_message_count || 0);
   setImportNotice(skippedCount
     ? "Preview loaded. Red conversations contain empty or skipped messages you can review in the transcript."
-    : "Preview loaded. Stage this import to keep it and your choices in the persona archive.");
+    : "Preview loaded. Stage this import to keep it and your choices for continued review.");
   if (state.importPreview.selectedId) {
     await selectImportConversation(state.importPreview.selectedId);
   }
@@ -3768,7 +3807,7 @@ async function stageCurrentImport() {
   const preview = state.importPreview;
   if (!persona || persona === "__base__" || !preview.previewId || !preview.batch) return;
   el("importStageBtn").disabled = true;
-  setImportNotice("Staging import into the persona archive...");
+  setImportNotice("Saving import into the persona's staging area...");
   const result = await api().stage_import(persona, preview.previewId, importCurationPayload());
   if (!result?.ok) {
     updateImportStagedControls();
@@ -3778,10 +3817,13 @@ async function stageCurrentImport() {
   preview.staged = true;
   preview.batchId = result.batch_id || preview.previewId;
   preview.stagedAt = new Date().toISOString();
+  preview.archiveConfirm = null;
+  preview.archiveStatus = {};
+  await refreshImportArchiveStatus();
   updateImportStagedControls();
   setImportNotice(
     `Staged ${result.staged_conversations} conversation${result.staged_conversations === 1 ? "" : "s"} `
-    + `(${result.staged_messages} messages) into the persona archive. `
+    + `(${result.staged_messages} messages) for continued review. `
     + "Choices save automatically now. Nothing is live conversation context."
   );
 }
@@ -3791,7 +3833,10 @@ async function deleteStagedImport() {
   const preview = state.importPreview;
   if (!persona || persona === "__base__" || !preview.staged || !preview.batchId) return;
   const confirmed = await showConfirm(
-    "Delete the staged archive copy of this import? Your export file is not touched — you can stage it again later.",
+    "Delete staged import?",
+    "This removes the staged review copy. Your export file is not touched — you can stage it again later. Chats already added to the searchable archive are not removed.",
+    "Delete staged",
+    "danger"
   );
   if (!confirmed) return;
   const result = await api().delete_import_batch(persona, preview.batchId);
@@ -3802,42 +3847,324 @@ async function deleteStagedImport() {
   preview.staged = false;
   preview.batchId = "";
   preview.stagedAt = "";
+  preview.archiveConfirm = null;
+  preview.archiveStatus = {};
   updateImportStagedControls();
-  setImportNotice("Staged archive removed. The loaded preview is temporary again.");
+  renderImportArchiveConfirmation();
+  setImportNotice("Staged review removed. The loaded preview is temporary again.");
 }
 
 function persistImportCuration() {
+  invalidateImportArchiveConfirmation();
+  void saveImportCurationNow();
+}
+
+async function saveImportCurationNow() {
+  const persona = state.current?.name;
+  const preview = state.importPreview;
+  if (!persona || persona === "__base__" || !preview.staged || !preview.batchId) {
+    return { ok: false, error: "Stage this import before adding chats to the archive." };
+  }
+  const result = await api().update_import_curation(
+    persona,
+    preview.batchId,
+    importCurationPayload()
+  );
+  if (result && !result.ok && result.error) setImportNotice(result.error);
+  return result;
+}
+
+async function refreshImportArchiveStatus() {
+  const persona = state.current?.name;
+  const preview = state.importPreview;
+  if (!persona || persona === "__base__" || !preview.staged || !preview.batchId) {
+    preview.archiveStatus = {};
+    return;
+  }
+  const result = await api().get_import_archive_status(persona, preview.batchId);
+  if (!result?.ok) {
+    preview.archiveStatus = {};
+    if (result?.error) setImportNotice(result.error);
+    return;
+  }
+  preview.archiveStatus = result.conversations || {};
+  let repairedArchivedChoice = false;
+  Object.entries(preview.archiveStatus).forEach(([conversationId, item]) => {
+    if (!item?.archived || preview.choices?.[conversationId] !== "exclude") return;
+    preview.choices[conversationId] = "keep";
+    repairedArchivedChoice = true;
+  });
+  if (repairedArchivedChoice) {
+    const repaired = await api().update_import_curation(
+      persona,
+      preview.batchId,
+      importCurationPayload()
+    );
+    if (!repaired?.ok && repaired?.error) setImportNotice(repaired.error);
+  }
+}
+
+function invalidateImportArchiveConfirmation() {
+  const preview = state.importPreview;
+  if (!preview.archiveConfirm) return;
+  preview.archiveConfirm = null;
+  renderImportArchiveConfirmation();
+  updateImportStagedControls();
+}
+
+async function prepareOrArchiveImport() {
   const persona = state.current?.name;
   const preview = state.importPreview;
   if (!persona || persona === "__base__" || !preview.staged || !preview.batchId) return;
-  void api().update_import_curation(persona, preview.batchId, importCurationPayload()).then((result) => {
-    if (result && !result.ok && result.error) setImportNotice(result.error);
+  el("importArchiveBtn").disabled = true;
+
+  if (!preview.archiveConfirm) {
+    setImportNotice("Checking the staged import before adding it to the archive...");
+    const saved = await saveImportCurationNow();
+    if (!saved?.ok) {
+      updateImportStagedControls();
+      return;
+    }
+    const result = await api().prepare_import_archive(persona, preview.batchId);
+    if (!result?.ok) {
+      setImportNotice(result?.error || "Could not prepare the archive summary.");
+      updateImportStagedControls();
+      return;
+    }
+    preview.archiveConfirm = {
+      summary: result.summary || {},
+      legacyMigration: result.legacy_migration || { pending: false },
+    };
+    renderImportArchiveConfirmation();
+    updateImportStagedControls();
+    const hasArchiveWork = Boolean(result.summary?.can_archive)
+      || Boolean(result.legacy_migration?.pending);
+    const excludedCount = Number(result.summary?.excluded_conversations || 0);
+    setImportNotice(
+      hasArchiveWork
+        ? "Review the archive summary below. Nothing has been added yet."
+        : (excludedCount
+          ? "Review saved. Excluded chats are outside the archive, and there are no kept chats waiting to be added."
+          : "The archive already matches this staged review. No confirmation is needed.")
+    );
+    return;
+  }
+
+  setImportNotice("Adding kept, sanitized chats to the searchable archive...");
+  const previouslyArchived = new Set(
+    Object.entries(preview.archiveStatus || {})
+      .filter(([, item]) => item.archived)
+      .map(([conversationId]) => conversationId)
+  );
+  const result = await api().archive_import_batch(persona, preview.batchId);
+  if (!result?.ok) {
+    setImportNotice(result?.error || "Could not add these chats to the archive.");
+    updateImportStagedControls();
+    return;
+  }
+  preview.archiveConfirm = null;
+  await refreshImportArchiveStatus();
+  const newlyArchived = Object.entries(preview.archiveStatus || {})
+    .filter(([conversationId, item]) => item.archived && !previouslyArchived.has(conversationId))
+    .map(([conversationId]) => conversationId);
+  el("importProgressText").textContent = "Keyword search ready";
+  renderImportArchiveConfirmation();
+  renderImportConversationList();
+  updateImportStagedControls();
+  requestAnimationFrame(() => {
+    newlyArchived.forEach((conversationId) => {
+      const safeId = typeof CSS !== "undefined" && CSS.escape
+        ? CSS.escape(conversationId)
+        : String(conversationId).replace(/"/g, '\\"');
+      const card = el("importConversations")?.querySelector(`[data-conversation-id="${safeId}"]`);
+      if (!card) return;
+      card.classList.add("pulse-highlight");
+      setTimeout(() => card.classList.remove("pulse-highlight"), 1600);
+    });
   });
+  const added = Number(result.summary?.added_conversations || 0);
+  const messages = Number(result.summary?.added_messages || 0);
+  const migrated = result.legacy_migration?.migrated
+    ? Number(result.legacy_migration?.session_count || 0)
+    : 0;
+  const migrationWarning = result.legacy_migration?.error
+    ? " The older standalone legacy.db could not be migrated; this staged import was still archived safely."
+    : "";
+  setImportNotice(
+    added
+      ? `Added ${added} conversation${added === 1 ? "" : "s"} (${messages} messages) to the searchable archive.${migrated ? ` Migrated ${migrated} older legacy.db chat${migrated === 1 ? "" : "s"} too.` : ""}${migrationWarning} Nothing was added to live conversation context.`
+      : (migrated
+        ? `Migrated ${migrated} older legacy.db chat${migrated === 1 ? "" : "s"} into this persona database. Nothing was added to live conversation context.`
+        : `No new conversations were added. Kept chats may already be archived or empty after sanitation.${migrationWarning}`)
+  );
+}
+
+async function removeImportConversationFromArchive(conversationId) {
+  const persona = state.current?.name;
+  const preview = state.importPreview;
+  const status = preview.archiveStatus?.[conversationId];
+  if (!persona || persona === "__base__" || !preview.staged || !preview.batchId || !status?.archived) return;
+  const conversation = importConversationById(conversationId);
+  if (status.live_session_id) {
+    setImportNotice("This archived chat has already been continued into a live session and cannot be removed here.");
+    return;
+  }
+  const confirmed = await showConfirm(
+    "Remove selected chat from archive?",
+    `${escapeHtml(conversation?.title || status.title || "Selected conversation")} will stop appearing in archive search. Its staged review copy and your export file stay intact, so you can correct the choices and add it again.`,
+    "Remove from archive",
+    "danger"
+  );
+  if (!confirmed) return;
+  const result = await api().remove_import_archive_conversation(
+    persona,
+    preview.batchId,
+    conversationId
+  );
+  if (!result?.ok) {
+    setImportNotice(result?.error || "Could not remove this conversation from the archive.");
+    await refreshImportArchiveStatus();
+    updateImportStagedControls();
+    renderImportConversationList();
+    return;
+  }
+  preview.archiveConfirm = null;
+  await refreshImportArchiveStatus();
+  renderImportArchiveConfirmation();
+  renderImportConversationList();
+  updateImportStagedControls();
+  el("importProgressText").textContent = Object.values(preview.archiveStatus || {}).some((item) => item.archived)
+    ? "Keyword search ready"
+    : "0% - staged";
+  setImportNotice(
+    `Removed ${result.title || "the selected conversation"} (${result.removed_messages || 0} messages) from the searchable archive. Its staged review copy is unchanged.`
+  );
+}
+
+function cancelImportArchiveConfirmation() {
+  state.importPreview.archiveConfirm = null;
+  renderImportArchiveConfirmation();
+  updateImportStagedControls();
+  setImportNotice("Archive add cancelled. Your staged review is unchanged.");
+}
+
+function renderImportArchiveConfirmation() {
+  const box = el("importArchiveConfirm");
+  if (!box) return;
+  const payload = state.importPreview.archiveConfirm;
+  if (!payload) {
+    box.classList.add("hidden");
+    box.innerHTML = "";
+    return;
+  }
+  const summary = payload.summary || {};
+  const migration = payload.legacyMigration || {};
+  const hasArchiveWork = Boolean(summary.can_archive) || Boolean(migration.pending);
+  const excludedCount = Number(summary.excluded_conversations || 0);
+  const confirmationTitle = hasArchiveWork
+    ? "Ready to add kept chats"
+    : (excludedCount
+      ? "Review saved — no archive changes pending"
+      : (Number(summary.already_archived_conversations || 0)
+      ? "Archive already up to date"
+      : "No kept chats to archive"));
+  const continuation = summary.continuation;
+  const continuationText = continuation
+    ? `${continuation.title || "Selected continuation"} (${continuation.message_count || 0} messages) remains selected for Phase 3b; it will not become live now.`
+    : "No continuation chat is selected. Archive-only import is a complete valid outcome.";
+  const migrationText = migration.pending
+    ? `<span><strong>${escapeHtml(migration.session_count || 0)}</strong> old legacy.db chats will migrate into this persona database</span>`
+    : (migration.migrated
+      ? `<span><strong>${escapeHtml(migration.session_count || 0)}</strong> old legacy.db chats migrated</span>`
+      : (migration.error
+        ? `<span class="import-summary-warning">Old legacy.db migration needs attention</span>`
+        : ""));
+  box.classList.remove("hidden");
+  box.innerHTML = `
+    <strong>${confirmationTitle}</strong>
+    <div class="import-summary">
+      <span><strong>${escapeHtml(summary.conversations_to_add || 0)}</strong> conversations to add</span>
+      <span><strong>${escapeHtml(summary.messages_to_add || 0)}</strong> messages to add</span>
+      <span><strong>${escapeHtml(summary.excluded_conversations || 0)}</strong> conversations excluded</span>
+      <span><strong>${escapeHtml(summary.excluded_messages || 0)}</strong> messages excluded</span>
+      ${Number(summary.omitted_messages || 0) ? `<span class="import-summary-warning"><strong>${escapeHtml(summary.omitted_messages)}</strong> empty/internal omitted</span>` : ""}
+      ${Number(summary.already_archived_conversations || 0) ? `<span><strong>${escapeHtml(summary.already_archived_conversations)}</strong> already archived</span>` : ""}
+      ${migrationText}
+    </div>
+    <span>${escapeHtml(
+      hasArchiveWork
+        ? continuationText
+        : (excludedCount
+          ? "Excluded conversations are saved in staging and are not in the archive. No confirmation is needed."
+          : "No archive changes are needed. Return to review to change any unarchived choices.")
+    )}</span>`;
 }
 
 function updateImportStagedControls() {
   const preview = state.importPreview;
   const badge = el("importStagedBadge");
   const stageBtn = el("importStageBtn");
+  const archiveBtn = el("importArchiveBtn");
+  const archiveCancelBtn = el("importArchiveCancelBtn");
   const deleteBtn = el("importDeleteStagedBtn");
-  if (!badge || !stageBtn || !deleteBtn) return;
+  if (!badge || !stageBtn || !archiveBtn || !archiveCancelBtn || !deleteBtn) return;
   const hasBatch = Boolean(preview.batch);
-  badge.textContent = preview.staged ? "Staged archive" : "Preview only";
+  badge.textContent = preview.staged ? "Staged review" : "Preview only";
   badge.classList.toggle("staged", Boolean(preview.staged));
   badge.classList.toggle("preview", !preview.staged);
   stageBtn.disabled = !hasBatch || preview.staged;
   stageBtn.title = preview.staged
     ? "Already staged — keep/exclude choices save automatically."
-    : "Save this import and your keep/exclude choices into the persona archive. Nothing becomes live conversation context.";
+    : "Save this import and your keep/exclude choices for continued review. Nothing becomes live conversation context.";
+  const archiveConfirmationHasWork = !preview.archiveConfirm
+    || Boolean(preview.archiveConfirm.summary?.can_archive)
+    || Boolean(preview.archiveConfirm.legacyMigration?.pending);
+  archiveBtn.disabled = !preview.staged
+    || !archiveConfirmationHasWork;
+  archiveBtn.textContent = preview.archiveConfirm
+    ? (archiveConfirmationHasWork ? "Confirm archive add" : "Archive matches review")
+    : "Add kept chats to archive";
+  archiveBtn.title = preview.archiveConfirm
+    ? "Copy the reviewed, sanitized chats into the searchable archive."
+    : "Review a backend-computed summary before adding kept chats to the searchable archive.";
+  archiveCancelBtn.classList.toggle("hidden", !preview.archiveConfirm);
   deleteBtn.disabled = !preview.staged;
 }
 
 function renderImportPreview() {
   const preview = state.importPreview;
   const batch = preview.batch;
-  el("importProgressText").textContent = batch ? "0% - preview only" : "Not started";
+  const checkingSavedImport = Boolean(preview.checkingSavedImport);
+  const importCard = el("importPreviewCard");
+  importCard.setAttribute("aria-busy", checkingSavedImport ? "true" : "false");
+  el("importPath").disabled = checkingSavedImport;
+  el("importPicker").disabled = checkingSavedImport;
+  el("importPreviewBtn").disabled = checkingSavedImport;
+  const hasArchivedChats = Object.values(preview.archiveStatus || {}).some((item) => item.archived);
+  el("importProgressText").textContent = checkingSavedImport
+    ? "Checking saved review"
+    : (!batch
+    ? "Not started"
+    : (hasArchivedChats ? "Keyword search ready" : (preview.staged ? "0% - staged" : "0% - preview only")));
   el("importProgressFill").style.width = "0%";
   updateImportStagedControls();
+  renderImportArchiveConfirmation();
+  if (checkingSavedImport && !batch) {
+    el("importSubtitle").textContent = "Looking for an import you were already reviewing.";
+    el("importSummary").classList.add("hidden");
+    el("importSummary").innerHTML = "";
+    el("importConversations").innerHTML = `
+      <div class="memory-empty import-checking-state">
+        <strong>Checking saved imports</strong>
+        <span>Pulse is looking for a staged review to continue.</span>
+      </div>`;
+    el("importDetail").innerHTML = `
+      <div class="memory-empty import-checking-state">
+        <strong>One moment.</strong>
+        <span>The import controls will unlock when this check finishes.</span>
+      </div>`;
+    return;
+  }
   if (!batch) {
     el("importSubtitle").textContent = "Dry-run old chats before writing anything into Pulse.";
     el("importSummary").classList.add("hidden");
@@ -3850,7 +4177,7 @@ function renderImportPreview() {
     el("importDetail").innerHTML = `
       <div class="memory-empty">
         <strong>Select a conversation.</strong>
-        <span>Messages appear here. This first slice does not write them into the persona database.</span>
+        <span>Messages appear here. Staging saves review choices; only an explicit archive action copies sanitized chats onward.</span>
       </div>`;
     return;
   }
@@ -3953,6 +4280,12 @@ function renderImportConversationList() {
       setImportConversationChoice(button.dataset.conversationId, button.dataset.importChoice);
     });
   });
+  el("importConversations").querySelectorAll("[data-import-archive-remove]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      void removeImportConversationFromArchive(button.dataset.conversationId);
+    });
+  });
 }
 
 function importConversationById(conversationId) {
@@ -3969,6 +4302,17 @@ function renderImportConversationCard(conversation) {
   const warnings = (conversation.warnings || []).map((warning) => `<span>${escapeHtml(warning)}</span>`).join("");
   const skipped = skippedCount ? `<span class="import-skipped-pill">${escapeHtml(skippedCount)} skipped</span>` : "";
   const review = reviewCount ? `<span class="import-review-pill">${escapeHtml(reviewCount)} review</span>` : "";
+  const archiveStatus = state.importPreview.archiveStatus?.[conversation.id];
+  const archiveLocked = Boolean(archiveStatus?.archived);
+  const archiveLockTitle = archiveStatus?.can_remove
+    ? "Remove this chat from the archive before changing its import choices."
+    : "This archived chat is linked to a live session, so its import choices are locked.";
+  const archived = archiveStatus?.archived
+    ? `<span class="import-archive-pill" title="${escapeHtml(archiveLockTitle)}">Archived</span>`
+    : "";
+  const removeFromArchive = archiveStatus?.can_remove
+    ? `<button type="button" data-conversation-id="${escapeHtml(conversation.id)}" data-import-archive-remove>Remove from archive</button>`
+    : "";
   const model = conversation.model ? `<span>${escapeHtml(conversation.model)}</span>` : "";
   return `
     <article class="import-conversation-card${selected}${reviewClass} ${choice}" data-conversation-id="${escapeHtml(conversation.id)}">
@@ -3977,16 +4321,18 @@ function renderImportConversationCard(conversation) {
         <span>${escapeHtml(conversation.message_count || 0)} msgs</span>
         ${skipped}
         ${review}
+        ${archived}
         <span>${escapeHtml(conversation.estimated_tokens || 0)} tokens</span>
         ${model}
       </div>
       <h3>${escapeHtml(conversation.title || "Untitled conversation")}</h3>
       <p>${escapeHtml(conversation.preview || (needsWarning ? "No visible text to preview." : ""))}</p>
       <div class="import-card-warnings">${warnings}</div>
-      <div class="import-card-actions">
-        <button class="${choice === "keep" ? "active" : ""}" type="button" data-conversation-id="${escapeHtml(conversation.id)}" data-import-choice="keep">Keep</button>
-        <button class="${choice === "exclude" ? "active" : ""}" type="button" data-conversation-id="${escapeHtml(conversation.id)}" data-import-choice="exclude">Exclude</button>
-        <button class="${choice === "continue" ? "active" : ""}" type="button" data-conversation-id="${escapeHtml(conversation.id)}" data-import-choice="continue">Continue</button>
+      <div class="import-card-actions${archiveLocked ? " archive-locked" : ""}">
+        <button class="${choice === "keep" ? "active" : ""}" type="button" data-conversation-id="${escapeHtml(conversation.id)}" data-import-choice="keep"${archiveLocked ? ` disabled title="${escapeHtml(archiveLockTitle)}"` : ""}>Keep</button>
+        <button class="${choice === "exclude" ? "active" : ""}" type="button" data-conversation-id="${escapeHtml(conversation.id)}" data-import-choice="exclude"${archiveLocked ? ` disabled title="${escapeHtml(archiveLockTitle)}"` : ""}>Exclude</button>
+        <button class="${choice === "continue" ? "active" : ""}" type="button" data-conversation-id="${escapeHtml(conversation.id)}" data-import-choice="continue"${archiveLocked ? ` disabled title="${escapeHtml(archiveLockTitle)}"` : ""}>Continue</button>
+        ${removeFromArchive}
       </div>
     </article>`;
 }
@@ -4000,6 +4346,10 @@ function importConversationChoice(conversationId) {
 
 function setImportConversationChoice(conversationId, choice) {
   if (!conversationId) return;
+  if (state.importPreview.archiveStatus?.[conversationId]?.archived) {
+    setImportNotice("Remove this chat from the archive before changing its import choices.");
+    return;
+  }
   if (choice === "continue") {
     state.importPreview.continuationId = conversationId;
     state.importPreview.choices[conversationId] = "keep";
@@ -4012,6 +4362,13 @@ function setImportConversationChoice(conversationId, choice) {
   state.importPreview.selectedId = conversationId;
   persistImportCuration();
   renderImportPreview();
+  if (choice === "exclude") {
+    setImportNotice(
+      state.importPreview.staged
+        ? "Excluded from the staged import. This chat is not in the archive and will not be added unless you choose Keep later."
+        : "Excluded in this preview. Stage the import to save this choice."
+    );
+  }
   void selectImportConversation(conversationId, true);
 }
 
@@ -4031,6 +4388,7 @@ async function selectImportConversation(conversationId, force = false, resetDeta
   state.importPreview.selectedId = conversationId;
   renderImportConversationList();
   updateImportFlaggedNavLabel();
+  updateImportStagedControls();
   el("importDetail").dataset.conversationId = conversationId;
   el("importDetail").dataset.messageOffset = String(offset);
   el("importDetail").innerHTML = `<div class="memory-empty">Loading conversation...</div>`;
@@ -4073,7 +4431,7 @@ function renderImportConversationDetail(conversation) {
   const excludedCount = exchanges.filter((exchange) => importExchangeChoice(conversation.id, exchange.id) === "exclude").length;
   const visibleIssueCount = exchanges.filter((exchange) => exchange.reviewIssues.length).length;
   const excludedNote = excludedCount
-    ? `<div class="memory-source-note"><strong>${escapeHtml(excludedCount)} exchange${excludedCount === 1 ? "" : "s"} excluded</strong><span>${state.importPreview.staged ? "Exchange exclusions are saved with the staged archive." : "Exchange exclusions are temporary until you stage this import."}</span></div>`
+    ? `<div class="memory-source-note"><strong>${escapeHtml(excludedCount)} exchange${excludedCount === 1 ? "" : "s"} excluded</strong><span>${state.importPreview.staged ? "Exchange exclusions are saved with the staged review." : "Exchange exclusions are temporary until you stage this import."}</span></div>`
     : "";
   const flaggedNote = issues.length
     ? `<div class="memory-source-note import-review-note">
@@ -4712,6 +5070,8 @@ function wireEvents() {
   });
   el("importCloseBtn").addEventListener("click", closeImportDialog);
   el("importStageBtn").addEventListener("click", () => { void stageCurrentImport(); });
+  el("importArchiveBtn").addEventListener("click", () => { void prepareOrArchiveImport(); });
+  el("importArchiveCancelBtn").addEventListener("click", cancelImportArchiveConfirmation);
   el("importDeleteStagedBtn").addEventListener("click", () => { void deleteStagedImport(); });
   el("importPicker").addEventListener("click", async () => {
     const result = await api().pick_conversation_export(el("importPath").value || "");

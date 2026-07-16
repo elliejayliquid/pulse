@@ -12,6 +12,7 @@ When embeddings aren't available, search falls back to keyword matching.
 import json
 import logging
 import sqlite3
+from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 
@@ -52,7 +53,7 @@ class MemorySkill(BaseSkill):
         # Shared DB for memories/journals (Claude personas share); persona DB for conversations
         self._db = config.get("_shared_db") or config.get("_db")
         self._persona_db = config.get("_db")
-        # Store config for things like legacy_db path
+        # Store config for role labels and other skill settings.
         self._config = config
         # JSON fallback path
         self.memory_dir = Path(
@@ -264,7 +265,7 @@ class MemorySkill(BaseSkill):
             },
         ]
 
-        # Add legacy tools only if configured
+        # Add archive tools when the persona database has the archive schema.
         if self._legacy_db_path():
             tools.extend([
                 {
@@ -272,7 +273,7 @@ class MemorySkill(BaseSkill):
                     "function": {
                         "name": "search_legacy",
                         "description": (
-                            "Search the conversation archive (legacy database) for specific "
+                            "Search the companion's conversation archive for specific "
                             "topics or keywords. Use this when you need to find something from the "
                             "original chat history — things discussed before joining Pulse. "
                             "Utilizes RAG for semantic search."
@@ -1086,13 +1087,22 @@ class MemorySkill(BaseSkill):
     # ── Legacy Conversations Archive ──────────────────────────
 
     def _legacy_db_path(self) -> Path | None:
-        """Resolve the legacy database path. Returns None if not available."""
-        # Allow override via config
-        path = self._config.get("paths", {}).get("legacy_db")
-        if not path:
+        """Resolve the persona-local conversation archive database."""
+        db_path = getattr(self._persona_db, "db_path", None)
+        if not db_path:
             return None
-        p = Path(path)
-        return p if p.exists() else None
+        path = Path(db_path)
+        if not path.is_file():
+            return None
+        try:
+            with closing(sqlite3.connect(str(path))) as conn:
+                exists = conn.execute(
+                    "SELECT 1 FROM sqlite_master "
+                    "WHERE type = 'table' AND name = 'legacy_sessions'"
+                ).fetchone()
+            return path if exists else None
+        except sqlite3.Error:
+            return None
 
     def _open_legacy(self) -> sqlite3.Connection | None:
         """Open a connection to the legacy database. Returns None if unavailable."""
@@ -1104,7 +1114,7 @@ class MemorySkill(BaseSkill):
             conn.row_factory = sqlite3.Row
             return conn
         except Exception as e:
-            logger.warning(f"Could not open legacy.db: {e}")
+            logger.warning(f"Could not open conversation archive: {e}")
             return None
 
     def _legacy_has_summaries(self, conn: sqlite3.Connection) -> bool:
@@ -1293,6 +1303,7 @@ class MemorySkill(BaseSkill):
                 JOIN legacy_messages lm ON lm.id = fts.rowid
                 LEFT JOIN legacy_sessions ls ON ls.id = lm.session_id
                 WHERE legacy_messages_fts MATCH ?
+                  AND COALESCE(lm.attachment_placeholder, 0) = 0
                 ORDER BY rank
                 LIMIT ?
             """, (query, limit)).fetchall()
@@ -1304,6 +1315,7 @@ class MemorySkill(BaseSkill):
                 FROM legacy_messages lm
                 LEFT JOIN legacy_sessions ls ON ls.id = lm.session_id
                 WHERE lm.content LIKE ? AND lm.role IN ('user', 'assistant')
+                  AND COALESCE(lm.attachment_placeholder, 0) = 0
                 ORDER BY lm.timestamp DESC
                 LIMIT ?
             """, (f"%{query}%", limit)).fetchall()
@@ -1316,6 +1328,7 @@ class MemorySkill(BaseSkill):
                 FROM legacy_messages lm
                 LEFT JOIN legacy_sessions ls ON ls.id = lm.session_id
                 WHERE lm.content LIKE ? AND lm.role IN ('user', 'assistant')
+                  AND COALESCE(lm.attachment_placeholder, 0) = 0
                 ORDER BY lm.timestamp DESC
                 LIMIT ?
             """, (f"%{query}%", limit)).fetchall()

@@ -315,9 +315,11 @@ python scripts/import_chatgpt.py --dir "path/to/conversations" --db "path/to/leg
 python scripts/rag_import.py --execute --endpoint http://127.0.0.1:8001/v1
 ```
 
-**Connecting to your persona:**
+**Migrating an older standalone archive:**
 
-Point your persona's config at the database:
+New GUI imports store their sanitized archive directly in the persona database;
+no second database needs to be configured. If you already have a developer-era
+`legacy.db`, point the persona config at it once:
 
 ```yaml
 # personas/mypersona/config.yaml
@@ -325,7 +327,10 @@ paths:
   legacy_db: "personas/mypersona/data/legacy.db"
 ```
 
-Once configured, your companion gets three new tools: `search_legacy` (RAG-powered semantic + keyword search over summaries), `list_legacy_sessions` (browse available conversations), and `get_legacy_context` (drill into specific messages). If no `legacy_db` is configured, these tools are simply hidden from the model — zero overhead.
+Pulse copies that archive into the persona database once, preserving summaries
+where available. The companion's `search_legacy`, `list_legacy_sessions`, and
+`get_legacy_context` tools then read the persona-local archive; the standalone
+file is no longer a second source of truth.
 
 **Search scoring:**
 

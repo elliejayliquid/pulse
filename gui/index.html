@@ -592,6 +592,7 @@
         </div>
         <button id="importPreviewBtn" class="modal-btn secondary" type="button">Preview</button>
       </div>
+      <p class="import-privacy-copy">Everything stays on this computer. Nothing is sent anywhere unless you later choose an enrichment provider.</p>
       <div id="importNotice" class="notice-pill">Choose a Claude, ChatGPT, OpenRouter, or Markdown export. Preview is read-only.</div>
       <div id="importProgress" class="import-progress">
         <strong>Background enrichment</strong>
@@ -609,14 +610,17 @@
         <div id="importDetail" class="import-detail">
           <div class="memory-empty">
             <strong>Select a conversation.</strong>
-            <span>Messages appear here. This first slice does not write them into the persona database.</span>
+            <span>Messages appear here. Staging saves review choices; only an explicit archive action copies sanitized chats onward.</span>
           </div>
         </div>
       </div>
+      <div id="importArchiveConfirm" class="import-archive-confirm hidden"></div>
       <div class="modal-actions import-modal-actions">
         <span id="importStagedBadge" class="import-staged-badge preview">Preview only</span>
-        <button id="importStageBtn" class="modal-btn secondary" type="button" title="Save this import and your keep/exclude choices into the persona archive. Nothing becomes live conversation context." disabled>Stage this import</button>
-        <button id="importDeleteStagedBtn" class="modal-btn ghost" type="button" title="Remove the staged archive copy. The export file itself is not touched." disabled>Delete staged</button>
+        <button id="importStageBtn" class="modal-btn secondary" type="button" title="Save this import and your keep/exclude choices for continued review. Nothing becomes live conversation context." disabled>Stage this import</button>
+        <button id="importArchiveBtn" class="modal-btn secondary" type="button" title="Add kept, sanitized chats to the searchable archive. Nothing becomes live conversation context." disabled>Add kept chats to archive</button>
+        <button id="importArchiveCancelBtn" class="modal-btn ghost hidden" type="button">Back to review</button>
+        <button id="importDeleteStagedBtn" class="modal-btn ghost" type="button" title="Remove the staged review copy. The export file and searchable archive are not touched." disabled>Delete staged</button>
         <button id="importCloseBtn" class="modal-btn ghost" type="button">Close</button>
       </div>
     </div>
