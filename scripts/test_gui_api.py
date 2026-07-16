@@ -6,6 +6,7 @@ import tempfile
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.append(os.getcwd())
 
@@ -978,10 +979,25 @@ def test_gui_api_stage_import_quarantines_and_resumes():
         finally:
             persona_db.close()
 
-        archived = api.archive_import_batch("demo", preview["preview_id"])
+        import core.legacy_archive as legacy_archive
+        original_archive_candidates = legacy_archive._archive_candidates
+        candidate_scans = 0
+
+        def count_archive_candidates(*args, **kwargs):
+            nonlocal candidate_scans
+            candidate_scans += 1
+            return original_archive_candidates(*args, **kwargs)
+
+        with patch.object(
+            legacy_archive,
+            "_archive_candidates",
+            side_effect=count_archive_candidates,
+        ):
+            archived = api.archive_import_batch("demo", preview["preview_id"])
         assert archived["ok"] is True
         assert archived["summary"]["added_conversations"] == 1
         assert archived["summary"]["added_messages"] == 2
+        assert candidate_scans == 1
         with closing(sqlite3.connect(db_path)) as conn:
             # Phase 3a guarantee: archive add still never touches live tables.
             assert conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 0

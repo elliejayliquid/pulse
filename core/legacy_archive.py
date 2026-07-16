@@ -145,15 +145,18 @@ def ensure_legacy_archive_tables(conn: sqlite3.Connection) -> None:
 def archive_batch_summary(conn: sqlite3.Connection, batch_id: str) -> dict[str, Any]:
     """Return a trusted staging-to-archive confirmation summary."""
     ensure_legacy_archive_tables(conn)
-    batch = conn.execute(
-        "SELECT source, source_version, continuation_conversation_id "
-        "FROM import_batches WHERE id = ?",
-        (batch_id,),
-    ).fetchone()
-    if not batch:
-        raise ValueError("Staged import not found.")
-
+    batch = _archive_batch_row(conn, batch_id)
     candidates = _archive_candidates(conn, batch_id, str(batch[0] or "unknown"))
+    return _summarize_archive_candidates(conn, batch_id, batch, candidates)
+
+
+def _summarize_archive_candidates(
+    conn: sqlite3.Connection,
+    batch_id: str,
+    batch: sqlite3.Row | tuple,
+    candidates: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Build confirmation counts from an already-sanitized candidate scan."""
     kept_total = conn.execute(
         "SELECT COUNT(*) FROM import_conversations "
         "WHERE batch_id = ? AND choice = 'keep'",
@@ -233,12 +236,10 @@ def archive_batch_summary(conn: sqlite3.Connection, batch_id: str) -> dict[str, 
 
 def archive_staged_batch(conn: sqlite3.Connection, batch_id: str) -> dict[str, Any]:
     """Copy kept, sanitized staging rows into the write-once archive."""
-    summary = archive_batch_summary(conn, batch_id)
-    batch = conn.execute(
-        "SELECT source, source_version FROM import_batches WHERE id = ?",
-        (batch_id,),
-    ).fetchone()
+    ensure_legacy_archive_tables(conn)
+    batch = _archive_batch_row(conn, batch_id)
     candidates = _archive_candidates(conn, batch_id, str(batch[0] or "unknown"))
+    summary = _summarize_archive_candidates(conn, batch_id, batch, candidates)
     archived_at = _now()
     added_conversations = 0
     added_messages = 0
@@ -300,6 +301,20 @@ def archive_staged_batch(conn: sqlite3.Connection, batch_id: str) -> dict[str, A
         "added_conversations": added_conversations,
         "added_messages": added_messages,
     }
+
+
+def _archive_batch_row(
+    conn: sqlite3.Connection,
+    batch_id: str,
+) -> sqlite3.Row | tuple:
+    batch = conn.execute(
+        "SELECT source, source_version, continuation_conversation_id "
+        "FROM import_batches WHERE id = ?",
+        (batch_id,),
+    ).fetchone()
+    if not batch:
+        raise ValueError("Staged import not found.")
+    return batch
 
 
 def archive_batch_status(conn: sqlite3.Connection, batch_id: str) -> dict[str, dict[str, Any]]:
