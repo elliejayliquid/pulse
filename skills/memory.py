@@ -265,7 +265,7 @@ class MemorySkill(BaseSkill):
             },
         ]
 
-        # Add archive tools when the persona database has the archive schema.
+        # Add archive tools only when the persona has searchable archive rows.
         if self._legacy_db_path():
             tools.extend([
                 {
@@ -1087,7 +1087,7 @@ class MemorySkill(BaseSkill):
     # ── Legacy Conversations Archive ──────────────────────────
 
     def _legacy_db_path(self) -> Path | None:
-        """Resolve the persona-local conversation archive database."""
+        """Resolve a non-empty persona-local conversation archive database."""
         db_path = getattr(self._persona_db, "db_path", None)
         if not db_path:
             return None
@@ -1100,7 +1100,10 @@ class MemorySkill(BaseSkill):
                     "SELECT 1 FROM sqlite_master "
                     "WHERE type = 'table' AND name = 'legacy_sessions'"
                 ).fetchone()
-            return path if exists else None
+                has_sessions = exists and conn.execute(
+                    "SELECT 1 FROM legacy_sessions LIMIT 1"
+                ).fetchone()
+            return path if has_sessions else None
         except sqlite3.Error:
             return None
 

@@ -958,6 +958,26 @@ def test_gui_api_stage_import_quarantines_and_resumes():
         assert prepared["summary"]["continuation"]["title"] == "Keeper Chat"
         assert prepared["summary"]["continuation"]["will_be_added"] is True
 
+        from core.db import PulseDatabase
+        from skills.memory import MemorySkill
+        persona_db = PulseDatabase(db_path)
+        try:
+            memory = MemorySkill({
+                "_db": persona_db,
+                "_shared_db": persona_db,
+                "paths": {"memories": str(root / "memories")},
+            })
+            empty_archive_tools = {
+                tool["function"]["name"] for tool in memory.get_tools()
+            }
+            assert not {
+                "search_legacy",
+                "list_legacy_sessions",
+                "get_legacy_context",
+            }.intersection(empty_archive_tools)
+        finally:
+            persona_db.close()
+
         archived = api.archive_import_batch("demo", preview["preview_id"])
         assert archived["ok"] is True
         assert archived["summary"]["added_conversations"] == 1
@@ -990,6 +1010,24 @@ def test_gui_api_stage_import_quarantines_and_resumes():
                 "SELECT COUNT(*) FROM legacy_messages_fts WHERE legacy_messages_fts MATCH 'light'"
             ).fetchone()[0] == 1
 
+        persona_db = PulseDatabase(db_path)
+        try:
+            memory = MemorySkill({
+                "_db": persona_db,
+                "_shared_db": persona_db,
+                "paths": {"memories": str(root / "memories")},
+            })
+            populated_archive_tools = {
+                tool["function"]["name"] for tool in memory.get_tools()
+            }
+            assert {
+                "search_legacy",
+                "list_legacy_sessions",
+                "get_legacy_context",
+            }.issubset(populated_archive_tools)
+        finally:
+            persona_db.close()
+
         # Archive conversations are write-once by source + source ID.
         archived_again = api.archive_import_batch("demo", preview["preview_id"])
         assert archived_again["ok"] is True
@@ -1001,11 +1039,55 @@ def test_gui_api_stage_import_quarantines_and_resumes():
         assert status["conversations"][keeper_id]["archived"] is True
         assert status["conversations"][keeper_id]["can_remove"] is True
         archive_id = status["conversations"][keeper_id]["archive_id"]
+        from core.legacy_archive import remove_archived_conversation
         with closing(sqlite3.connect(db_path)) as conn:
             conn.execute(
                 "INSERT INTO legacy_summaries(session_id, summary_text) VALUES (?, ?)",
                 (archive_id, "Temporary archive summary."),
             )
+            conn.commit()
+
+            class LiveLinkRaceConnection:
+                """Simulate a live link appearing immediately before guarded delete."""
+
+                def __init__(self, inner):
+                    self.inner = inner
+                    self.triggered = False
+
+                def execute(self, sql, parameters=()):
+                    if (
+                        not self.triggered
+                        and sql.lstrip().startswith("DELETE FROM legacy_sessions")
+                    ):
+                        self.inner.execute(
+                            "UPDATE legacy_sessions SET live_session_id = ? WHERE id = ?",
+                            ("raced-live-session", archive_id),
+                        )
+                        self.triggered = True
+                    return self.inner.execute(sql, parameters)
+
+                def executescript(self, sql):
+                    return self.inner.executescript(sql)
+
+            try:
+                remove_archived_conversation(
+                    LiveLinkRaceConnection(conn),
+                    preview["preview_id"],
+                    keeper_id,
+                )
+                raise AssertionError("A newly live-linked archive row must be protected.")
+            except ValueError as exc:
+                assert "archive changed" in str(exc)
+            assert conn.execute(
+                "SELECT COUNT(*) FROM legacy_messages WHERE session_id = ?",
+                (archive_id,),
+            ).fetchone()[0] == 2
+            assert conn.execute(
+                "SELECT COUNT(*) FROM legacy_summaries WHERE session_id = ?",
+                (archive_id,),
+            ).fetchone()[0] == 1
+            conn.rollback()
+
             conn.execute(
                 "UPDATE legacy_sessions SET live_session_id = ? WHERE id = ?",
                 ("live-session", archive_id),

@@ -363,14 +363,14 @@ def remove_archived_conversation(
         "SELECT COUNT(*) FROM legacy_summaries WHERE session_id = ?",
         (archive_id,),
     ).fetchone()[0]
-    conn.execute("DELETE FROM legacy_summaries WHERE session_id = ?", (archive_id,))
-    conn.execute("DELETE FROM legacy_messages WHERE session_id = ?", (archive_id,))
     removed = conn.execute(
         "DELETE FROM legacy_sessions WHERE id = ? AND live_session_id = ''",
         (archive_id,),
     ).rowcount
     if not removed:
         raise ValueError("The archive changed before removal; reload and try again.")
+    conn.execute("DELETE FROM legacy_summaries WHERE session_id = ?", (archive_id,))
+    conn.execute("DELETE FROM legacy_messages WHERE session_id = ?", (archive_id,))
     return {
         "conversation_id": str(conversation_id),
         "archive_id": archive_id,
