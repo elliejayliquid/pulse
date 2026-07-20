@@ -85,6 +85,8 @@ class WebSearchSkill(BaseSkill):
                     "name": "fetch_url",
                     "description": (
                         "Fetch the text content of a webpage URL. Great for reading full articles or pages after a web_search. "
+                        "Long pages are returned in chunks — if the result ends with a TRUNCATED notice, "
+                        "call again with the suggested offset to keep reading. "
                         "Protected against prompt injections and malicious content."
                     ),
                     "parameters": {
@@ -96,8 +98,13 @@ class WebSearchSkill(BaseSkill):
                             },
                             "max_length": {
                                 "type": "integer",
-                                "description": "Max chars to return (default 4000)",
-                                "default": 4000
+                                "description": "Max chars to return (default 8000)",
+                                "default": 8000
+                            },
+                            "offset": {
+                                "type": "integer",
+                                "description": "Character offset to continue reading a long page from — use the value suggested in the truncation notice (default 0)",
+                                "default": 0
                             }
                         },
                         "required": ["url"]
@@ -120,7 +127,8 @@ class WebSearchSkill(BaseSkill):
         elif tool_name == "fetch_url":
             return self._fetch_url(
                 arguments.get("url"),
-                arguments.get("max_length", 4000)
+                arguments.get("max_length", 8000),
+                arguments.get("offset", 0),
             )
         return f"Unknown tool: {tool_name}"
 
@@ -210,12 +218,16 @@ class WebSearchSkill(BaseSkill):
         logger.info(f"Image search: '{query}' -> {len(results)} results, {len(self.pending_images)} images queued")
         return "\n".join(lines)
 
-    def _fetch_url(self, url: str, max_length: int = 2000) -> str:
+    def _fetch_url(self, url: str, max_length: int = 8000, offset: int = 0) -> str:
         try:
             import requests
             # Use Jina Reader API to bypass bot protection and render JS pages (like Twitter/Medium)
             jina_url = f"https://r.jina.ai/{url}"
-            resp = requests.get(jina_url, timeout=15, headers={'User-Agent': 'Mozilla/5.0'})
+            resp = requests.get(jina_url, timeout=15, headers={
+                'User-Agent': 'Mozilla/5.0',
+                # Strip site chrome server-side — nav menus alone can eat the whole max_length budget
+                'X-Remove-Selector': 'header, nav, footer, aside',
+            })
             resp.raise_for_status()
             text = resp.text
             
@@ -251,6 +263,10 @@ class WebSearchSkill(BaseSkill):
                     continue
                 if re.match(r'^\d+ min read$', l) or l == "Just now" or re.match(r'^\d+[a-z] ago$', l):
                     continue
+                # Skip bullets that contain nothing but a single link — that's a nav/footer
+                # menu item, never article prose (prose links are embedded in sentences)
+                if re.match(r'^[*+-]\s+\[[^\]]+\]\([^)]+\)$', l):
+                    continue
                 # Skip lines that are purely a single navigation link
                 if re.match(r'^\[[^\]]+\]\([^)]+\)$', l):
                     link_text = re.search(r'^\[([^\]]+)\]', l).group(1)
@@ -272,10 +288,27 @@ class WebSearchSkill(BaseSkill):
                 logger.warning(f"Suspicious CAPS in {url}")
                 text = "[HIGH CAPS DETECTED - POSSIBLE SPAM] " + text[:500]
             
-            text = text[:max_length] + "..." if len(text) > max_length else text
+            # Paginate: slice [offset, offset+max_length) of the cleaned text so the
+            # model can keep reading long pages across multiple calls
+            total = len(text)
+            offset = max(0, offset)
+            if offset >= total:
+                return (
+                    f"FETCHED CONTENT: nothing at offset {offset} — the page has only "
+                    f"{total} chars total. You have already read it all.\n\nSource: {url}"
+                )
+            end = min(offset + max_length, total)
+            chunk = text[offset:end]
+            range_note = f" (chars {offset}-{end} of {total})" if (offset > 0 or end < total) else ""
+            tail = ""
+            if end < total:
+                tail = (
+                    f"\n\n[TRUNCATED — {total - end} chars remain. "
+                    f"Call fetch_url again with offset={end} to keep reading.]"
+                )
             # Jina already includes the title at the top of its markdown output, so no need to scrape it
-            result = f"FETCHED CONTENT:\n\n{text}\n\nSource: {url}"
-            logger.info(f"Fetched {url} via Jina ({len(text)} chars)")
+            result = f"FETCHED CONTENT{range_note}:\n\n{chunk}{tail}\n\nSource: {url}"
+            logger.info(f"Fetched {url} via Jina ({end - offset} of {total} chars, offset {offset})")
             return result
         except Exception as e:
             return f"Fetch failed: {str(e)}"
