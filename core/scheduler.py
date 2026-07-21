@@ -422,8 +422,9 @@ class ScheduleManager:
 
     def __init__(self, config: dict):
         self.config = config
+        # Schedules are persona-local — always the persona DB, never _shared_db
+        # (shared.db is for memories/journals only; see pulse.py).
         self._db = config.get("_db")
-        self._shared_db = config.get("_shared_db")
         
         # Resolve legacy path for fallback
         schedules_path = config.get("paths", {}).get("schedules", "data/schedules.json")
@@ -435,7 +436,7 @@ class ScheduleManager:
                 self._save_json([])
 
     def _load(self) -> list[dict]:
-        db = self._shared_db or self._db
+        db = self._db
         if db:
             return db.get_schedules(enabled_only=False)
         return self._load_json()
@@ -539,7 +540,7 @@ class ScheduleManager:
 
         schedules.append(entry)
 
-        db = self._shared_db or self._db
+        db = self._db
         if db:
             db.save_schedule(entry)
         else:
@@ -589,7 +590,7 @@ class ScheduleManager:
 
     def count_active(self) -> int:
         """Count active schedules without running due-task checks."""
-        db = self._shared_db or self._db
+        db = self._db
         if db:
             return len([
                 s for s in db.get_schedules(enabled_only=True)
@@ -608,7 +609,7 @@ class ScheduleManager:
         """
         schedules = self._load()
         # Update the entry in the list and persistence
-        db = self._shared_db or self._db
+        db = self._db
         for s in schedules:
             if s["id"] == schedule_id:
                 if s.get("schedule_type") == "once":
@@ -635,7 +636,7 @@ class ScheduleManager:
 
     def remove(self, schedule_id: str) -> bool:
         """Remove a schedule entirely."""
-        db = self._shared_db or self._db
+        db = self._db
         if db:
             return db.delete_schedule(schedule_id)
 
@@ -703,12 +704,12 @@ class ScheduleManager:
                     except ValueError:
                         pass
 
-        db = self._shared_db or self._db
+        db = self._db
         if db:
             db.save_schedule(entry)
         else:
             self._save_json(schedules)
-            
+
         logger.info(f"Schedule updated: {entry['id']} — {entry.get('task', '')}")
         return entry
 

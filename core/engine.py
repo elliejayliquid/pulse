@@ -46,7 +46,6 @@ class PulseEngine:
         self.channels = channels
         self.skill_registry = skill_registry
         self.db = config.get("_db")
-        self.shared_db = config.get("_shared_db")
         self.runtime_status = config.get("_runtime_status")
 
         # Initialize core components
