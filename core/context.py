@@ -792,8 +792,9 @@ You decide when to lift the timeout — not the human."""
         """Load pending schedules and reminders from DB (or JSON fallback)."""
         schedules = None
 
-        # DB-primary: read from SQLite via the same DB the scheduler writes to
-        db = self._shared_db or self._db
+        # DB-primary: read from SQLite via the same DB the scheduler writes to.
+        # Schedules are persona-local — never _shared_db (that's memories/journals).
+        db = self._db
         if db:
             try:
                 schedules = db.get_schedules(enabled_only=True)

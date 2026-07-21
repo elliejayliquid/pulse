@@ -19,8 +19,9 @@ class UsageTracker:
 
     def __init__(self, config: dict):
         self.config = config
+        # Usage is persona-local — always the persona DB, never _shared_db
+        # (shared.db is for memories/journals only; see pulse.py).
         self._db = config.get("_db")
-        self._shared_db = config.get("_shared_db")
         
         path = config.get("paths", {}).get("usage", "data/usage.json")
         self.path = Path(path)
@@ -39,7 +40,7 @@ class UsageTracker:
         """
         today = datetime.now().strftime("%Y-%m-%d")
         
-        db = self._shared_db or self._db
+        db = self._db
         if db:
             try:
                 db.record_usage(
@@ -111,7 +112,7 @@ class UsageTracker:
         """Get today's usage summary."""
         today = datetime.now().strftime("%Y-%m-%d")
         
-        db = self._shared_db or self._db
+        db = self._db
         if db:
             rows = db.get_usage_today(today)
             if rows:
@@ -141,7 +142,7 @@ class UsageTracker:
 
     def get_recent(self, days: int = 7) -> list[dict]:
         """Get usage for the last N days."""
-        db = self._shared_db or self._db
+        db = self._db
         if db:
             return db.get_usage_recent(days)
             

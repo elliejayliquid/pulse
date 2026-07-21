@@ -150,14 +150,15 @@ class TasksSkill(BaseSkill):
 
     def _get_pending_tasks(self) -> list[dict]:
         """Return pending tasks from the DB or legacy JSON store."""
-        db = self.config.get("_shared_db") or self.config.get("_db")
+        # Tasks are persona-local — always the persona DB, never _shared_db.
+        db = self.config.get("_db")
         if db:
             return db.get_tasks(completed=False)
         data = self._read_tasks()
         return [task for task in data.get("tasks", []) if not task.get("completed")]
 
     def execute(self, tool_name: str, arguments: dict) -> str:
-        db = self.config.get("_shared_db") or self.config.get("_db")
+        db = self.config.get("_db")
 
         if db:
             if tool_name == "add_task":
