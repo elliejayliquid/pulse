@@ -26,7 +26,7 @@ import yaml
 
 from core import yaml_loader
 from gui.backup import BackupManager
-from gui.config_editor import ConfigEditor
+from gui.config_editor import ConfigEditor, _set_top_level_field
 from gui.openrouter_import import parse_openrouter_chat
 from core.db import PulseDatabase
 from core.scheduler import (
@@ -590,6 +590,135 @@ class PulseAPI:
             shutil.copy2(chosen, dest)
         rel_path = dest.relative_to(self.root).as_posix()
         return {"ok": True, "path": rel_path}
+
+    # Avatar + accent (header modal, self-contained — not threaded through
+    # the settings editableSnapshot()/collectEditableChanges() machinery)
+
+    AVATAR_MAX_BYTES = 8 * 1024 * 1024
+    ACCENT_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+
+    @staticmethod
+    def _image_kind(data: bytes) -> tuple[str, str] | None:
+        """Detect avatar image type by magic bytes. Returns (ext, mime) or None."""
+        if data[:8] == b"\x89PNG\r\n\x1a\n":
+            return ".png", "image/png"
+        if data[:3] == b"\xff\xd8\xff":
+            return ".jpg", "image/jpeg"
+        return None
+
+    def pick_avatar(self, persona: str, current_path: str = "") -> dict:
+        """Open a file dialog for an avatar image. Returns the chosen path and a
+        preview data URI — the copy into the persona dir happens in set_avatar
+        (on Save), so the modal can preview before committing."""
+        if not persona or persona == "__base__":
+            return {"ok": False, "error": "Choose a persona first."}
+        if not self._window:
+            return {"ok": False, "error": "File dialog requires pywebview."}
+        try:
+            import webview
+            result = self._window.create_file_dialog(
+                webview.OPEN_DIALOG,
+                allow_multiple=False,
+                file_types=(
+                    "Images (*.png;*.jpg;*.jpeg)",
+                    "All Files (*.*)",
+                ),
+            )
+        except Exception as e:
+            return {"ok": False, "error": f"File dialog failed: {e}"}
+        if not result:
+            return {"ok": False}
+        chosen = Path(result[0])
+        if not chosen.is_file():
+            return {"ok": False, "error": "Selected file does not exist."}
+        try:
+            size = chosen.stat().st_size
+        except OSError as e:
+            return {"ok": False, "error": f"Could not read the image: {e}"}
+        if size > self.AVATAR_MAX_BYTES:
+            return {"ok": False, "error": "Image is too large (max 8 MB)."}
+        try:
+            data = chosen.read_bytes()
+        except OSError as e:
+            return {"ok": False, "error": f"Could not read the image: {e}"}
+        kind = self._image_kind(data)
+        if not kind:
+            return {"ok": False, "error": "That file is not a PNG or JPEG image."}
+        _, mime = kind
+        preview = f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
+        return {"ok": True, "path": str(chosen), "preview": preview}
+
+    def set_avatar(self, persona: str, src_path: str) -> dict:
+        """Validate and copy the chosen image into personas/{persona}/avatar.<ext>,
+        removing any pre-existing avatar.* first so the ext scan can't serve a
+        stale file."""
+        if not persona or persona == "__base__":
+            return {"ok": False, "error": "Choose a persona first."}
+        if not src_path:
+            return {"ok": False, "error": "No image selected."}
+        src = Path(src_path)
+        if not src.is_file():
+            return {"ok": False, "error": "Selected file no longer exists."}
+        try:
+            if src.stat().st_size > self.AVATAR_MAX_BYTES:
+                return {"ok": False, "error": "Image is too large (max 8 MB)."}
+            data = src.read_bytes()
+        except OSError as e:
+            return {"ok": False, "error": f"Could not read the image: {e}"}
+        kind = self._image_kind(data)
+        if not kind:
+            return {"ok": False, "error": "That file is not a PNG or JPEG image."}
+        ext, _ = kind
+        base = self.personas_dir / persona
+        if not base.is_dir():
+            return {"ok": False, "error": f"Persona not found: {persona}"}
+        try:
+            self._remove_avatar_files(base)
+            shutil.copy2(src, base / f"avatar{ext}")
+        except OSError as e:
+            return {"ok": False, "error": f"Could not save the avatar: {e}"}
+        return {"ok": True}
+
+    def clear_avatar(self, persona: str) -> dict:
+        if not persona or persona == "__base__":
+            return {"ok": False, "error": "Choose a persona first."}
+        base = self.personas_dir / persona
+        try:
+            removed = self._remove_avatar_files(base)
+        except OSError as e:
+            return {"ok": False, "error": f"Could not remove the avatar: {e}"}
+        return {"ok": True, "changed": removed}
+
+    @staticmethod
+    def _remove_avatar_files(base: Path) -> bool:
+        removed = False
+        for ext in (".png", ".jpg", ".jpeg"):
+            path = base / f"avatar{ext}"
+            if path.exists():
+                path.unlink()
+                removed = True
+        return removed
+
+    def set_accent(self, persona: str, hex_color: str) -> dict:
+        """Write a top-level `accent: "#rrggbb"` into the persona's config.yaml."""
+        if not persona or persona == "__base__":
+            return {"ok": False, "error": "Choose a persona first."}
+        if not isinstance(hex_color, str) or not self.ACCENT_RE.match(hex_color.strip()):
+            return {"ok": False, "error": "Accent must be a #rrggbb hex color."}
+        hex_color = hex_color.strip().lower()
+        base = self.personas_dir / persona
+        if not base.is_dir():
+            return {"ok": False, "error": f"Persona not found: {persona}"}
+        config_path = base / "config.yaml"
+        try:
+            original = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
+            updated = _set_top_level_field(original, "accent", hex_color)
+            if updated == original:
+                return {"ok": True, "changed": False, "accent": hex_color}
+            self.config_editor._atomic_write(config_path, updated)
+        except (OSError, ValueError) as e:
+            return {"ok": False, "error": f"Could not save the accent color: {e}"}
+        return {"ok": True, "changed": True, "accent": hex_color}
 
     def pick_folder(self, current_path: str = "") -> dict:
         if not self._window:

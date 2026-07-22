@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Pulse Engine</title>
-  <link rel="stylesheet" href="style.css?v=20260610l">
+  <link rel="stylesheet" href="style.css?v=20260723a">
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
   <meta http-equiv="Pragma" content="no-cache">
   <meta http-equiv="Expires" content="0">
@@ -506,6 +506,35 @@
         <button id="lanternDimBtn" class="modal-btn ghost" type="button" title="Clears mode, mood, focus, and open thread, keeping only your note. Save afterwards to dim the lantern — use when the state is stale.">Dim / Clear</button>
         <button id="lanternSaveBtn" class="modal-btn secondary" type="button">Save</button>
         <button id="lanternCloseBtn" class="modal-btn ghost" type="button">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="avatarDialog" class="modal-overlay hidden">
+    <div class="modal-card avatar-card">
+      <h2 class="modal-title">Avatar &amp; Accent</h2>
+      <p class="modal-body">Set this companion's photo and theme color.</p>
+      <div id="avatarNotice" class="notice-pill"></div>
+      <div class="avatar-edit-body">
+        <div class="avatar-preview-row">
+          <div id="avatarPreview" class="avatar-preview">P</div>
+          <div class="avatar-preview-actions">
+            <button id="avatarChooseBtn" class="modal-btn secondary" type="button">Choose Photo</button>
+            <button id="avatarRemoveBtn" class="modal-btn ghost" type="button">Remove Photo</button>
+          </div>
+        </div>
+        <label class="avatar-accent-field">
+          <span>Accent Color</span>
+          <div class="avatar-accent-row">
+            <input id="avatarAccentColor" type="color" value="#f97316" aria-label="Accent color">
+            <input id="avatarAccentHex" class="avatar-accent-hex" type="text" spellcheck="false" maxlength="7" value="#f97316" aria-label="Accent color hex">
+            <button id="avatarAccentReset" class="modal-btn ghost" type="button" title="Reset accent to the default orange">Default</button>
+          </div>
+        </label>
+      </div>
+      <div class="modal-actions">
+        <button id="avatarSaveBtn" class="modal-btn secondary" type="button">Save</button>
+        <button id="avatarCloseBtn" class="modal-btn ghost" type="button">Close</button>
       </div>
     </div>
   </div>
