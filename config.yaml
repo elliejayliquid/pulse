@@ -113,6 +113,13 @@ context:
     min_similarity: 0.30
     core_importance: 8
     heartbeat_query: false
+    # Gentle additive recency tiebreaker on the similarity score. It only breaks
+    # near-ties toward the newer memory (e.g. a fact that superseded an older
+    # one) — too small to bury a genuinely relevant old memory. Fresh memory gets
+    # +recency_weight; it decays with an e-fold time of recency_tau_days.
+    # Set recency_weight: 0 to restore pure cosine + importance ordering.
+    recency_weight: 0.02
+    recency_tau_days: 180
   inject_skills:
     - lantern
 

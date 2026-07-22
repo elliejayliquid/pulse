@@ -136,6 +136,18 @@ CONTEXT_FIELDS = {
     "inject_skills": "Context Injection Skills",
 }
 
+# context.recall.* — passive semantic recall knobs. Nested under `context:`,
+# written via _set_deep_nested_field. Only the two knobs the GUI exposes; the
+# rest (min_similarity, recency_weight, …) stay config-file-only for now.
+RECALL_FIELDS = {
+    "enabled": "Passive Recall",
+    "top_k": "Recall Top-K",
+}
+
+RECALL_LIMITS = {
+    "top_k": (1, 50),
+}
+
 # MCP server entries (skills.mcp.servers). The list is replaced as a whole —
 # entries are validated individually, never merged.
 MCP_SERVER_KEYS = {"name", "command", "args", "env", "url", "tool_timeout"}
@@ -233,6 +245,7 @@ class ConfigEditor:
         skills = changes.get("skills", {}) or {}
         channels = changes.get("channels", {}) or {}
         context = changes.get("context", {}) or {}
+        recall = changes.get("recall", {}) or {}
         paths = changes.get("paths", {}) or {}
         # None = untouched; [] = deliberately clear all servers.
         mcp_servers = changes.get("mcp_servers", None)
@@ -252,6 +265,8 @@ class ConfigEditor:
             raise ValueError("Channels changes must be an object.")
         if not isinstance(context, dict):
             raise ValueError("Context changes must be an object.")
+        if not isinstance(recall, dict):
+            raise ValueError("Recall changes must be an object.")
         if not isinstance(paths, dict):
             raise ValueError("Path changes must be an object.")
         valid_skills = self._editable_skill_names(persona_dir)
@@ -266,6 +281,7 @@ class ConfigEditor:
         unknown_skills = sorted(set(skills) - valid_skills)
         unknown_channels = sorted(set(channels) - CHANNEL_NAMES)
         unknown_context = sorted(set(context) - set(CONTEXT_FIELDS))
+        unknown_recall = sorted(set(recall) - set(RECALL_FIELDS))
         unknown_paths = sorted(set(paths) - set(PATH_FIELDS))
         if (
             unknown_identity
@@ -279,6 +295,7 @@ class ConfigEditor:
             or unknown_skills
             or unknown_channels
             or unknown_context
+            or unknown_recall
             or unknown_paths
         ):
             unknown = (
@@ -293,6 +310,7 @@ class ConfigEditor:
                 + [f"skills.{name}" for name in unknown_skills]
                 + [f"channels.{name}" for name in unknown_channels]
                 + [f"context.{name}" for name in unknown_context]
+                + [f"context.recall.{name}" for name in unknown_recall]
                 + [f"paths.{name}" for name in unknown_paths]
             )
             raise ValueError(f"Unsupported field(s): {', '.join(unknown)}")
@@ -345,6 +363,10 @@ class ConfigEditor:
             "context": {
                 key: self._clean_context_value(key, value, valid_skills)
                 for key, value in context.items()
+            },
+            "recall": {
+                key: self._clean_recall_value(key, value)
+                for key, value in recall.items()
             },
             "mcp_servers": (
                 None if mcp_servers is None
@@ -600,6 +622,19 @@ class ConfigEditor:
                 cleaned[field] = raw
         return cleaned
 
+    def _clean_recall_value(self, key: str, value: Any) -> int | bool:
+        label = RECALL_FIELDS[key]
+        if key == "enabled":
+            if type(value) is not bool:
+                raise ValueError(f"{label} must be true or false.")
+            return value
+        if type(value) is not int:
+            raise ValueError(f"{label} must be a whole number.")
+        low, high = RECALL_LIMITS[key]
+        if not low <= value <= high:
+            raise ValueError(f"{label} must be between {low} and {high}.")
+        return value
+
     def _clean_context_value(self, key: str, value: Any, valid_skills: set[str]) -> list[str]:
         if key != "inject_skills":
             raise ValueError(f"Unsupported field: context.{key}")
@@ -660,6 +695,7 @@ class ConfigEditor:
             or changes["skills"]
             or changes["channels"]
             or changes["context"]
+            or changes["recall"]
             or changes["paths"]
             or changes.get("mcp_servers") is not None
         ):
@@ -687,6 +723,8 @@ class ConfigEditor:
                     updated = _set_deep_nested_field(updated, ["channels", key, field], value)
             for key, value in changes["context"].items():
                 updated = _set_nested_field(updated, "context", key, value)
+            for key, value in changes["recall"].items():
+                updated = _set_deep_nested_field(updated, ["context", "recall", key], value)
             for key, value in changes["paths"].items():
                 updated = _set_nested_field(updated, "paths", key, value)
             if changes.get("mcp_servers") is not None:

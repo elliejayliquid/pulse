@@ -788,6 +788,24 @@ function setDevTickField(key, value) {
   devTickConfig()[key] = value;
 }
 
+function recallConfig() {
+  state.current.config = state.current.config || {};
+  state.current.config.context = state.current.config.context || {};
+  state.current.config.context.recall = state.current.config.context.recall || {};
+  return state.current.config.context.recall;
+}
+
+// Fallbacks mirror config.yaml's base recall defaults, so an untouched dialog
+// shows real values whether or not the persona overrides them.
+function recallValue(key, fallback) {
+  const recall = state.current?.config?.context?.recall || {};
+  return recall[key] ?? fallback;
+}
+
+function setRecallField(key, value) {
+  recallConfig()[key] = value;
+}
+
 function mcpServersValue() {
   const list = state.current?.config?.skills?.mcp?.servers;
   return Array.isArray(list) ? list : [];
@@ -942,6 +960,16 @@ function renderSkillDialogBody(skill) {
 
   if (skill?.name === "memory") {
     return `
+      <div class="skill-setting-stack">
+        <label class="check-row skill-setting-check" title="Automatically surface memories relevant to the current message, without the companion having to search. Takes effect after restart.">
+          <span>Passive recall</span>
+          <input id="skillRecallEnabled" type="checkbox" ${recallValue("enabled", true) ? "checked" : ""}>
+        </label>
+        <label class="sample-path-label" title="How many similarity-matched memories to surface per message (the 'Possibly relevant' hints). Default 6.">Recall Top-K
+          <input id="skillRecallTopK" type="number" min="1" max="50" step="1" value="${escapeHtml(String(recallValue("top_k", 6)))}">
+        </label>
+        <p class="field-hint">Passive recall pulls in memories similar to what the human just said. Top-K caps how many hints appear each turn. Other tuning (similarity threshold, recency) lives in config.yaml.</p>
+      </div>
       <div class="skill-setting-stack">
         <div class="skill-empty-settings">
           <strong>Memory browsing lives in Continuity</strong>
@@ -1424,6 +1452,15 @@ function bindSkillDialogControls(skill) {
   }
 
   if (skill?.name === "memory") {
+    el("skillRecallEnabled")?.addEventListener("change", (event) => {
+      setRecallField("enabled", event.target.checked);
+      setDirty(hasEditableChanges());
+    });
+    el("skillRecallTopK")?.addEventListener("input", (event) => {
+      const raw = event.target.value;
+      setRecallField("top_k", raw === "" ? "" : Number(raw));
+      setDirty(hasEditableChanges());
+    });
     el("skillOpenMemories")?.addEventListener("click", () => openContinuityTarget("browse-memories"));
     return;
   }
@@ -3084,6 +3121,10 @@ function editableSnapshot() {
     context: {
       inject_skills: contextInjectSkills(),
     },
+    recall: {
+      enabled: Boolean(recallValue("enabled", true)),
+      top_k: recallValue("top_k", 6),
+    },
     dev_tick: {
       enabled: Boolean(devTickValue("enabled", false)),
       interval_minutes: devTickValue("interval_minutes", 720),
@@ -3184,8 +3225,8 @@ function numberOrEmpty(value) {
 
 function collectEditableChanges() {
   const current = editableSnapshot();
-  const original = state.originalEditable || { identity: {}, provider: {}, server: {}, model: {}, context_budget: {}, tts: {}, skills: {}, channels: {}, paths: {}, context: {}, dev_tick: {}, heartbeat: {} };
-  const changes = { identity: {}, provider: {}, server: {}, model: {}, context_budget: {}, tts: {}, skills: {}, channels: {}, paths: {}, context: {}, dev_tick: {}, heartbeat: {} };
+  const original = state.originalEditable || { identity: {}, provider: {}, server: {}, model: {}, context_budget: {}, tts: {}, skills: {}, channels: {}, paths: {}, context: {}, recall: {}, dev_tick: {}, heartbeat: {} };
+  const changes = { identity: {}, provider: {}, server: {}, model: {}, context_budget: {}, tts: {}, skills: {}, channels: {}, paths: {}, context: {}, recall: {}, dev_tick: {}, heartbeat: {} };
 
   for (const [key, value] of Object.entries(current.identity)) {
     if (key === "traits") {
@@ -3273,6 +3314,12 @@ function collectEditableChanges() {
     }
   }
 
+  for (const [key, value] of Object.entries(current.recall)) {
+    if (value !== original.recall?.[key]) {
+      changes.recall[key] = key === "enabled" ? value : numberOrEmpty(value);
+    }
+  }
+
   for (const [key, value] of Object.entries(current.dev_tick)) {
     if (value !== original.dev_tick?.[key]) {
       changes.dev_tick[key] = key === "enabled" ? value : key === "schedule_time" ? value : numberOrEmpty(value);
@@ -3305,6 +3352,7 @@ function hasEditableChanges() {
     || Object.keys(changes.channels).length > 0
     || Object.keys(changes.paths).length > 0
     || Object.keys(changes.context).length > 0
+    || Object.keys(changes.recall).length > 0
     || Object.keys(changes.dev_tick).length > 0
     || Object.keys(changes.heartbeat).length > 0
     || changes.mcp_servers !== undefined;

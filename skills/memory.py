@@ -123,6 +123,28 @@ class MemorySkill(BaseSkill):
             {
                 "type": "function",
                 "function": {
+                    "name": "expand_memory",
+                    "description": (
+                        "Read the full text of a memory by its ID. Use this when a "
+                        "memory surfaced in your context is shown truncated (e.g. an "
+                        "old session summary ending in '…') and you want the whole "
+                        "thing before relying on it."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "memory_id": {
+                                "type": "integer",
+                                "description": "The ID of the memory to expand (the number shown with it).",
+                            },
+                        },
+                        "required": ["memory_id"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
                     "name": "list_memories",
                     "description": (
                         "List your most recent memories (newest first). "
@@ -353,6 +375,10 @@ class MemorySkill(BaseSkill):
             return self._search_memory(
                 query=arguments.get("query", ""),
             )
+        elif tool_name == "expand_memory":
+            return self._expand_memory(
+                memory_id=arguments.get("memory_id"),
+            )
         elif tool_name == "list_memories":
             return self._list_memories(
                 limit=arguments.get("limit", 10),
@@ -541,6 +567,36 @@ class MemorySkill(BaseSkill):
         except IOError as e:
             logger.error(f"Failed to save memory: {e}")
             return f"Failed to save memory: {e}"
+
+    def _expand_memory(self, memory_id) -> str:
+        """Return the full, untruncated text of a memory by ID.
+
+        Passive recall shows long session summaries clipped to ~300 chars; this
+        lets the companion pull the whole thing on demand. Read-only — it does not
+        bump retrieval_count, so it never distorts active-search boosting.
+        """
+        if memory_id is None or str(memory_id).strip() == "":
+            return "memory_id is required — which memory do you want to expand?"
+        parsed_id = self._parse_id(str(memory_id))
+        if parsed_id is None:
+            return f"Invalid memory ID: {memory_id}"
+
+        if self._db:
+            mem = self._db.get_memory(parsed_id)
+            if not mem:
+                return f"Memory #{memory_id} not found."
+            return self._format_memory_result(mem)
+
+        # JSON fallback
+        mem_file = self.memory_dir / f"memory_{parsed_id:03d}.json"
+        if not mem_file.exists():
+            return f"Memory #{memory_id} not found."
+        try:
+            with open(mem_file, "r", encoding="utf-8") as f:
+                mem = json.load(f)
+        except (json.JSONDecodeError, IOError) as e:
+            return f"Failed to read memory #{memory_id}: {e}"
+        return self._format_memory_result(mem)
 
     # ── History ──────────────────────────────────────────────
 

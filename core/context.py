@@ -247,6 +247,23 @@ class ContextManager:
         except (ValueError, TypeError):
             return False
 
+    def _memory_age_days(self, mem: dict) -> Optional[float]:
+        """Age of a memory in days (fractional), or None if the date is unknown.
+
+        Mirrors MemorySkill._memory_age_days but keeps sub-day resolution so the
+        recency bonus is smooth for memories written within the same day. DB
+        timestamps are UTC — never compare against a naive local now().
+        """
+        raw_date = mem.get("date") or mem.get("created_at") or ""
+        if not raw_date:
+            return None
+        try:
+            dt = datetime.fromisoformat(str(raw_date).replace("Z", "+00:00"))
+            now = datetime.now(dt.tzinfo) if dt.tzinfo else datetime.now()
+            return max(0.0, (now - dt).total_seconds() / 86400.0)
+        except (ValueError, TypeError):
+            return None
+
     def _load_journal_context(self) -> str:
         """Load pinned identity entries + recent transient entries for context."""
         if not self._journal_skill:
@@ -710,6 +727,12 @@ You decide when to lift the timeout — not the human."""
         # Score the pool against query
         scored_pool = []
         min_similarity = recall_cfg.get("min_similarity", 0.30)
+        # Recency is a gentle *additive tiebreaker*, never a gate: it can only
+        # nudge near-equal cosine hits toward the newer memory (helps the
+        # superseded-fact case) and is far too small to pull a genuinely relevant
+        # old memory below min_similarity. recency_weight: 0 disables it entirely.
+        recency_weight = recall_cfg.get("recency_weight", 0.02)
+        recency_tau_days = recall_cfg.get("recency_tau_days", 180)
 
         for m in pool_memories:
             m_id = m.get("id")
@@ -731,7 +754,14 @@ You decide when to lift the timeout — not the human."""
             base_score = max_similarity(query_vecs, candidate_vecs)
             if base_score >= min_similarity:
                 importance_boost = importance * 0.002
-                final_score = base_score + importance_boost
+                recency_boost = 0.0
+                if recency_weight and recency_tau_days > 0:
+                    age_days = self._memory_age_days(m)
+                    if age_days is not None:
+                        recency_boost = recency_weight * float(
+                            np.exp(-age_days / recency_tau_days)
+                        )
+                final_score = base_score + importance_boost + recency_boost
                 scored_pool.append((final_score, base_score, m))
 
         # Sort pool by final_score DESC
@@ -778,9 +808,17 @@ You decide when to lift the timeout — not the human."""
 
                 if m_type == "session_log":
                     text = mem.get("text", "")
-                    if len(text) > 300:
+                    truncated = len(text) > 300
+                    if truncated:
                         text = text[:300] + "…"
-                    lines.append(f"- {self._memory_date_prefix(mem)} (from an old session summary) {text}{tag_str}")
+                    # Only advertise expand_memory when the display was clipped —
+                    # a summary shown in full has nothing more to fetch.
+                    mem_id = mem.get("id")
+                    expand = (
+                        f" — call expand_memory({mem_id}) for the full summary"
+                        if truncated and mem_id is not None else ""
+                    )
+                    lines.append(f"- {self._memory_date_prefix(mem)} (from an old session summary) {text}{tag_str}{expand}")
                 else:
                     is_historical = (mem.get("status") == "historical") or self._memory_is_expired(mem)
                     caveat = " (historical — may no longer be current)" if is_historical else ""
