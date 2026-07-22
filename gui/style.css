@@ -8,8 +8,14 @@
   --text-tertiary: #666572;
   --accent: #f97316;
   --accent-hover: #fb923c;
-  --accent-dim: rgba(249, 115, 22, 0.1);
-  --accent-line: rgba(249, 115, 22, 0.42);
+  /* RGB tri:  the glow/shadow/tint system references this so a per-persona
+     accent recolors every rgba(...) usage, not just the solid --accent ones.
+     app.js overrides --accent-rgb / --accent-deep / --accent-deeper per persona. */
+  --accent-rgb: 249, 115, 22;
+  --accent-deep: #ea580c;
+  --accent-deeper: #c2410c;
+  --accent-dim: rgba(var(--accent-rgb), 0.1);
+  --accent-line: rgba(var(--accent-rgb), 0.42);
   --success: #22c55e;
   --danger: #ef4444;
   --warning: #f59e0b;
@@ -113,7 +119,7 @@ button {
   height: 10px;
   border-radius: 50%;
   background: var(--accent);
-  box-shadow: 0 0 16px rgba(249, 115, 22, 0.45);
+  box-shadow: 0 0 16px rgba(var(--accent-rgb), 0.45);
   animation: heartbeat-dot 2.8s ease-in-out infinite;
 }
 
@@ -219,7 +225,7 @@ button {
 .selector:hover, .ghost-btn:hover, .icon-btn:hover, .secondary-btn:hover {
   border-color: var(--accent);
   background: var(--accent-dim);
-  box-shadow: 0 0 0 3px rgba(249, 115, 22, 0.045);
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.045);
 }
 
 .ghost-btn, .primary-btn, .secondary-btn {
@@ -242,11 +248,11 @@ button {
 
 @keyframes new-persona-glow {
   0%, 100% {
-    box-shadow: 0 0 8px 1px rgba(249, 115, 22, 0.28);
+    box-shadow: 0 0 8px 1px rgba(var(--accent-rgb), 0.28);
     border-color: var(--accent-line);
   }
   50% {
-    box-shadow: 0 0 18px 4px rgba(249, 115, 22, 0.6);
+    box-shadow: 0 0 18px 4px rgba(var(--accent-rgb), 0.6);
     border-color: var(--accent-hover);
   }
 }
@@ -254,20 +260,20 @@ button {
 @media (prefers-reduced-motion: reduce) {
   .ghost-btn.attention:not(:disabled) {
     animation: none;
-    box-shadow: 0 0 14px 2px rgba(249, 115, 22, 0.5);
+    box-shadow: 0 0 14px 2px rgba(var(--accent-rgb), 0.5);
   }
 }
 
 .primary-btn {
-  background: linear-gradient(135deg, var(--accent), #ea580c);
+  background: linear-gradient(135deg, var(--accent), var(--accent-deep));
   border: 0;
   color: white;
-  box-shadow: 0 8px 22px rgba(249, 115, 22, 0.22);
+  box-shadow: 0 8px 22px rgba(var(--accent-rgb), 0.22);
 }
 
 .primary-btn:hover {
   transform: translateY(-1px);
-  box-shadow: 0 10px 26px rgba(249, 115, 22, 0.34);
+  box-shadow: 0 10px 26px rgba(var(--accent-rgb), 0.34);
 }
 
 .secondary-btn {
@@ -337,8 +343,8 @@ button {
 
 .persona-hero:hover,
 .section:hover {
-  border-color: rgba(249, 115, 22, 0.34);
-  box-shadow: 0 0 0 1px rgba(249, 115, 22, 0.035);
+  border-color: rgba(var(--accent-rgb), 0.34);
+  box-shadow: 0 0 0 1px rgba(var(--accent-rgb), 0.035);
 }
 
 .avatar {
@@ -347,7 +353,7 @@ button {
   border-radius: 14px;
   display: grid;
   place-items: center;
-  background: linear-gradient(135deg, var(--accent), #c2410c);
+  background: linear-gradient(135deg, var(--accent), var(--accent-deeper));
   color: white;
   font-size: 30px;
   font-weight: 700;
@@ -358,6 +364,41 @@ button {
   width: 100%;
   height: 100%;
   object-fit: cover;
+}
+
+/* The letter square / photo doubles as the "edit avatar & accent" button.
+   Disabled for the base config (no persona to theme). */
+.avatar.clickable {
+  cursor: pointer;
+  position: relative;
+  transition: box-shadow 0.15s ease, transform 0.15s ease;
+}
+
+.avatar.clickable:hover,
+.avatar.clickable:focus-visible {
+  box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent-line);
+  outline: none;
+}
+
+.avatar.clickable::after {
+  content: "✎";
+  position: absolute;
+  right: 3px;
+  bottom: 2px;
+  font-size: 11px;
+  line-height: 1;
+  padding: 2px 3px;
+  border-radius: 5px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  pointer-events: none;
+}
+
+.avatar.clickable:hover::after,
+.avatar.clickable:focus-visible::after {
+  opacity: 1;
 }
 
 .hero-copy {
@@ -435,14 +476,14 @@ h1 {
 }
 
 .hero-start-btn {
-  background: linear-gradient(135deg, var(--accent), #ea580c);
+  background: linear-gradient(135deg, var(--accent), var(--accent-deep));
   color: white;
-  box-shadow: 0 4px 14px rgba(249, 115, 22, 0.22);
+  box-shadow: 0 4px 14px rgba(var(--accent-rgb), 0.22);
 }
 
 .hero-start-btn:hover:not(:disabled) {
   transform: translateY(-1px);
-  box-shadow: 0 6px 20px rgba(249, 115, 22, 0.34);
+  box-shadow: 0 6px 20px rgba(var(--accent-rgb), 0.34);
 }
 
 .hero-stop-btn {
@@ -595,7 +636,7 @@ select {
 }
 
 input:hover, textarea:hover, select:hover {
-  border-color: rgba(249, 115, 22, 0.32);
+  border-color: rgba(var(--accent-rgb), 0.32);
 }
 
 select:disabled {
@@ -677,11 +718,11 @@ input[type="number"]::-webkit-outer-spin-button {
 }
 
 .continuity-row:hover {
-  border-color: rgba(249, 115, 22, 0.34);
+  border-color: rgba(var(--accent-rgb), 0.34);
   background:
-    linear-gradient(90deg, rgba(249, 115, 22, 0.055), transparent 42%),
+    linear-gradient(90deg, rgba(var(--accent-rgb), 0.055), transparent 42%),
     var(--surface);
-  box-shadow: 0 0 0 1px rgba(249, 115, 22, 0.035);
+  box-shadow: 0 0 0 1px rgba(var(--accent-rgb), 0.035);
 }
 
 .continuity-icon {
@@ -692,7 +733,7 @@ input[type="number"]::-webkit-outer-spin-button {
   border-right: 1px solid rgba(255, 255, 255, 0.07);
   padding-right: 18px;
   color: var(--accent);
-  filter: drop-shadow(0 0 10px rgba(249, 115, 22, 0.32));
+  filter: drop-shadow(0 0 10px rgba(var(--accent-rgb), 0.32));
   transition: color 140ms ease, filter 140ms ease, transform 140ms ease;
 }
 
@@ -700,8 +741,8 @@ input[type="number"]::-webkit-outer-spin-button {
 .continuity-row:focus-within .continuity-icon {
   color: var(--accent-hover);
   filter:
-    drop-shadow(0 0 8px rgba(249, 115, 22, 0.8))
-    drop-shadow(0 0 22px rgba(249, 115, 22, 0.46));
+    drop-shadow(0 0 8px rgba(var(--accent-rgb), 0.8))
+    drop-shadow(0 0 22px rgba(var(--accent-rgb), 0.46));
   transform: translateY(-1px);
 }
 
@@ -820,9 +861,9 @@ input[type="number"]::-webkit-outer-spin-button {
   place-items: center;
   min-height: 18px;
   padding: 0 8px;
-  border: 1px solid rgba(249, 115, 22, 0.28);
+  border: 1px solid rgba(var(--accent-rgb), 0.28);
   border-radius: 999px;
-  background: rgba(249, 115, 22, 0.08);
+  background: rgba(var(--accent-rgb), 0.08);
   color: var(--accent-hover);
   font: 700 9px/1 var(--mono);
   text-transform: uppercase;
@@ -901,9 +942,9 @@ input[type="number"]::-webkit-outer-spin-button {
 }
 
 .core-anchor-btn.has-content::after {
-  border-color: rgba(249, 115, 22, 0.58);
+  border-color: rgba(var(--accent-rgb), 0.58);
   background: var(--accent);
-  box-shadow: 0 0 10px rgba(249, 115, 22, 0.45);
+  box-shadow: 0 0 10px rgba(var(--accent-rgb), 0.45);
 }
 
 .core-anchor-btn.is-empty::after {
@@ -945,9 +986,9 @@ input[type="number"]::-webkit-outer-spin-button {
   justify-content: space-between;
   gap: 14px;
   padding: 13px 14px;
-  border: 1px solid rgba(249, 115, 22, 0.2);
+  border: 1px solid rgba(var(--accent-rgb), 0.2);
   border-radius: 8px;
-  background: rgba(249, 115, 22, 0.055);
+  background: rgba(var(--accent-rgb), 0.055);
 }
 
 .continuity-about strong {
@@ -1010,7 +1051,7 @@ input[type="number"]::-webkit-outer-spin-button {
 .hb-input:focus {
   border-color: var(--accent-line);
   outline: none;
-  box-shadow: 0 0 0 2px rgba(249, 115, 22, 0.1);
+  box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.1);
 }
 
 .hb-input:read-only {
@@ -1180,7 +1221,7 @@ textarea {
 
 .chip, .channel {
   padding: 5px 10px;
-  border: 1px solid rgba(249, 115, 22, 0.22);
+  border: 1px solid rgba(var(--accent-rgb), 0.22);
   border-radius: 999px;
   background: var(--accent-dim);
   color: var(--accent-hover);
@@ -1205,7 +1246,7 @@ textarea {
 }
 
 .channel.on {
-  border-color: rgba(249, 115, 22, 0.22);
+  border-color: rgba(var(--accent-rgb), 0.22);
   background: var(--accent-dim);
   color: var(--accent-hover);
 }
@@ -1259,7 +1300,7 @@ textarea {
 
 .chip:hover, .channel:hover {
   border-color: var(--accent);
-  background: rgba(249, 115, 22, 0.16);
+  background: rgba(var(--accent-rgb), 0.16);
 }
 
 #traits .chip {
@@ -1286,7 +1327,7 @@ textarea {
 }
 
 .chip-edit:focus {
-  box-shadow: 0 0 0 2px rgba(249, 115, 22, 0.25);
+  box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.25);
 }
 
 .chip-cancel,
@@ -1334,7 +1375,7 @@ textarea {
 }
 
 .secret-row:hover, .runtime-item:hover {
-  border-color: rgba(249, 115, 22, 0.3);
+  border-color: rgba(var(--accent-rgb), 0.3);
   background: #18181d;
 }
 
@@ -1366,7 +1407,7 @@ textarea {
 }
 
 .secrets-edit-btn:hover:not(:disabled) {
-  border-color: rgba(249, 115, 22, 0.45);
+  border-color: rgba(var(--accent-rgb), 0.45);
   color: var(--accent);
 }
 
@@ -1476,7 +1517,7 @@ textarea {
   height: 100%;
   background: linear-gradient(90deg, var(--accent), var(--accent-hover));
   border-radius: 2px;
-  box-shadow: 0 0 8px rgba(249, 115, 22, 0.25);
+  box-shadow: 0 0 8px rgba(var(--accent-rgb), 0.25);
 }
 
 .slider-handle {
@@ -1618,7 +1659,7 @@ textarea {
 }
 
 .skill-card.on {
-  border-color: rgba(249, 115, 22, 0.32);
+  border-color: rgba(var(--accent-rgb), 0.32);
   background: var(--accent-dim);
 }
 
@@ -1635,7 +1676,7 @@ textarea {
 
 .skill-card.on .skill-icon {
   color: var(--accent-hover);
-  background: rgba(249, 115, 22, 0.15);
+  background: rgba(var(--accent-rgb), 0.15);
 }
 
 .skill-card.on .skill-state {
@@ -1844,9 +1885,9 @@ textarea {
   place-items: center;
   min-width: 0;
   aspect-ratio: 1;
-  border: 1px solid rgba(249, 115, 22, 0.14);
+  border: 1px solid rgba(var(--accent-rgb), 0.14);
   border-radius: 5px;
-  background: rgba(249, 115, 22, 0.06);
+  background: rgba(var(--accent-rgb), 0.06);
   color: var(--accent-hover);
   font: 13px/1 var(--body);
   transition: border-color 140ms ease, background 140ms ease, transform 140ms ease;
@@ -1904,7 +1945,7 @@ textarea {
   place-items: center;
   aspect-ratio: 1;
   overflow: hidden;
-  border: 1px solid rgba(249, 115, 22, 0.16);
+  border: 1px solid rgba(var(--accent-rgb), 0.16);
   border-radius: 6px;
   background: #fff;
 }
@@ -2079,7 +2120,7 @@ textarea {
 
 .task-quick-check:hover span {
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(249, 115, 22, 0.12);
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.12);
 }
 
 .task-delete-mini {
@@ -2441,7 +2482,7 @@ textarea {
 }
 
 .secret-mini-btn:hover {
-  border-color: rgba(249, 115, 22, 0.45);
+  border-color: rgba(var(--accent-rgb), 0.45);
   color: var(--accent);
 }
 
@@ -2540,9 +2581,9 @@ textarea {
 }
 
 .lantern-field:hover {
-  border-color: rgba(249, 115, 22, 0.34);
+  border-color: rgba(var(--accent-rgb), 0.34);
   background: #222228;
-  box-shadow: 0 0 0 1px rgba(249, 115, 22, 0.035);
+  box-shadow: 0 0 0 1px rgba(var(--accent-rgb), 0.035);
 }
 
 .lantern-field span {
@@ -2565,7 +2606,7 @@ textarea {
 }
 
 .lantern-field:hover strong {
-  border-left-color: rgba(249, 115, 22, 0.36);
+  border-left-color: rgba(var(--accent-rgb), 0.36);
 }
 
 /* Shared notice pill used at the top of modal editors (core, lantern).
@@ -2654,7 +2695,7 @@ textarea {
 .lantern-edit-field textarea:focus {
   outline: none;
   border-color: var(--accent);
-  box-shadow: 0 0 0 1px rgba(249, 115, 22, 0.16);
+  box-shadow: 0 0 0 1px rgba(var(--accent-rgb), 0.16);
 }
 
 .lantern-edit-actions {
@@ -2662,6 +2703,95 @@ textarea {
   justify-content: flex-end;
   gap: 10px;
   flex-wrap: wrap;
+}
+
+/* Avatar & accent modal (opened from the header avatar) */
+.avatar-card {
+  width: min(460px, calc(100vw - 48px));
+  background: var(--surface-raised);
+}
+
+.avatar-edit-body {
+  display: grid;
+  gap: 18px;
+}
+
+.avatar-preview-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.avatar-preview {
+  width: 84px;
+  height: 84px;
+  flex: 0 0 auto;
+  border-radius: 16px;
+  display: grid;
+  place-items: center;
+  background: linear-gradient(135deg, var(--accent), var(--accent-deeper));
+  color: #fff;
+  font-size: 36px;
+  font-weight: 700;
+  overflow: hidden;
+}
+
+.avatar-preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.avatar-preview-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.avatar-accent-field {
+  display: grid;
+  gap: 8px;
+}
+
+.avatar-accent-field > span {
+  color: var(--text-tertiary);
+  font: 700 10px/1.2 var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.avatar-accent-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.avatar-accent-row input[type="color"] {
+  width: 46px;
+  height: 34px;
+  flex: 0 0 auto;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  cursor: pointer;
+}
+
+.avatar-accent-hex {
+  width: 120px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text-primary);
+  font: 500 13px/1.2 var(--mono);
+  padding: 8px 10px;
+  text-transform: uppercase;
+}
+
+.avatar-accent-hex:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px rgba(var(--accent-rgb), 0.16);
 }
 
 .memories-card {
@@ -3520,7 +3650,7 @@ textarea {
 .memory-view-tabs button:hover,
 .memory-type-tabs button:hover {
   color: var(--text-primary);
-  border-color: rgba(249, 115, 22, 0.28);
+  border-color: rgba(var(--accent-rgb), 0.28);
   background: #222228;
 }
 
@@ -3528,7 +3658,7 @@ textarea {
 .memory-type-tabs button.active {
   background: var(--accent-dim);
   color: var(--accent-hover);
-  border-color: rgba(249, 115, 22, 0.28);
+  border-color: rgba(var(--accent-rgb), 0.28);
 }
 
 .memories-body,
@@ -3569,9 +3699,9 @@ textarea {
 }
 
 .memory-card:hover {
-  border-color: rgba(249, 115, 22, 0.34);
+  border-color: rgba(var(--accent-rgb), 0.34);
   background: #222228;
-  box-shadow: 0 0 0 1px rgba(249, 115, 22, 0.035);
+  box-shadow: 0 0 0 1px rgba(var(--accent-rgb), 0.035);
 }
 
 .memory-card.archived {
@@ -3601,9 +3731,9 @@ textarea {
 
 .memory-history-pill {
   padding: 3px 7px;
-  border: 1px solid rgba(249, 115, 22, 0.22);
+  border: 1px solid rgba(var(--accent-rgb), 0.22);
   border-radius: 999px;
-  background: rgba(249, 115, 22, 0.07);
+  background: rgba(var(--accent-rgb), 0.07);
   color: var(--accent-hover) !important;
   font: 700 10px/1 var(--body) !important;
 }
@@ -3718,7 +3848,7 @@ textarea {
   gap: 5px;
   margin: 0 0 10px;
   padding: 10px 12px;
-  border: 1px solid rgba(249, 115, 22, 0.18);
+  border: 1px solid rgba(var(--accent-rgb), 0.18);
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.025);
 }
@@ -3804,7 +3934,7 @@ textarea {
 .memory-editor-field textarea:focus {
   outline: none;
   border-color: var(--accent);
-  box-shadow: 0 0 0 1px rgba(249, 115, 22, 0.16);
+  box-shadow: 0 0 0 1px rgba(var(--accent-rgb), 0.16);
 }
 
 /* The checkbox sits bare (no border/background) so there's no box edge to
@@ -3848,7 +3978,7 @@ textarea {
 }
 
 .memory-editor-advanced[open] {
-  border-color: rgba(249, 115, 22, 0.24);
+  border-color: rgba(var(--accent-rgb), 0.24);
 }
 
 .memory-editor-advanced .advanced-grid {
@@ -3936,7 +4066,7 @@ textarea {
 }
 
 .core-section:hover {
-  border-color: rgba(249, 115, 22, 0.28);
+  border-color: rgba(var(--accent-rgb), 0.28);
   background: #222228;
 }
 
@@ -3992,7 +4122,7 @@ textarea {
 .core-editor-section textarea:focus {
   outline: none;
   border-color: var(--accent);
-  box-shadow: 0 0 0 1px rgba(249, 115, 22, 0.16);
+  box-shadow: 0 0 0 1px rgba(var(--accent-rgb), 0.16);
 }
 
 .memory-empty {
@@ -4096,7 +4226,7 @@ textarea {
 }
 
 .backup-item:hover {
-  border-color: rgba(249, 115, 22, 0.22);
+  border-color: rgba(var(--accent-rgb), 0.22);
   background: #222228;
 }
 
@@ -4183,7 +4313,7 @@ textarea {
 .tts-badge.design {
   color: var(--accent);
   background: var(--accent-dim);
-  border: 1px solid rgba(249, 115, 22, 0.22);
+  border: 1px solid rgba(var(--accent-rgb), 0.22);
 }
 
 .tts-badge.clone {

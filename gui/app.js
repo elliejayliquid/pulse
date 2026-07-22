@@ -46,6 +46,7 @@ const state = {
   secretsRows: new Map(),
   currentLantern: null,
   lanternBaseline: null,
+  avatarModal: null,
   currentCoreAnchor: null,
   coreBaseline: {},
   memoryBrowse: { view: "active", kind: "fact", page: 0, pageSize: 25, total: 0, hasMore: false, items: [] },
@@ -322,6 +323,7 @@ let noticeTimer = null;
 let secretsBackdropPointerDown = false;
 let lanternBackdropPointerDown = false;
 let memoriesBackdropPointerDown = false;
+let avatarBackdropPointerDown = false;
 let journalBackdropPointerDown = false;
 let importBackdropPointerDown = false;
 let coreBackdropPointerDown = false;
@@ -2971,6 +2973,7 @@ function renderHero(data) {
     data.status?.pid ? `pid ${data.status.pid}` : "",
   ].filter(Boolean).join(" · ");
 
+  const isBase = data.name === "__base__";
   const avatar = el("avatar");
   avatar.innerHTML = "";
   if (data.paths?.avatar) {
@@ -2981,6 +2984,255 @@ function renderHero(data) {
   } else {
     avatar.textContent = firstLetter(displayName);
   }
+  // The avatar doubles as the "edit avatar & accent" button — but not for the
+  // base config, which has no persona to theme.
+  avatar.classList.toggle("clickable", !isBase);
+  if (isBase) {
+    avatar.removeAttribute("role");
+    avatar.removeAttribute("tabindex");
+    avatar.removeAttribute("title");
+  } else {
+    avatar.setAttribute("role", "button");
+    avatar.setAttribute("tabindex", "0");
+    avatar.setAttribute("title", "Set avatar & accent color");
+  }
+
+  // Recolor the whole UI to this persona's accent (default orange for base).
+  if (isBase) {
+    resetAccent();
+  } else {
+    applyAccent(normalizeAccent(data.config?.accent));
+  }
+}
+
+const DEFAULT_ACCENT = "#f97316";
+const ACCENT_HEX_RE = /^#[0-9a-fA-F]{6}$/;
+const ACCENT_VARS = ["--accent", "--accent-hover", "--accent-rgb", "--accent-deep", "--accent-deeper"];
+
+function normalizeAccent(value) {
+  return typeof value === "string" && ACCENT_HEX_RE.test(value.trim())
+    ? value.trim().toLowerCase()
+    : DEFAULT_ACCENT;
+}
+
+function hexToRgb(hex) {
+  const parts = hex.replace("#", "").match(/.{2}/g) || ["00", "00", "00"];
+  return {
+    r: parseInt(parts[0], 16),
+    g: parseInt(parts[1], 16),
+    b: parseInt(parts[2], 16),
+  };
+}
+
+function clampChannel(value) {
+  return Math.max(0, Math.min(255, Math.round(value)));
+}
+
+function rgbToHex(r, g, b) {
+  return "#" + [r, g, b].map((v) => clampChannel(v).toString(16).padStart(2, "0")).join("");
+}
+
+// Mix toward white / black by `amount` (0..1).
+function lightenHex(hex, amount) {
+  const { r, g, b } = hexToRgb(hex);
+  return rgbToHex(r + (255 - r) * amount, g + (255 - g) * amount, b + (255 - b) * amount);
+}
+
+function darkenHex(hex, amount) {
+  const { r, g, b } = hexToRgb(hex);
+  return rgbToHex(r * (1 - amount), g * (1 - amount), b * (1 - amount));
+}
+
+// Override the accent CSS custom properties on :root. --accent-dim and
+// --accent-line are defined in style.css in terms of --accent-rgb, so setting
+// --accent-rgb recolors every rgba(...) glow/tint too.
+function applyAccent(hex) {
+  const accent = normalizeAccent(hex);
+  const { r, g, b } = hexToRgb(accent);
+  const root = document.documentElement.style;
+  root.setProperty("--accent", accent);
+  root.setProperty("--accent-hover", lightenHex(accent, 0.12));
+  root.setProperty("--accent-rgb", `${r}, ${g}, ${b}`);
+  root.setProperty("--accent-deep", darkenHex(accent, 0.12));
+  root.setProperty("--accent-deeper", darkenHex(accent, 0.24));
+}
+
+// Drop the inline overrides so the stylesheet's default orange applies.
+function resetAccent() {
+  const root = document.documentElement.style;
+  ACCENT_VARS.forEach((prop) => root.removeProperty(prop));
+}
+
+// --- Avatar & accent modal (opened from the header avatar) ---
+
+function setAvatarNotice(message) {
+  el("avatarNotice").textContent = message;
+}
+
+// Reads the live persona into the modal's working state and repaints the modal.
+// Used on open and after a successful save (re-baseline).
+function resetAvatarModalFromCurrent() {
+  const data = state.current || {};
+  const accent = normalizeAccent(data.config?.accent);
+  state.avatarModal = {
+    baseAccent: accent,
+    accent,
+    baseAvatar: data.paths?.avatar || "",
+    pending: null, // null = unchanged, {path, preview} = new pick, {cleared:true}
+  };
+  setAvatarAccentInputs(accent);
+  renderAvatarPreview();
+}
+
+function setAvatarAccentInputs(hex) {
+  const accent = normalizeAccent(hex);
+  el("avatarAccentColor").value = accent;
+  el("avatarAccentHex").value = accent;
+}
+
+function renderAvatarPreview() {
+  const modal = state.avatarModal;
+  const preview = el("avatarPreview");
+  preview.innerHTML = "";
+  let src = "";
+  if (modal.pending && modal.pending.preview) {
+    src = modal.pending.preview;
+  } else if (!(modal.pending && modal.pending.cleared)) {
+    src = modal.baseAvatar;
+  }
+  if (src) {
+    const img = document.createElement("img");
+    img.src = src;
+    img.alt = "";
+    preview.appendChild(img);
+  } else {
+    preview.textContent = firstLetter(state.current?.display_name || state.current?.name);
+  }
+  const hasImage = Boolean(src);
+  el("avatarRemoveBtn").disabled = !hasImage;
+}
+
+function avatarIsDirty() {
+  const modal = state.avatarModal;
+  if (!modal) return false;
+  return modal.pending !== null || modal.accent !== modal.baseAccent;
+}
+
+function openAvatarDialog() {
+  if (!state.current || state.current.name === "__base__") {
+    setNotice("Choose a persona first.", "warning", NOTICE_WARNING_MS);
+    return;
+  }
+  resetAvatarModalFromCurrent();
+  setAvatarNotice("Pick a photo and set this companion's accent color.");
+  el("avatarDialog").classList.remove("hidden");
+  document.body.classList.add("modal-open");
+}
+
+function hideAvatarDialog() {
+  // Undo any live accent preview back to the persona's saved accent.
+  if (state.avatarModal) applyAccent(state.avatarModal.baseAccent);
+  el("avatarDialog").classList.add("hidden");
+  state.avatarModal = null;
+  document.body.classList.remove("modal-open");
+}
+
+async function closeAvatarDialog() {
+  if (avatarIsDirty()) {
+    const ok = await showConfirm(
+      "Discard unsaved changes?",
+      "You have unsaved avatar or accent changes. Closing now will discard them.",
+      "Discard",
+      "secondary"
+    );
+    if (!ok) return;
+  }
+  hideAvatarDialog();
+}
+
+async function chooseAvatarPhoto() {
+  if (!state.avatarModal) return;
+  const result = await api().pick_avatar(state.current.name, state.avatarModal.baseAvatar);
+  if (!result || result.ok === false) {
+    if (result && result.error) setAvatarNotice(result.error);
+    return;
+  }
+  state.avatarModal.pending = { path: result.path, preview: result.preview };
+  renderAvatarPreview();
+  setAvatarNotice("New photo ready — Save to apply.");
+}
+
+function removeAvatarPhoto() {
+  const modal = state.avatarModal;
+  if (!modal) return;
+  if (!modal.baseAvatar && !(modal.pending && modal.pending.preview)) {
+    setAvatarNotice("No photo to remove.");
+    return;
+  }
+  modal.pending = { cleared: true };
+  renderAvatarPreview();
+  setAvatarNotice("Photo will be removed on Save — the letter returns.");
+}
+
+function onAvatarAccentColorInput() {
+  const hex = normalizeAccent(el("avatarAccentColor").value);
+  el("avatarAccentHex").value = hex;
+  state.avatarModal.accent = hex;
+  applyAccent(hex); // live preview
+}
+
+function onAvatarAccentHexInput() {
+  const raw = el("avatarAccentHex").value.trim();
+  if (!ACCENT_HEX_RE.test(raw)) return; // wait for a full valid hex
+  const hex = raw.toLowerCase();
+  el("avatarAccentColor").value = hex;
+  state.avatarModal.accent = hex;
+  applyAccent(hex); // live preview
+}
+
+function resetAvatarAccent() {
+  if (!state.avatarModal) return;
+  state.avatarModal.accent = DEFAULT_ACCENT;
+  setAvatarAccentInputs(DEFAULT_ACCENT);
+  applyAccent(DEFAULT_ACCENT);
+}
+
+async function saveAvatarEditor() {
+  const modal = state.avatarModal;
+  if (!modal) return;
+  if (!avatarIsDirty()) {
+    setAvatarNotice("No changes to save.");
+    return;
+  }
+  const persona = state.current.name;
+
+  if (modal.pending && modal.pending.path) {
+    const res = await api().set_avatar(persona, modal.pending.path);
+    if (!res.ok) {
+      setAvatarNotice(res.error || "Could not save the avatar.");
+      return;
+    }
+  } else if (modal.pending && modal.pending.cleared) {
+    const res = await api().clear_avatar(persona);
+    if (!res.ok) {
+      setAvatarNotice(res.error || "Could not remove the avatar.");
+      return;
+    }
+  }
+
+  if (modal.accent !== modal.baseAccent) {
+    const res = await api().set_accent(persona, modal.accent);
+    if (!res.ok) {
+      setAvatarNotice(res.error || "Could not save the accent color.");
+      return;
+    }
+  }
+
+  // Reload persona detail so paths.avatar + config.accent refresh and the hero
+  // re-renders (image ↔ letter, recolor). Keeps the modal open, then re-baselines.
+  await loadPersona(persona);
+  resetAvatarModalFromCurrent();
+  setAvatarNotice("Saved.");
 }
 
 function syncBaseUrlVisibility() {
@@ -5085,6 +5337,31 @@ function wireEvents() {
   el("lanternDialog").addEventListener("click", (e) => {
     if (lanternBackdropPointerDown && e.target === el("lanternDialog")) closeLanternDialog();
     lanternBackdropPointerDown = false;
+  });
+
+  const avatarEl = el("avatar");
+  avatarEl.addEventListener("click", () => {
+    if (avatarEl.classList.contains("clickable")) openAvatarDialog();
+  });
+  avatarEl.addEventListener("keydown", (e) => {
+    if ((e.key === "Enter" || e.key === " ") && avatarEl.classList.contains("clickable")) {
+      e.preventDefault();
+      openAvatarDialog();
+    }
+  });
+  el("avatarChooseBtn").addEventListener("click", () => { void chooseAvatarPhoto(); });
+  el("avatarRemoveBtn").addEventListener("click", removeAvatarPhoto);
+  el("avatarAccentColor").addEventListener("input", onAvatarAccentColorInput);
+  el("avatarAccentHex").addEventListener("input", onAvatarAccentHexInput);
+  el("avatarAccentReset").addEventListener("click", resetAvatarAccent);
+  el("avatarSaveBtn").addEventListener("click", () => { void saveAvatarEditor(); });
+  el("avatarCloseBtn").addEventListener("click", () => { void closeAvatarDialog(); });
+  el("avatarDialog").addEventListener("pointerdown", (event) => {
+    avatarBackdropPointerDown = event.target === el("avatarDialog");
+  });
+  el("avatarDialog").addEventListener("click", (e) => {
+    if (avatarBackdropPointerDown && e.target === el("avatarDialog")) void closeAvatarDialog();
+    avatarBackdropPointerDown = false;
   });
   el("memoriesCloseBtn").addEventListener("click", () => { void hideMemoriesDialog(); });
   el("memoriesDialog").addEventListener("pointerdown", (event) => {
