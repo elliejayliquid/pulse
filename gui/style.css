@@ -3184,6 +3184,10 @@ textarea {
   font: 500 11px/1.45 var(--body);
 }
 
+.import-archive-confirm > span.import-summary-warning {
+  color: #fbbf24;
+}
+
 .import-archive-confirm .import-summary {
   margin: 0;
 }

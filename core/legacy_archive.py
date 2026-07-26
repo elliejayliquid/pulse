@@ -351,6 +351,248 @@ def archive_batch_status(conn: sqlite3.Connection, batch_id: str) -> dict[str, d
     }
 
 
+def continuation_preflight(
+    conn: sqlite3.Connection,
+    batch_id: str,
+    landing_budget_tokens: int,
+    recent_tail_exchanges: int,
+) -> dict[str, Any]:
+    """Describe archive-to-live work without changing any database rows."""
+    batch = conn.execute(
+        "SELECT source, source_version, continuation_conversation_id "
+        "FROM import_batches WHERE id = ?",
+        (batch_id,),
+    ).fetchone()
+    if not batch:
+        raise ValueError("Staged import not found.")
+
+    source = str(batch[0] or "unknown")
+    source_version = str(batch[1] or "")
+    conversation_id = str(batch[2] or "")
+    if not conversation_id:
+        raise ValueError("Choose Continue on one conversation before reviewing continuation.")
+
+    conversation = conn.execute(
+        "SELECT source_id, title, created_at, updated_at, model, choice "
+        "FROM import_conversations WHERE batch_id = ? AND conversation_id = ?",
+        (batch_id, conversation_id),
+    ).fetchone()
+    if not conversation:
+        raise ValueError("Selected continuation is not part of this staged import.")
+    if str(conversation[5] or "") != "keep":
+        raise ValueError("Selected continuation must be kept in the staged review.")
+
+    source_conversation_id = str(conversation[0] or conversation_id)
+    archived = conn.execute(
+        "SELECT id, title, created_at, updated_at, model, message_count, "
+        "archived_at, live_session_id "
+        "FROM legacy_sessions WHERE source = ? AND source_conversation_id = ?",
+        (source, source_conversation_id),
+    ).fetchone()
+    if not archived:
+        raise ValueError(
+            "Add the selected conversation to searchable history before continuing it."
+        )
+
+    archive_id = str(archived[0])
+    message_rows = conn.execute(
+        "SELECT role, content, timestamp FROM legacy_messages "
+        "WHERE session_id = ? AND role IN ('user', 'assistant') "
+        "ORDER BY position, id",
+        (archive_id,),
+    ).fetchall()
+    if not message_rows:
+        raise ValueError("Selected archived conversation has no usable dialogue.")
+
+    landing_budget_tokens = max(1, int(landing_budget_tokens or 1))
+    recent_tail_exchanges = max(1, int(recent_tail_exchanges or 1))
+    estimated_tokens = _message_token_estimate(message_rows)
+    requires_bridge = estimated_tokens > landing_budget_tokens
+    if requires_bridge:
+        tail = _recent_tail_plan(
+            message_rows,
+            exchange_limit=recent_tail_exchanges,
+            token_budget=landing_budget_tokens,
+        )
+        strategy = "bridge_summary_recent_tail"
+    else:
+        tail = {
+            "message_count": len(message_rows),
+            "exchange_count": _exchange_count(message_rows),
+            "estimated_tokens": estimated_tokens,
+        }
+        strategy = "full_conversation"
+
+    summary_count = conn.execute(
+        "SELECT COUNT(*) FROM legacy_summaries WHERE session_id = ?",
+        (archive_id,),
+    ).fetchone()[0]
+    active = _active_session_preflight(conn)
+    live_session_id = str(archived[7] or "")
+    first_timestamp = next((str(row[2]) for row in message_rows if row[2]), "")
+    last_timestamp = next(
+        (str(row[2]) for row in reversed(message_rows) if row[2]),
+        "",
+    )
+
+    return {
+        "batch_id": batch_id,
+        "conversation_id": conversation_id,
+        "archive": {
+            "id": archive_id,
+            "source": source,
+            "source_version": source_version,
+            "source_conversation_id": source_conversation_id,
+            "title": str(archived[1] or conversation[1] or ""),
+            "created_at": str(archived[2] or conversation[2] or first_timestamp),
+            "updated_at": str(archived[3] or conversation[3] or last_timestamp),
+            "first_message_at": first_timestamp,
+            "last_message_at": last_timestamp,
+            "model": str(archived[4] or conversation[4] or ""),
+            "message_count": len(message_rows),
+            "estimated_tokens": estimated_tokens,
+            "archived_at": str(archived[6] or ""),
+            "summary_count": int(summary_count),
+            "keyword_search_ready": True,
+            "live_session_id": live_session_id,
+        },
+        "freshness": {
+            "classification": "historical_import",
+            "label": "Dated imported background",
+            "note": (
+                "Treat claims from this archived period as historical context "
+                "until they are confirmed in the current relationship."
+            ),
+        },
+        "current_session": active,
+        "bridge_preparation": {
+            "required": requires_bridge,
+            "status": "preparation_required" if requires_bridge else "not_required",
+            "method": "hierarchical_chunk_rollup" if requires_bridge else "none",
+            "existing_archive_summary_rows": int(summary_count),
+            "coverage_verified": False if requires_bridge else None,
+            "reuse_policy": (
+                "Existing summaries are reusable only after compatible type, "
+                "generation lineage, and gap-free source-span coverage are verified."
+            ),
+        },
+        "landing": {
+            "strategy": strategy,
+            "configured_budget_tokens": landing_budget_tokens,
+            "requires_bridge_summary": requires_bridge,
+            "seed_message_count": int(tail["message_count"]),
+            "seed_exchange_count": int(tail["exchange_count"]),
+            "seed_estimated_tokens": int(tail["estimated_tokens"]),
+            "seed_within_budget": int(tail["estimated_tokens"]) <= landing_budget_tokens,
+            "recent_tail_exchange_limit": recent_tail_exchanges,
+        },
+        "safety": {
+            "read_only": True,
+            "backup_required_before_apply": True,
+            "archive_remains_intact": True,
+            "idempotency_guard": "legacy_sessions.live_session_id",
+            "already_continued": bool(live_session_id),
+            "must_stop_persona_before_apply": True,
+        },
+        "can_apply_later": not bool(live_session_id),
+        "execution_available": False,
+    }
+
+
+def _active_session_preflight(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Return compact current-session state for a continuation preflight."""
+    session = conn.execute(
+        "SELECT id, title, created_at, closed_at FROM sessions "
+        "WHERE closed_at IS NULL ORDER BY created_at DESC LIMIT 1"
+    ).fetchone()
+    if not session:
+        return {
+            "exists": False,
+            "message_count": 0,
+            "estimated_tokens": 0,
+            "action": "start_landing_session",
+        }
+
+    message_rows = conn.execute(
+        "SELECT role, content, timestamp FROM messages "
+        "WHERE session_id = ? ORDER BY id",
+        (str(session[0]),),
+    ).fetchall()
+    first_timestamp = next((str(row[2]) for row in message_rows if row[2]), "")
+    last_timestamp = next(
+        (str(row[2]) for row in reversed(message_rows) if row[2]),
+        "",
+    )
+    return {
+        "exists": True,
+        "id": str(session[0]),
+        "title": str(session[1] or "Chat"),
+        "created_at": str(session[2] or ""),
+        "first_message_at": first_timestamp,
+        "last_message_at": last_timestamp,
+        "message_count": len(message_rows),
+        "estimated_tokens": _message_token_estimate(message_rows),
+        "action": (
+            "summarize_and_close"
+            if message_rows
+            else "close_without_summary"
+        ),
+    }
+
+
+def _message_token_estimate(rows: list[sqlite3.Row | tuple]) -> int:
+    """Use the same deliberately rough four-chars-per-token import estimate."""
+    characters = sum(len(str(row[1] or "")) for row in rows)
+    return max(1, characters // 4) if rows else 0
+
+
+def _exchange_count(rows: list[sqlite3.Row | tuple]) -> int:
+    """Count user-led exchange groups while tolerating imperfect old transcripts."""
+    exchanges = 0
+    previous_role = ""
+    for row in rows:
+        role = str(row[0] or "")
+        if role == "user" and previous_role != "user":
+            exchanges += 1
+        elif exchanges == 0:
+            exchanges = 1
+        previous_role = role
+    return exchanges
+
+
+def _recent_tail_plan(
+    rows: list[sqlite3.Row | tuple],
+    exchange_limit: int,
+    token_budget: int,
+) -> dict[str, int]:
+    """Plan a recent raw tail using whole user-led exchange boundaries."""
+    exchanges: list[list[sqlite3.Row | tuple]] = []
+    current: list[sqlite3.Row | tuple] = []
+    previous_role = ""
+    for row in rows:
+        role = str(row[0] or "")
+        if current and role == "user" and previous_role != "user":
+            exchanges.append(current)
+            current = []
+        current.append(row)
+        previous_role = role
+    if current:
+        exchanges.append(current)
+
+    selected = exchanges[-max(1, exchange_limit):]
+    while len(selected) > 1:
+        flattened = [row for exchange in selected for row in exchange]
+        if _message_token_estimate(flattened) <= token_budget:
+            break
+        selected.pop(0)
+    flattened = [row for exchange in selected for row in exchange]
+    return {
+        "message_count": len(flattened),
+        "exchange_count": len(selected),
+        "estimated_tokens": _message_token_estimate(flattened),
+    }
+
+
 def remove_archived_conversation(
     conn: sqlite3.Connection,
     batch_id: str,

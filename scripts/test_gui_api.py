@@ -958,6 +958,11 @@ def test_gui_api_stage_import_quarantines_and_resumes():
         assert prepared["summary"]["excluded_messages"] == 2
         assert prepared["summary"]["continuation"]["title"] == "Keeper Chat"
         assert prepared["summary"]["continuation"]["will_be_added"] is True
+        continuation_before_archive = api.prepare_import_continuation(
+            "demo", preview["preview_id"]
+        )
+        assert continuation_before_archive["ok"] is False
+        assert "searchable history" in continuation_before_archive["error"]
 
         from core.db import PulseDatabase
         from skills.memory import MemorySkill
@@ -1025,6 +1030,74 @@ def test_gui_api_stage_import_quarantines_and_resumes():
             assert conn.execute(
                 "SELECT COUNT(*) FROM legacy_messages_fts WHERE legacy_messages_fts MATCH 'light'"
             ).fetchone()[0] == 1
+
+        continuation = api.prepare_import_continuation("demo", preview["preview_id"])
+        assert continuation["ok"] is True
+        preflight = continuation["preflight"]
+        assert preflight["archive"]["source"] == "claude"
+        assert preflight["archive"]["source_conversation_id"] == "conv-keeper"
+        assert preflight["archive"]["message_count"] == 2
+        assert preflight["archive"]["first_message_at"] == "2026-06-01T00:00:00+00:00"
+        assert preflight["archive"]["last_message_at"] == "2026-06-01T00:01:00+00:00"
+        assert preflight["freshness"]["classification"] == "historical_import"
+        assert preflight["current_session"]["exists"] is False
+        assert preflight["current_session"]["action"] == "start_landing_session"
+        assert preflight["bridge_preparation"]["required"] is False
+        assert preflight["bridge_preparation"]["status"] == "not_required"
+        assert preflight["landing"]["strategy"] == "full_conversation"
+        assert preflight["landing"]["seed_message_count"] == 2
+        assert preflight["landing"]["seed_within_budget"] is True
+        assert preflight["safety"]["read_only"] is True
+        assert preflight["safety"]["backup_required_before_apply"] is True
+        assert preflight["execution_available"] is False
+
+        with closing(sqlite3.connect(db_path)) as conn:
+            conn.execute(
+                "INSERT INTO sessions(id, title) VALUES (?, ?)",
+                ("active-demo", "Current chat"),
+            )
+            conn.execute(
+                "INSERT INTO messages(session_id, role, content, timestamp) "
+                "VALUES (?, ?, ?, ?)",
+                ("active-demo", "user", "Current life stays safe.", "2026-06-03T00:00:00Z"),
+            )
+            conn.commit()
+            before = {
+                table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                for table in ("sessions", "messages", "legacy_sessions", "legacy_messages")
+            }
+
+        continuation_with_live = api.prepare_import_continuation(
+            "demo", preview["preview_id"]
+        )
+        assert continuation_with_live["ok"] is True
+        current = continuation_with_live["preflight"]["current_session"]
+        assert current["exists"] is True
+        assert current["id"] == "active-demo"
+        assert current["message_count"] == 1
+        assert current["action"] == "summarize_and_close"
+        with closing(sqlite3.connect(db_path)) as conn:
+            after = {
+                table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                for table in ("sessions", "messages", "legacy_sessions", "legacy_messages")
+            }
+        assert after == before
+
+        from core.legacy_archive import continuation_preflight
+        with closing(sqlite3.connect(db_path)) as conn:
+            bridge = continuation_preflight(
+                conn,
+                preview["preview_id"],
+                landing_budget_tokens=1,
+                recent_tail_exchanges=1,
+            )
+        assert bridge["landing"]["strategy"] == "bridge_summary_recent_tail"
+        assert bridge["landing"]["requires_bridge_summary"] is True
+        assert bridge["landing"]["seed_exchange_count"] == 1
+        assert bridge["bridge_preparation"]["required"] is True
+        assert bridge["bridge_preparation"]["status"] == "preparation_required"
+        assert bridge["bridge_preparation"]["method"] == "hierarchical_chunk_rollup"
+        assert bridge["bridge_preparation"]["coverage_verified"] is False
 
         persona_db = PulseDatabase(db_path)
         try:

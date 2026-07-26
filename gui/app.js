@@ -72,6 +72,7 @@ const state = {
     batchId: "",
     stagedAt: "",
     archiveConfirm: null,
+    continuationPreflight: null,
     archiveStatus: {},
     checkingSavedImport: false,
   },
@@ -226,6 +227,7 @@ const fallbackApi = {
   async delete_import_batch() { return { ok: false, error: "Run through pywebview to manage staged imports." }; },
   async prepare_import_archive() { return { ok: false, error: "Run through pywebview to review archive additions." }; },
   async archive_import_batch() { return { ok: false, error: "Run through pywebview to add chats to the archive." }; },
+  async prepare_import_continuation() { return { ok: false, error: "Run through pywebview to review a live continuation." }; },
   async get_import_archive_status() { return { ok: false, error: "Run through pywebview to inspect the archive." }; },
   async remove_import_archive_conversation() { return { ok: false, error: "Run through pywebview to correct the archive." }; },
   async list_reminders() { return { ok: false, error: "Run through pywebview to manage reminders." }; },
@@ -3970,13 +3972,14 @@ async function resumeStagedImport(batchId) {
     batchId: result.preview_id || "",
     stagedAt: result.staged_at || "",
     archiveConfirm: null,
+    continuationPreflight: null,
     archiveStatus: {},
     checkingSavedImport: state.importPreview.checkingSavedImport,
   };
   el("importPath").value = state.importPreview.path;
   await refreshImportArchiveStatus();
   renderImportPreview();
-  setImportNotice("Staged import loaded. Keep/exclude choices save automatically now.");
+  setImportNotice("Saved review loaded. Keep/exclude choices save automatically.");
   if (state.importPreview.selectedId) {
     await selectImportConversation(state.importPreview.selectedId);
   }
@@ -4020,6 +4023,7 @@ function resetImportPreviewState() {
     batchId: "",
     stagedAt: "",
     archiveConfirm: null,
+    continuationPreflight: null,
     archiveStatus: {},
     checkingSavedImport: false,
   };
@@ -4066,6 +4070,7 @@ async function previewImportPath(path = "") {
     batchId: "",
     stagedAt: "",
     archiveConfirm: null,
+    continuationPreflight: null,
     archiveStatus: {},
     checkingSavedImport: false,
   };
@@ -4076,7 +4081,7 @@ async function previewImportPath(path = "") {
   const skippedCount = Number(state.importPreview.batch?.skipped_message_count || 0);
   setImportNotice(skippedCount
     ? "Preview loaded. Red conversations contain empty or skipped messages you can review in the transcript."
-    : "Preview loaded. Stage this import to keep it and your choices for continued review.");
+    : "Preview loaded. Save this review if you want to return to it later.");
   if (state.importPreview.selectedId) {
     await selectImportConversation(state.importPreview.selectedId);
   }
@@ -4107,22 +4112,23 @@ async function stageCurrentImport() {
   const preview = state.importPreview;
   if (!persona || persona === "__base__" || !preview.previewId || !preview.batch) return;
   el("importStageBtn").disabled = true;
-  setImportNotice("Saving import into the persona's staging area...");
+  setImportNotice("Saving this review to the companion database...");
   const result = await api().stage_import(persona, preview.previewId, importCurationPayload());
   if (!result?.ok) {
     updateImportStagedControls();
-    setImportNotice(result?.error || "Could not stage this import.");
+    setImportNotice(result?.error || "Could not save this review.");
     return;
   }
   preview.staged = true;
   preview.batchId = result.batch_id || preview.previewId;
   preview.stagedAt = new Date().toISOString();
   preview.archiveConfirm = null;
+  preview.continuationPreflight = null;
   preview.archiveStatus = {};
   await refreshImportArchiveStatus();
   updateImportStagedControls();
   setImportNotice(
-    `Staged ${result.staged_conversations} conversation${result.staged_conversations === 1 ? "" : "s"} `
+    `Saved ${result.staged_conversations} conversation${result.staged_conversations === 1 ? "" : "s"} `
     + `(${result.staged_messages} messages) for continued review. `
     + "Choices save automatically now. Nothing is live conversation context."
   );
@@ -4133,25 +4139,26 @@ async function deleteStagedImport() {
   const preview = state.importPreview;
   if (!persona || persona === "__base__" || !preview.staged || !preview.batchId) return;
   const confirmed = await showConfirm(
-    "Delete staged import?",
-    "This removes the staged review copy. Your export file is not touched — you can stage it again later. Chats already added to the searchable archive are not removed.",
-    "Delete staged",
+    "Delete saved review?",
+    "This removes the saved review copy. Your export file is not touched — you can save it again later. Chats already added to history are not removed.",
+    "Delete review",
     "danger"
   );
   if (!confirmed) return;
   const result = await api().delete_import_batch(persona, preview.batchId);
   if (!result?.ok) {
-    setImportNotice(result?.error || "Could not delete the staged import.");
+    setImportNotice(result?.error || "Could not delete the saved review.");
     return;
   }
   preview.staged = false;
   preview.batchId = "";
   preview.stagedAt = "";
   preview.archiveConfirm = null;
+  preview.continuationPreflight = null;
   preview.archiveStatus = {};
   updateImportStagedControls();
   renderImportArchiveConfirmation();
-  setImportNotice("Staged review removed. The loaded preview is temporary again.");
+  setImportNotice("Saved review removed. The loaded preview is temporary again.");
 }
 
 function persistImportCuration() {
@@ -4163,7 +4170,7 @@ async function saveImportCurationNow() {
   const persona = state.current?.name;
   const preview = state.importPreview;
   if (!persona || persona === "__base__" || !preview.staged || !preview.batchId) {
-    return { ok: false, error: "Stage this import before adding chats to the archive." };
+    return { ok: false, error: "Save this review before adding chats to history." };
   }
   const result = await api().update_import_curation(
     persona,
@@ -4206,8 +4213,9 @@ async function refreshImportArchiveStatus() {
 
 function invalidateImportArchiveConfirmation() {
   const preview = state.importPreview;
-  if (!preview.archiveConfirm) return;
+  if (!preview.archiveConfirm && !preview.continuationPreflight) return;
   preview.archiveConfirm = null;
+  preview.continuationPreflight = null;
   renderImportArchiveConfirmation();
   updateImportStagedControls();
 }
@@ -4219,7 +4227,8 @@ async function prepareOrArchiveImport() {
   el("importArchiveBtn").disabled = true;
 
   if (!preview.archiveConfirm) {
-    setImportNotice("Checking the staged import before adding it to the archive...");
+    preview.continuationPreflight = null;
+    setImportNotice("Checking the saved review before adding chats to history...");
     const saved = await saveImportCurationNow();
     if (!saved?.ok) {
       updateImportStagedControls();
@@ -4227,7 +4236,7 @@ async function prepareOrArchiveImport() {
     }
     const result = await api().prepare_import_archive(persona, preview.batchId);
     if (!result?.ok) {
-      setImportNotice(result?.error || "Could not prepare the archive summary.");
+      setImportNotice(result?.error || "Could not prepare the history-change summary.");
       updateImportStagedControls();
       return;
     }
@@ -4242,15 +4251,15 @@ async function prepareOrArchiveImport() {
     const excludedCount = Number(result.summary?.excluded_conversations || 0);
     setImportNotice(
       hasArchiveWork
-        ? "Review the archive summary below. Nothing has been added yet."
+        ? "Review the history changes below. Nothing has been added yet."
         : (excludedCount
-          ? "Review saved. Excluded chats are outside the archive, and there are no kept chats waiting to be added."
-          : "The archive already matches this staged review. No confirmation is needed.")
+          ? "Review saved. Excluded chats are outside searchable history, and there are no kept chats waiting to be added."
+          : "History already matches this saved review. No confirmation is needed.")
     );
     return;
   }
 
-  setImportNotice("Adding kept, sanitized chats to the searchable archive...");
+  setImportNotice("Adding kept, sanitized chats to searchable history...");
   const previouslyArchived = new Set(
     Object.entries(preview.archiveStatus || {})
       .filter(([, item]) => item.archived)
@@ -4258,11 +4267,12 @@ async function prepareOrArchiveImport() {
   );
   const result = await api().archive_import_batch(persona, preview.batchId);
   if (!result?.ok) {
-    setImportNotice(result?.error || "Could not add these chats to the archive.");
+    setImportNotice(result?.error || "Could not add these chats to history.");
     updateImportStagedControls();
     return;
   }
   preview.archiveConfirm = null;
+  preview.continuationPreflight = null;
   await refreshImportArchiveStatus();
   const newlyArchived = Object.entries(preview.archiveStatus || {})
     .filter(([conversationId, item]) => item.archived && !previouslyArchived.has(conversationId))
@@ -4288,14 +4298,55 @@ async function prepareOrArchiveImport() {
     ? Number(result.legacy_migration?.session_count || 0)
     : 0;
   const migrationWarning = result.legacy_migration?.error
-    ? " The older standalone legacy.db could not be migrated; this staged import was still archived safely."
+    ? " The older standalone legacy.db could not be migrated; this saved review was still added safely."
     : "";
   setImportNotice(
     added
-      ? `Added ${added} conversation${added === 1 ? "" : "s"} (${messages} messages) to the searchable archive.${migrated ? ` Migrated ${migrated} older legacy.db chat${migrated === 1 ? "" : "s"} too.` : ""}${migrationWarning} Nothing was added to live conversation context.`
+      ? `Added ${added} conversation${added === 1 ? "" : "s"} (${messages} messages) to searchable history.${migrated ? ` Migrated ${migrated} older legacy.db chat${migrated === 1 ? "" : "s"} too.` : ""}${migrationWarning} Nothing was added to live conversation context.`
       : (migrated
         ? `Migrated ${migrated} older legacy.db chat${migrated === 1 ? "" : "s"} into this persona database. Nothing was added to live conversation context.`
         : `No new conversations were added. Kept chats may already be archived or empty after sanitation.${migrationWarning}`)
+  );
+}
+
+async function prepareImportContinuation() {
+  const persona = state.current?.name;
+  const preview = state.importPreview;
+  if (!persona || persona === "__base__" || !preview.staged || !preview.batchId) return;
+  const continuationId = preview.continuationId || "";
+  const archiveStatus = preview.archiveStatus?.[continuationId];
+  if (!continuationId) {
+    setImportNotice("Choose Continue on one conversation first.");
+    return;
+  }
+  if (!archiveStatus?.archived) {
+    setImportNotice("Add the selected conversation to searchable history before reviewing continuation.");
+    return;
+  }
+  if (archiveStatus.live_session_id) {
+    setImportNotice("This chat in history is already linked to a live continuation.");
+    return;
+  }
+
+  el("importContinueBtn").disabled = true;
+  setImportNotice("Building a read-only continuation review...");
+  const saved = await saveImportCurationNow();
+  if (!saved?.ok) {
+    updateImportStagedControls();
+    return;
+  }
+  const result = await api().prepare_import_continuation(persona, preview.batchId);
+  if (!result?.ok) {
+    setImportNotice(result?.error || "Could not prepare the continuation review.");
+    updateImportStagedControls();
+    return;
+  }
+  preview.archiveConfirm = null;
+  preview.continuationPreflight = result.preflight || {};
+  renderImportArchiveConfirmation();
+  updateImportStagedControls();
+  setImportNotice(
+    "Continuation review ready. No backup, summary, session closure, or live messages were created."
   );
 }
 
@@ -4306,13 +4357,13 @@ async function removeImportConversationFromArchive(conversationId) {
   if (!persona || persona === "__base__" || !preview.staged || !preview.batchId || !status?.archived) return;
   const conversation = importConversationById(conversationId);
   if (status.live_session_id) {
-    setImportNotice("This archived chat has already been continued into a live session and cannot be removed here.");
+    setImportNotice("This chat has already been continued into a live session and cannot be removed from history here.");
     return;
   }
   const confirmed = await showConfirm(
-    "Remove selected chat from archive?",
-    `${escapeHtml(conversation?.title || status.title || "Selected conversation")} will stop appearing in archive search. Its staged review copy and your export file stay intact, so you can correct the choices and add it again.`,
-    "Remove from archive",
+    "Remove selected chat from history?",
+    `${escapeHtml(conversation?.title || status.title || "Selected conversation")} will stop appearing in history search. Its saved review copy and your export file stay intact, so you can correct the choices and add it again.`,
+    "Remove from history",
     "danger"
   );
   if (!confirmed) return;
@@ -4322,35 +4373,42 @@ async function removeImportConversationFromArchive(conversationId) {
     conversationId
   );
   if (!result?.ok) {
-    setImportNotice(result?.error || "Could not remove this conversation from the archive.");
+    setImportNotice(result?.error || "Could not remove this conversation from history.");
     await refreshImportArchiveStatus();
     updateImportStagedControls();
     renderImportConversationList();
     return;
   }
   preview.archiveConfirm = null;
+  preview.continuationPreflight = null;
   await refreshImportArchiveStatus();
   renderImportArchiveConfirmation();
   renderImportConversationList();
   updateImportStagedControls();
   el("importProgressText").textContent = Object.values(preview.archiveStatus || {}).some((item) => item.archived)
     ? "Keyword search ready"
-    : "0% - staged";
+    : "Not enriched yet";
   setImportNotice(
-    `Removed ${result.title || "the selected conversation"} (${result.removed_messages || 0} messages) from the searchable archive. Its staged review copy is unchanged.`
+    `Removed ${result.title || "the selected conversation"} (${result.removed_messages || 0} messages) from searchable history. Its saved review copy is unchanged.`
   );
 }
 
 function cancelImportArchiveConfirmation() {
   state.importPreview.archiveConfirm = null;
+  state.importPreview.continuationPreflight = null;
   renderImportArchiveConfirmation();
   updateImportStagedControls();
-  setImportNotice("Archive add cancelled. Your staged review is unchanged.");
+  setImportNotice("Review closed. Your saved review and searchable history are unchanged.");
 }
 
 function renderImportArchiveConfirmation() {
   const box = el("importArchiveConfirm");
   if (!box) return;
+  const continuationPreflight = state.importPreview.continuationPreflight;
+  if (continuationPreflight) {
+    renderImportContinuationPreflight(box, continuationPreflight);
+    return;
+  }
   const payload = state.importPreview.archiveConfirm;
   if (!payload) {
     box.classList.add("hidden");
@@ -4364,14 +4422,14 @@ function renderImportArchiveConfirmation() {
   const confirmationTitle = hasArchiveWork
     ? "Ready to add kept chats"
     : (excludedCount
-      ? "Review saved — no archive changes pending"
+      ? "Review saved — no history changes pending"
       : (Number(summary.already_archived_conversations || 0)
-      ? "Archive already up to date"
-      : "No kept chats to archive"));
+      ? "Searchable history already up to date"
+      : "No kept chats to add"));
   const continuation = summary.continuation;
   const continuationText = continuation
-    ? `${continuation.title || "Selected continuation"} (${continuation.message_count || 0} messages) remains selected for Phase 3b; it will not become live now.`
-    : "No continuation chat is selected. Archive-only import is a complete valid outcome.";
+    ? `${continuation.title || "Selected continuation"} (${continuation.message_count || 0} messages) remains selected for continuation review; no live chat will be created now.`
+    : "No continuation chat is selected. Searchable history without continuation is a complete valid outcome.";
   const migrationText = migration.pending
     ? `<span><strong>${escapeHtml(migration.session_count || 0)}</strong> old legacy.db chats will migrate into this persona database</span>`
     : (migration.migrated
@@ -4388,16 +4446,67 @@ function renderImportArchiveConfirmation() {
       <span><strong>${escapeHtml(summary.excluded_conversations || 0)}</strong> conversations excluded</span>
       <span><strong>${escapeHtml(summary.excluded_messages || 0)}</strong> messages excluded</span>
       ${Number(summary.omitted_messages || 0) ? `<span class="import-summary-warning"><strong>${escapeHtml(summary.omitted_messages)}</strong> empty/internal omitted</span>` : ""}
-      ${Number(summary.already_archived_conversations || 0) ? `<span><strong>${escapeHtml(summary.already_archived_conversations)}</strong> already archived</span>` : ""}
+      ${Number(summary.already_archived_conversations || 0) ? `<span><strong>${escapeHtml(summary.already_archived_conversations)}</strong> already in history</span>` : ""}
       ${migrationText}
     </div>
     <span>${escapeHtml(
       hasArchiveWork
         ? continuationText
         : (excludedCount
-          ? "Excluded conversations are saved in staging and are not in the archive. No confirmation is needed."
-          : "No archive changes are needed. Return to review to change any unarchived choices.")
+          ? "Excluded conversations remain in the saved review and are not in searchable history. No confirmation is needed."
+          : "No history changes are needed. Return to review to change any chats not yet added.")
     )}</span>`;
+}
+
+function renderImportContinuationPreflight(box, preflight) {
+  const archive = preflight.archive || {};
+  const current = preflight.current_session || {};
+  const landing = preflight.landing || {};
+  const bridge = preflight.bridge_preparation || {};
+  const safety = preflight.safety || {};
+  const freshness = preflight.freshness || {};
+  const dateStart = formatImportDate(archive.first_message_at || archive.created_at);
+  const dateEnd = formatImportDate(archive.last_message_at || archive.updated_at);
+  const dateRange = dateStart && dateEnd && dateStart !== dateEnd
+    ? `${dateStart} - ${dateEnd}`
+    : (dateStart || dateEnd || "Date unknown");
+  const source = humanizeMemoryBadge(archive.source || "unknown");
+  const currentText = current.exists
+    ? (Number(current.message_count || 0)
+      ? `On apply: summarize and close the current chat (${current.message_count} messages) only after continuation preparation succeeds.`
+      : "On apply: close the empty current chat without creating an empty summary.")
+    : "On apply: start a new landing chat because no current chat exists.";
+  const landingText = landing.requires_bridge_summary
+    ? `This chat is too long to carry over directly. Pulse must summarize source-linked sections, combine them into a dated continuity brief, then pair it with ${landing.seed_message_count || 0} recent messages (${landing.seed_exchange_count || 0} exchanges, about ${landing.seed_estimated_tokens || 0} tokens).`
+    : `No bridge preparation needed. The full sanitized conversation fits the landing budget (${landing.seed_message_count || 0} messages, about ${landing.seed_estimated_tokens || 0} tokens).`;
+  const bridgeStatus = landing.requires_bridge_summary
+    ? `<span class="import-summary-warning"><strong>Preparation required.</strong> Existing summaries can be reused only after Pulse verifies that they cover the whole older span and still match the current summarization method. Continuation cannot begin before this finishes.</span>`
+    : "";
+  const runningText = preflight.persona_running
+    ? "The companion is running now and must be stopped before any future apply step."
+    : "The companion is stopped; a future apply step would still create a fresh database backup first.";
+  const budgetWarning = landing.seed_within_budget === false
+    ? `<span class="import-summary-warning">Even the newest complete exchange exceeds the configured landing budget. A future apply step must trim it safely before writing anything.</span>`
+    : "";
+
+  box.classList.remove("hidden");
+  box.innerHTML = `
+    <strong>Continuation review - no changes made</strong>
+    <div class="import-summary">
+      <span><strong>${escapeHtml(source)}</strong> source</span>
+      <span><strong>${escapeHtml(archive.message_count || 0)}</strong> history messages</span>
+      <span><strong>${escapeHtml(archive.estimated_tokens || 0)}</strong> estimated tokens</span>
+      <span title="Existing summaries are informational; they do not prove complete bridge coverage."><strong>${escapeHtml(bridge.existing_archive_summary_rows ?? archive.summary_count ?? 0)}</strong> existing summaries</span>
+    </div>
+    <span><strong>${escapeHtml(archive.title || "Selected continuation")}</strong> / ${escapeHtml(dateRange)}</span>
+    <span>${escapeHtml(freshness.label || "Historical imported material")}: ${escapeHtml(freshness.note || "")}</span>
+    <span>${escapeHtml(currentText)}</span>
+    <span>${escapeHtml(landingText)}</span>
+    ${bridgeStatus}
+    <span>${escapeHtml(runningText)}</span>
+    <span>Safety plan: back up ${escapeHtml(safety.database_file || "the persona database")}, keep searchable history intact, and guard repeat continuation with its live-session link.</span>
+    ${budgetWarning}
+    <span class="import-summary-warning">Review only: continuation cannot be applied yet.</span>`;
 }
 
 function updateImportStagedControls() {
@@ -4405,29 +4514,51 @@ function updateImportStagedControls() {
   const badge = el("importStagedBadge");
   const stageBtn = el("importStageBtn");
   const archiveBtn = el("importArchiveBtn");
+  const continueBtn = el("importContinueBtn");
   const archiveCancelBtn = el("importArchiveCancelBtn");
   const deleteBtn = el("importDeleteStagedBtn");
-  if (!badge || !stageBtn || !archiveBtn || !archiveCancelBtn || !deleteBtn) return;
+  if (!badge || !stageBtn || !archiveBtn || !continueBtn || !archiveCancelBtn || !deleteBtn) return;
   const hasBatch = Boolean(preview.batch);
-  badge.textContent = preview.staged ? "Staged review" : "Preview only";
+  badge.textContent = preview.staged ? "Saved review" : "Preview only";
   badge.classList.toggle("staged", Boolean(preview.staged));
   badge.classList.toggle("preview", !preview.staged);
   stageBtn.disabled = !hasBatch || preview.staged;
   stageBtn.title = preview.staged
-    ? "Already staged — keep/exclude choices save automatically."
-    : "Save this import and your keep/exclude choices for continued review. Nothing becomes live conversation context.";
+    ? "Review saved — keep/exclude choices save automatically."
+    : "Save this review and its keep/exclude choices so you can return later. Nothing becomes live conversation context.";
   const archiveConfirmationHasWork = !preview.archiveConfirm
     || Boolean(preview.archiveConfirm.summary?.can_archive)
     || Boolean(preview.archiveConfirm.legacyMigration?.pending);
   archiveBtn.disabled = !preview.staged
     || !archiveConfirmationHasWork;
   archiveBtn.textContent = preview.archiveConfirm
-    ? (archiveConfirmationHasWork ? "Confirm archive add" : "Archive matches review")
-    : "Add kept chats to archive";
+    ? (archiveConfirmationHasWork ? "Confirm add to history" : "History matches review")
+    : "Add kept chats to history";
   archiveBtn.title = preview.archiveConfirm
-    ? "Copy the reviewed, sanitized chats into the searchable archive."
-    : "Review a backend-computed summary before adding kept chats to the searchable archive.";
-  archiveCancelBtn.classList.toggle("hidden", !preview.archiveConfirm);
+    ? "Copy the reviewed, sanitized chats into searchable history."
+    : "Review a computed summary before adding kept chats to searchable history.";
+  const continuationStatus = preview.archiveStatus?.[preview.continuationId || ""];
+  const continuationReady = Boolean(
+    preview.staged
+    && preview.continuationId
+    && continuationStatus?.archived
+    && !continuationStatus?.live_session_id
+  );
+  continueBtn.disabled = !continuationReady;
+  continueBtn.textContent = preview.continuationPreflight
+    ? "Refresh continuation review"
+    : "Review continuation";
+  continueBtn.title = !preview.continuationId
+    ? "Choose Continue on one conversation first."
+    : (!continuationStatus?.archived
+      ? "Add the selected conversation to searchable history first."
+      : (continuationStatus?.live_session_id
+        ? "This chat in history is already linked to a live continuation."
+        : "Review source, dates, current-session handling, landing shape, and safety without changing live data."));
+  archiveCancelBtn.classList.toggle(
+    "hidden",
+    !preview.archiveConfirm && !preview.continuationPreflight
+  );
   deleteBtn.disabled = !preview.staged;
 }
 
@@ -4445,7 +4576,7 @@ function renderImportPreview() {
     ? "Checking saved review"
     : (!batch
     ? "Not started"
-    : (hasArchivedChats ? "Keyword search ready" : (preview.staged ? "0% - staged" : "0% - preview only")));
+    : (hasArchivedChats ? "Keyword search ready" : "Not enriched yet"));
   el("importProgressFill").style.width = "0%";
   updateImportStagedControls();
   renderImportArchiveConfirmation();
@@ -4456,7 +4587,7 @@ function renderImportPreview() {
     el("importConversations").innerHTML = `
       <div class="memory-empty import-checking-state">
         <strong>Checking saved imports</strong>
-        <span>Pulse is looking for a staged review to continue.</span>
+        <span>Pulse is looking for a saved review to continue.</span>
       </div>`;
     el("importDetail").innerHTML = `
       <div class="memory-empty import-checking-state">
@@ -4605,13 +4736,21 @@ function renderImportConversationCard(conversation) {
   const archiveStatus = state.importPreview.archiveStatus?.[conversation.id];
   const archiveLocked = Boolean(archiveStatus?.archived);
   const archiveLockTitle = archiveStatus?.can_remove
-    ? "Remove this chat from the archive before changing its import choices."
-    : "This archived chat is linked to a live session, so its import choices are locked.";
+    ? "Remove this chat from searchable history before changing its import choices."
+    : "This chat is linked to a live session, so its import choices are locked.";
+  const continueLocked = Boolean(archiveStatus?.live_session_id);
+  const continueTitle = archiveStatus?.archived
+    ? (continueLocked
+      ? "This chat in history is already linked to a live continuation."
+      : (choice === "continue"
+        ? "Stop using this chat as the continuation candidate."
+        : "Use this chat from history as the continuation candidate."))
+    : "";
   const archived = archiveStatus?.archived
-    ? `<span class="import-archive-pill" title="${escapeHtml(archiveLockTitle)}">Archived</span>`
+    ? `<span class="import-archive-pill" title="${escapeHtml(archiveLockTitle)}">In history</span>`
     : "";
   const removeFromArchive = archiveStatus?.can_remove
-    ? `<button type="button" data-conversation-id="${escapeHtml(conversation.id)}" data-import-archive-remove>Remove from archive</button>`
+    ? `<button type="button" data-conversation-id="${escapeHtml(conversation.id)}" data-import-archive-remove>Remove from history</button>`
     : "";
   const model = conversation.model ? `<span>${escapeHtml(conversation.model)}</span>` : "";
   return `
@@ -4631,7 +4770,7 @@ function renderImportConversationCard(conversation) {
       <div class="import-card-actions${archiveLocked ? " archive-locked" : ""}">
         <button class="${choice === "keep" ? "active" : ""}" type="button" data-conversation-id="${escapeHtml(conversation.id)}" data-import-choice="keep"${archiveLocked ? ` disabled title="${escapeHtml(archiveLockTitle)}"` : ""}>Keep</button>
         <button class="${choice === "exclude" ? "active" : ""}" type="button" data-conversation-id="${escapeHtml(conversation.id)}" data-import-choice="exclude"${archiveLocked ? ` disabled title="${escapeHtml(archiveLockTitle)}"` : ""}>Exclude</button>
-        <button class="${choice === "continue" ? "active" : ""}" type="button" data-conversation-id="${escapeHtml(conversation.id)}" data-import-choice="continue"${archiveLocked ? ` disabled title="${escapeHtml(archiveLockTitle)}"` : ""}>Continue</button>
+        <button class="${choice === "continue" ? "active" : ""}" type="button" data-conversation-id="${escapeHtml(conversation.id)}" data-import-choice="continue"${continueLocked ? " disabled" : ""}${continueTitle ? ` title="${escapeHtml(continueTitle)}"` : ""}>Continue</button>
         ${removeFromArchive}
       </div>
     </article>`;
@@ -4646,16 +4785,23 @@ function importConversationChoice(conversationId) {
 
 function setImportConversationChoice(conversationId, choice) {
   if (!conversationId) return;
-  if (state.importPreview.archiveStatus?.[conversationId]?.archived) {
-    setImportNotice("Remove this chat from the archive before changing its import choices.");
+  const archiveStatus = state.importPreview.archiveStatus?.[conversationId];
+  if (archiveStatus?.archived && choice !== "continue") {
+    setImportNotice("Remove this chat from searchable history before changing its import choices.");
+    return;
+  }
+  if (archiveStatus?.live_session_id) {
+    setImportNotice("This chat in history is already linked to a live continuation.");
     return;
   }
   if (choice === "continue") {
-    state.importPreview.continuationId = conversationId;
     state.importPreview.choices[conversationId] = "keep";
+    state.importPreview.continuationId = state.importPreview.continuationId === conversationId
+      ? ""
+      : conversationId;
   } else {
     state.importPreview.choices[conversationId] = choice === "exclude" ? "exclude" : "keep";
-    if (choice === "exclude" && state.importPreview.continuationId === conversationId) {
+    if (state.importPreview.continuationId === conversationId) {
       state.importPreview.continuationId = "";
     }
   }
@@ -4665,8 +4811,8 @@ function setImportConversationChoice(conversationId, choice) {
   if (choice === "exclude") {
     setImportNotice(
       state.importPreview.staged
-        ? "Excluded from the staged import. This chat is not in the archive and will not be added unless you choose Keep later."
-        : "Excluded in this preview. Stage the import to save this choice."
+        ? "Excluded from the saved review. This chat is not in history and will not be added unless you choose Keep later."
+        : "Excluded in this preview. Save the review to keep this choice."
     );
   }
   void selectImportConversation(conversationId, true);
@@ -4731,7 +4877,7 @@ function renderImportConversationDetail(conversation) {
   const excludedCount = exchanges.filter((exchange) => importExchangeChoice(conversation.id, exchange.id) === "exclude").length;
   const visibleIssueCount = exchanges.filter((exchange) => exchange.reviewIssues.length).length;
   const excludedNote = excludedCount
-    ? `<div class="memory-source-note"><strong>${escapeHtml(excludedCount)} exchange${excludedCount === 1 ? "" : "s"} excluded</strong><span>${state.importPreview.staged ? "Exchange exclusions are saved with the staged review." : "Exchange exclusions are temporary until you stage this import."}</span></div>`
+    ? `<div class="memory-source-note"><strong>${escapeHtml(excludedCount)} exchange${excludedCount === 1 ? "" : "s"} excluded</strong><span>${state.importPreview.staged ? "Exchange exclusions are saved with this review." : "Exchange exclusions are temporary until you save this review."}</span></div>`
     : "";
   const flaggedNote = issues.length
     ? `<div class="memory-source-note import-review-note">
@@ -5396,6 +5542,7 @@ function wireEvents() {
   el("importCloseBtn").addEventListener("click", closeImportDialog);
   el("importStageBtn").addEventListener("click", () => { void stageCurrentImport(); });
   el("importArchiveBtn").addEventListener("click", () => { void prepareOrArchiveImport(); });
+  el("importContinueBtn").addEventListener("click", () => { void prepareImportContinuation(); });
   el("importArchiveCancelBtn").addEventListener("click", cancelImportArchiveConfirmation);
   el("importDeleteStagedBtn").addEventListener("click", () => { void deleteStagedImport(); });
   el("importPicker").addEventListener("click", async () => {

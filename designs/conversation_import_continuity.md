@@ -5,7 +5,7 @@
 **For:** Sol / Pulse GUI implementation
 **Related:** `new_persona_v1.md`, `continuity_section.md`, `journal_search_mirror.md`, `Implemented/claude_legacy_implementation_plan.md`
 **Reviewed:** 2026-07-04 (Debugger) — architecture confirmed sound; additive gaps folded in below (identity sources, public inbound format, drop-zone trust copy, parser fixtures, preview cache eviction).
-**Updated:** 2026-07-16 (Lena + Sol + Debugger) — three-layer model (staging → archive → live) formalized, continuation semantics decided, legacy.db migration decided. See "Three Layers: Staging, Archive, Live". Same day: enrichment tier ladder decided (Tier 0 keyword / Tier 1 local embeddings / Tier 2 LLM summaries), see "Enrichment Tiers".
+**Updated:** 2026-07-26 (Lena + Sol) — Phase 3a manually signed off with Vale's real OpenRouter archive; Phase 3b read-only continuation preflight added and the hierarchical bridge-preparation contract clarified. The 2026-07-16 three-layer, migration, and enrichment-tier decisions remain in force.
 
 ## Goal
 
@@ -65,7 +65,7 @@ Added 2026-07-15 (Phase 2 staging slice, Debugger):
 - `gui/import_staging.py` adds quarantine tables to the persona DB: `import_batches`, `import_conversations`, `import_messages` (with `schema_version`, per-conversation `choice`, per-message `excluded`). The engine never reads these tables.
 - `gui/api.py` endpoints: `stage_import` (replace semantics per batch id), `list_import_batches`, `resume_import_batch` (loads staged rows back into the preview cache), `update_import_curation`, `delete_import_batch`.
 - Staging forces empty conversations to `choice = 'exclude'` regardless of the requested choice.
-- GUI: footer shows a "Preview only" / "Staged archive" badge; "Stage this import" persists batch + choices; opening Continuity > Import auto-resumes the latest staged batch; curation changes (conversation choices, continuation, exchange exclusions) save automatically once staged; "Delete staged" is confirm-guarded and never touches the export file.
+- GUI: footer shows a "Preview only" / "Saved review" badge; "Save review" persists the staging batch + choices; opening Continuity > Import auto-resumes the latest saved review; curation changes (conversation choices, continuation, exchange exclusions) save automatically after that; "Delete review" is confirm-guarded and never touches the export file.
 - Exchange exclusions persist as per-message `excluded` flags (positions), rebuilt into exchange-level choices on resume — no fragile exchange-id mapping between frontend and backend.
 
 Added 2026-07-15, later (validated against a real 62 MB ChatGPT export):
@@ -81,8 +81,8 @@ Added 2026-07-16 (Phase 3a staging → archive, Sol):
 - `core/legacy_archive.py` adds the persona-local `legacy_sessions`, `legacy_messages`, `legacy_summaries`, FTS5 index/triggers, and one-time migration ledger.
 - Archive rows preserve source IDs, ordered message positions, timestamps, model metadata, attachment markers, import-batch provenance, and the future live-session link.
 - `prepare_import_archive` computes the confirmation summary from persisted staging rows; `archive_import_batch` copies only kept, sanitized dialogue into the write-once archive.
-- The existing import window contains the temporary confirmation state for "Add kept chats to archive"; it disappears after confirmation or cancellation rather than becoming a persistent status panel. No new modal was added.
-- Archived staged conversations show an `Archived` pill and a contextual `Remove from archive` action on that conversation card; their Phase 3a import choices are locked until removal, while the staging rows remain intact for re-review and re-add. `Continue` will be unlocked separately with the Phase 3b single-continuation flow.
+- The existing import window contains the temporary confirmation state for "Add kept chats to history"; it disappears after confirmation or cancellation rather than becoming a persistent status panel. No new modal was added.
+- Archived saved-review conversations show an `In history` pill and a contextual `Remove from history` action on that conversation card; their Phase 3a import choices are locked until removal, while the staging rows remain intact for re-review and re-add. `Continue` is the separate Phase 3b single-continuation selection.
 - Archive correction is refused once an archive row has a `live_session_id`; undoing a living-continuation boundary requires a future, broader workflow rather than silently deleting provenance.
 - The file-picker area shows the local-privacy promise before import.
 - A configured or adjacent developer-era `legacy.db` migrates once into the persona DB, including existing summaries. The memory skill's legacy tools now read the persona DB archive.
@@ -175,9 +175,13 @@ Decided 2026-07-16 (Lena + Sol + Debugger). Earlier drafts used "commit" for two
 
 User-facing language never says "commit". The three actions are:
 
-- **Stage this import** — parse the export into staging; review, exclude, and curate indefinitely.
-- **Add kept chats to archive** — copy accepted, sanitized conversations into the archive.
-- **Continue from this chat** — promote one archived conversation into a live landing session.
+- **Save review** — preserve the current choices so the user can return later.
+- **Add kept chats to history** — make accepted, sanitized conversations searchable.
+- **Continue one chat** — prepare one history conversation as a new live landing session.
+
+The implementation still calls the first two storage layers `staging` and
+`archive`; those names belong in code, logs, diagnostics, and advanced
+documentation, not in the primary user flow.
 
 ### Staging → archive
 
@@ -325,6 +329,25 @@ Privacy caution:
 
 ## Curation UX
 
+User-facing mental model:
+
+1. **Review** what was found and exclude anything unwanted.
+2. **Add to history** so the kept chats become safely searchable.
+3. **Continue one chat** if the user wants one archived thread to become the
+   starting point for a new live session.
+
+`Staging`, persisted curation, archive confirmation, idempotency keys, and
+archive/live table boundaries are implementation safeguards. They should not
+become a vocabulary test for the user:
+
+- Save review changes automatically when safe.
+- Present one primary action for the current step.
+- Put reset/delete-draft and correction controls in contextual or advanced
+  locations rather than the main happy path.
+- Prefer `Saved review` or `Review saved` over the technical label `Staged`.
+- Treat documentation as support for edge cases, not as a substitute for a
+  comprehensible primary flow.
+
 Conversation list:
 
 - Search by title and phrase.
@@ -385,9 +408,62 @@ If it fits comfortably:
 If it is too long:
 
 - Store the full selected conversation in the imported archive.
-- Create a landing bridge summary for the older part.
+- Prepare the older part through source-linked exchange chunks and recursive
+  summary rollups; never ask one model call to summarize the whole oversized
+  transcript.
+- Synthesize one compact, dated landing bridge from the verified rollups.
 - Copy only the recent raw tail into the active session.
 - Keep source provenance so the companion can retrieve earlier details later.
+
+The compact landing bridge is the final live-session artifact, not the
+summarization method. The preparation pipeline is:
+
+```text
+sanitized archive messages
+  -> exchange-preserving source chunks
+  -> chunk summaries with exact message spans
+  -> section/era rollups (repeated until they fit)
+  -> one dated landing bridge + recent raw tail
+```
+
+Every intermediate chunk and rollup remains an archive artifact. This lets
+search and continuity-map features inspect the relationship's shape without
+pretending that the final bridge contains every recoverable detail.
+
+### Long-chat continuation preparation
+
+Bridge preparation is an on-demand job that reuses the same source-linked
+summary machinery as background enrichment, but it does not require the whole
+archive to finish enrichment first.
+
+- If compatible chunk/rollup summaries already cover the selected conversation,
+  reuse them.
+- A nonzero summary-row count is not proof of complete coverage. Reuse requires
+  compatible summary type/version plus gap-free source spans over the portion
+  represented by the bridge.
+- Generate only missing or stale spans. Key reusable work by archive session,
+  source-span identity, sanitized-content fingerprint, summary type, and
+  prompt/model version.
+- If no compatible coverage exists, chunk and summarize the selected
+  conversation before continuation can be applied.
+- Do not summarize or close the current live session until bridge preparation
+  has completed and the user confirms the final apply step.
+- Cancellation or preparation failure leaves the current live session and the
+  archive-to-live link untouched.
+- API-based preparation requires the same explicit provider, privacy disclosure,
+  and cost estimate as Tier 2 enrichment. Local preparation stays local.
+- The final bridge should prefer the target companion model or another
+  explicitly chosen high-quality model; cheaper compatible models may prepare
+  factual chunk summaries and rollups.
+
+The existing `legacy_summaries` table can preserve chunk text and source spans,
+but its current row count cannot distinguish chunk, rollup, era, and landing
+artifacts or prove complete coverage. Before mutating continuation exists, the
+summary schema/job metadata must represent summary type, hierarchy level,
+source-span coverage, content fingerprint, generation version/model, and
+completion state. Until then, preflight must report existing rows as
+informational only and always describe a long bridge as **preparation
+required**.
 
 Do not use a fixed "half the context window" rule.
 
@@ -495,10 +571,15 @@ Used for search and orientation across old conversations.
 
 Used only when the selected continuation conversation is too long.
 
+- Is synthesized from verified source-linked chunk/rollup coverage, never
+  directly from an oversized raw transcript.
 - More emotionally important.
 - Prefer the target companion model or a higher quality configured model.
 - Should be clearly dated and grounded in the selected conversation.
 - Should not over-explain platform migration unless the source conversation actually contains it.
+- Is intentionally compact and selective. It preserves recognizable continuity
+  for the first live turn while archive search retains the detailed history.
+- Must not be treated as ready merely because some archive summary rows exist.
 
 ### Candidate Memories
 
@@ -695,20 +776,47 @@ Status (2026-07-15):
 - No live `sessions`/`messages` writes in this phase.
 - **Sign-off gate:** Phase 3b does not start until 3a is reviewed.
 
-Status (2026-07-16):
+Status (2026-07-26):
 
 - Archive schema, write-once source key, FTS maintenance, backend confirmation summary, GUI confirmation state, sanitation, standalone `legacy.db` migration, and memory-skill retargeting exist.
 - Conversation-level correction exists: selected archived chats can be removed, re-reviewed in staging, and added again; rows linked to a live session are protected.
 - Automated regression coverage verifies excluded rows stay out, archive search sees added text, repeated archive attempts do not duplicate conversations, legacy summaries migrate, and live tables remain untouched.
-- Awaiting manual GUI sign-off before Phase 3b.
+- Manual GUI sign-off passed with Vale's real `orpg.3.0` OpenRouter export:
+  one staged conversation, 218 staged messages, one archive session, and 218
+  archive messages. Keyword search and source-context drill-down worked without
+  summaries or embeddings, while the existing live session remained active and
+  the archive's `live_session_id` remained empty.
 
 ### Phase 3b: Archive → Live Continuation
 
 - "Continue from this chat": summarize and close the current session (skip silently if empty), then create the landing session from the sanitized continuation seed.
-- Generate or request a landing bridge summary when needed.
+- When needed, prepare source-linked chunks and recursive rollups before
+  generating the compact landing bridge. Never summarize an oversized raw
+  transcript in one call.
 - Enforce single-select (radio) continuation semantics in the UI.
 - Record the created live session on the archive row.
 - Add backup-before-continuation.
+
+Status (2026-07-26):
+
+- A read-only backend preflight and existing-import-window review state now show
+  source, original date boundaries, message/token estimates, dated-background
+  freshness guidance, current-session handling, full-seed versus bridge+tail
+  strategy, and the future backup/idempotency plan.
+- Archived conversations can be selected or deselected as the single
+  continuation candidate without unlocking their Keep/Exclude curation.
+- The preflight uses SQLite query-only mode and does not create a backup,
+  summarize or close the current session, create live messages, or set
+  `live_session_id`.
+- The mutating apply step remains deliberately unavailable while hierarchical
+  preparation metadata/jobs and the transactional apply boundary are not yet
+  implemented.
+- Manual Jam review passed for both branches: a short conversation fit as a
+  full sanitized seed, while the 1,223-message / roughly 199k-token "Moist Greg"
+  conversation correctly selected bridge preparation plus a recent raw tail.
+  That long-chat review exposed and resolved the design ambiguity between one
+  compact landing artifact and the many source-linked summaries required to
+  produce it.
 
 ### Phase 4: Background Enrichment
 
@@ -756,11 +864,16 @@ or dies long-term.
 - What is the smallest useful Grok parser once we have a real export sample?
 - What parts of the importer, if any, should be published as open source versus kept as shipped Pulse product code?
 
-## Next Practical Slice (2026-07-16)
+## Next Practical Slice (2026-07-26)
 
-Phase 2 staging is live; the previous "minimum next slice" is done. The revised slice:
+Phase 3a is manually signed off. The revised slice:
 
-1. Add the local-privacy sentence at the drop zone (see "The trust moment at the drop zone").
-2. Manually sign off the Phase 3a staging → archive flow and user-facing counts.
-3. Verify one real existing `legacy.db` migration, if available, before removing its old config pointer.
-4. Do not start archive → live continuation (Phase 3b) until that sign-off.
+1. Extend summary/job metadata so chunk, rollup, era, and bridge artifacts have
+   explicit type, lineage, coverage, and completion state.
+2. Implement resumable hierarchical bridge preparation with provider/privacy/
+   cost confirmation and no changes to the current live session on failure.
+3. In a separate final apply boundary:
+   persona database backup, current-session summary/close, sanitized landing
+   seed creation, and guarded `live_session_id` linkage.
+4. Keep the standalone `legacy.db` migration check separate; it is not a blocker
+   for continuation work.

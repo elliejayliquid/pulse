@@ -30,6 +30,7 @@ from core.legacy_archive import (
     archive_batch_summary,
     archive_batch_status,
     archive_staged_batch,
+    continuation_preflight,
     ensure_legacy_archive_tables,
     legacy_migration_preview,
     migrate_legacy_database,
@@ -691,6 +692,35 @@ class PulseAPI:
             finally:
                 conn.close()
             return {"ok": True, "conversations": conversations}
+        except (ValueError, OSError, sqlite3.Error) as e:
+            return {"ok": False, "error": str(e)}
+
+    def prepare_import_continuation(self, persona: str, batch_id: str) -> dict:
+        """Compute a read-only archive-to-live continuation preflight."""
+        validation = self._validate_persona_for_db_write(persona)
+        if not validation["ok"]:
+            return validation
+        try:
+            db_path = self._persona_database_path(persona)
+            if not db_path.is_file():
+                return {"ok": False, "error": "Staged import not found."}
+            landing_budget, recent_tail_exchanges = self._continuation_landing_config(persona)
+            conn = _connect_sqlite(db_path)
+            try:
+                conn.execute("PRAGMA query_only = ON")
+                preflight = continuation_preflight(
+                    conn,
+                    str(batch_id or ""),
+                    landing_budget_tokens=landing_budget,
+                    recent_tail_exchanges=recent_tail_exchanges,
+                )
+            finally:
+                conn.close()
+            preflight["persona"] = persona
+            preflight["persona_running"] = self._persona_is_running(persona)
+            preflight["safety"]["database_file"] = db_path.name
+            preflight["safety"]["database_size"] = db_path.stat().st_size
+            return {"ok": True, "preflight": preflight}
         except (ValueError, OSError, sqlite3.Error) as e:
             return {"ok": False, "error": str(e)}
 
@@ -3101,6 +3131,31 @@ class PulseAPI:
         if not db_path.is_absolute():
             db_path = (self.root / db_path).resolve()
         return db_path
+
+    def _continuation_landing_config(self, persona: str) -> tuple[int, int]:
+        """Return the configured raw landing budget and recent-tail exchange cap."""
+        config = self._merged_config_for(persona)
+        provider = config.get("provider", {})
+        model = config.get("model", {})
+        if provider.get("type", "local") != "local" and provider.get("max_context"):
+            max_context = provider.get("max_context")
+        else:
+            max_context = model.get("max_context", 16384)
+        try:
+            max_context = max(1, int(max_context))
+        except (TypeError, ValueError):
+            max_context = 16384
+
+        context_budget = config.get("context_budget", {})
+        try:
+            landing_budget = int(context_budget.get("conversation") or int(max_context * 0.25))
+        except (TypeError, ValueError):
+            landing_budget = int(max_context * 0.25)
+        try:
+            recent_tail = int(context_budget.get("recent_tail_exchanges") or 4)
+        except (TypeError, ValueError):
+            recent_tail = 4
+        return max(1, landing_budget), max(1, recent_tail)
 
     def _configured_legacy_database_path(self, persona: str) -> Path | None:
         config = self._merged_config_for(persona)
