@@ -183,6 +183,8 @@ def _preview_json(path: Path) -> PreviewBatch:
     file_size = path.stat().st_size
     if isinstance(payload, dict) and payload.get("version") == "orpg.3.0":
         return _preview_openrouter(path.name, file_size, payload)
+    if is_grok_export(payload):
+        return _preview_grok(path.name, file_size, payload)
 
     if isinstance(payload, list) and payload:
         first = next((item for item in payload if isinstance(item, dict)), {})
@@ -412,6 +414,150 @@ def _preview_chatgpt(file_name: str, file_size: int, payload: list[Any]) -> Prev
             "edited_branch_messages": skipped_branches,
             "hidden_context_messages": skipped_hidden,
             "empty_companion_turns": skipped_empty_companion,
+        },
+    )
+
+
+def _preview_grok(file_name: str, file_size: int, payload: dict[str, Any]) -> PreviewBatch:
+    conversations: list[PreviewConversation] = []
+    skipped_branches = 0
+    skipped_empty = 0
+    partial_responses = 0
+    error_responses = 0
+    attachment_placeholders = 0
+    citation_render_blocks = 0
+
+    for index, entry in enumerate(payload.get("conversations") or []):
+        if not isinstance(entry, dict):
+            continue
+        metadata = entry.get("conversation")
+        if not isinstance(metadata, dict):
+            continue
+        walked, branch_count = walk_grok_responses(
+            entry.get("responses") or [],
+            metadata.get("leaf_response_id"),
+        )
+        skipped_branches += branch_count
+        messages: list[PreviewMessage] = []
+        conversation_partials = 0
+        conversation_errors = 0
+        conversation_citations = 0
+        for response_index, response in enumerate(walked):
+            role = normalize_role(response.get("sender"))
+            if not role:
+                continue
+            if response.get("partial"):
+                partial_responses += 1
+                conversation_partials += 1
+            if response.get("error"):
+                error_responses += 1
+                conversation_errors += 1
+
+            text = str(response.get("message") or "").strip()
+            if role == "assistant" and text:
+                text, removed_citations = sanitize_grok_text(text)
+                citation_render_blocks += removed_citations
+                conversation_citations += removed_citations
+            attachment_placeholder = grok_attachment_placeholder(response, role)
+            if not text and attachment_placeholder:
+                attachment_placeholders += 1
+                messages.append(PreviewMessage(
+                    id=str(response.get("_id") or f"m{response_index}"),
+                    role=role,
+                    source_role=str(response.get("sender") or ""),
+                    content=attachment_placeholder,
+                    created_at=normalize_grok_timestamp(response.get("create_time")),
+                    model=str(response.get("model") or ""),
+                    attachment_placeholder=True,
+                ))
+                continue
+            if not text:
+                skipped_empty += 1
+                # Grok exports empty interrupted/error response wrappers.
+                # They are transport state, not visible dialogue.
+                continue
+            messages.append(PreviewMessage(
+                id=str(response.get("_id") or f"m{response_index}"),
+                role=role,
+                source_role=str(response.get("sender") or ""),
+                content=text,
+                created_at=normalize_grok_timestamp(response.get("create_time")),
+                model=str(response.get("model") or ""),
+            ))
+
+        warnings = []
+        if branch_count:
+            warnings.append(
+                f"{branch_count} response{'s' if branch_count != 1 else ''} from alternate branches left out."
+            )
+        if conversation_partials:
+            warnings.append(
+                f"{conversation_partials} interrupted/partial response"
+                f"{'s' if conversation_partials != 1 else ''} found."
+            )
+        if conversation_errors:
+            warnings.append(
+                f"{conversation_errors} error response"
+                f"{'s' if conversation_errors != 1 else ''} found."
+            )
+        if conversation_citations:
+            warnings.append(
+                f"{conversation_citations} exported citation marker"
+                f"{'s' if conversation_citations != 1 else ''} cleaned from companion text."
+            )
+        if not messages:
+            skipped_empty += 1
+
+        source_id = metadata.get("id") or metadata.get("_id") or index
+        model = next(
+            (message.model for message in reversed(messages) if message.model),
+            "",
+        )
+        conversations.append(PreviewConversation(
+            id=f"grok:{source_id}",
+            source_id=str(source_id),
+            title=clean_title(metadata.get("title"), fallback=f"Untitled Grok Conversation {index + 1}"),
+            created_at=normalize_grok_timestamp(metadata.get("create_time")),
+            updated_at=normalize_grok_timestamp(metadata.get("modify_time")),
+            model=model,
+            messages=messages,
+            warnings=warnings,
+        ))
+
+    projects = [item for item in (payload.get("projects") or []) if isinstance(item, dict)]
+    project_ids = {
+        str(item.get("workspace_id"))
+        for item in projects
+        if item.get("workspace_id") not in (None, "")
+    }
+    linked_project_conversations = sum(
+        1
+        for item in (payload.get("conversations") or [])
+        if isinstance(item, dict)
+        and isinstance(item.get("conversation"), dict)
+        and str(item["conversation"].get("workspace_id") or "") in project_ids
+    )
+    batch_warnings = []
+    if project_ids and not linked_project_conversations:
+        batch_warnings.append(
+            "Grok project metadata is present, but this export contains no project-linked conversations. "
+            "Project chats may be missing from the source export."
+        )
+
+    return PreviewBatch(
+        source="grok",
+        source_version="prod-grok-backend",
+        file_name=file_name,
+        file_size=file_size,
+        conversations=conversations,
+        warnings=batch_warnings,
+        skipped_counts={
+            "empty_or_transport_responses": skipped_empty,
+            "alternate_branch_responses": skipped_branches,
+            "partial_responses": partial_responses,
+            "error_responses": error_responses,
+            "attachment_placeholders": attachment_placeholders,
+            "citation_render_blocks": citation_render_blocks,
         },
     )
 
@@ -836,6 +982,97 @@ def claude_attachment_placeholder(msg: dict[str, Any]) -> str:
     return "[Human sent an attachment. Attachment content was not included in this export.]"
 
 
+def is_grok_export(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    conversations = payload.get("conversations")
+    if not isinstance(conversations, list) or not conversations:
+        return False
+    first = next((item for item in conversations if isinstance(item, dict)), None)
+    return (
+        isinstance(first, dict)
+        and isinstance(first.get("conversation"), dict)
+        and isinstance(first.get("responses"), list)
+    )
+
+
+def walk_grok_responses(
+    wrapped_responses: Any,
+    declared_leaf_id: Any = None,
+) -> tuple[list[dict[str, Any]], int]:
+    """Return Grok's canonical response chain and alternate-branch count."""
+    if not isinstance(wrapped_responses, list):
+        return [], 0
+    responses = [
+        wrapper.get("response")
+        for wrapper in wrapped_responses
+        if isinstance(wrapper, dict) and isinstance(wrapper.get("response"), dict)
+    ]
+    by_id = {
+        str(response.get("_id")): response
+        for response in responses
+        if response.get("_id") not in (None, "")
+    }
+    if not by_id:
+        return responses, 0
+
+    leaf_id = str(declared_leaf_id or "")
+    if leaf_id not in by_id:
+        parent_ids = {
+            str(response.get("parent_response_id"))
+            for response in responses
+            if response.get("parent_response_id") not in (None, "")
+        }
+        terminal_ids = [
+            str(response.get("_id"))
+            for response in responses
+            if response.get("_id") not in (None, "")
+            and str(response.get("_id")) not in parent_ids
+        ]
+        # Backend exports are ordered; if several regenerated branches are
+        # terminal, the last terminal is the current visible branch.
+        leaf_id = terminal_ids[-1] if terminal_ids else str(responses[-1].get("_id") or "")
+
+    path: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    while leaf_id and leaf_id in by_id and leaf_id not in seen:
+        seen.add(leaf_id)
+        response = by_id[leaf_id]
+        path.append(response)
+        leaf_id = str(response.get("parent_response_id") or "")
+    path.reverse()
+    if not path:
+        return responses, 0
+    return path, max(0, len(responses) - len(path))
+
+
+def grok_attachment_placeholder(response: dict[str, Any], role: str) -> str:
+    files = response.get("file_attachments")
+    generated_images = response.get("generated_image_urls")
+    image_edit = response.get("image_edit_uri")
+    if not files and not generated_images and not image_edit:
+        return ""
+    sender = "Human" if role == "user" else "Companion"
+    if generated_images or image_edit:
+        return f"[{sender} sent an image. Image content was not included in this export.]"
+    return f"[{sender} sent an attachment. Attachment content was not included in this export.]"
+
+
+def sanitize_grok_text(text: str) -> tuple[str, int]:
+    """Remove Grok UI citation cards while preserving ordinary markup/code."""
+    cleaned, removed = re.subn(
+        r"<grok:render\b[^>]*>.*?</grok:render\s*>",
+        "",
+        str(text or ""),
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if not removed:
+        return cleaned.strip(), 0
+    cleaned = re.sub(r"[ \t]+\n", "\n", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip(), removed
+
+
 def walk_chatgpt_messages(mapping: dict[str, Any], current_node: str = "") -> tuple[list[dict[str, Any]], int]:
     """Return (messages, skipped_branch_count) for the canonical thread.
 
@@ -1065,6 +1302,19 @@ def normalize_timestamp(value: Any, from_epoch: bool = False) -> str:
         return dt.astimezone(timezone.utc).isoformat()
     except (TypeError, ValueError, OSError):
         return ""
+
+
+def normalize_grok_timestamp(value: Any) -> str:
+    if isinstance(value, dict):
+        value = value.get("$date", value)
+        if isinstance(value, dict):
+            value = value.get("$numberLong", "")
+        try:
+            # Mongo Extended JSON stores epoch milliseconds.
+            return normalize_timestamp(float(value) / 1000.0, from_epoch=True)
+        except (TypeError, ValueError):
+            return ""
+    return normalize_timestamp(value)
 
 
 def sort_conversations_recent_first(conversations: list[PreviewConversation]) -> list[PreviewConversation]:

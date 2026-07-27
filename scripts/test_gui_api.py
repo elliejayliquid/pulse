@@ -827,6 +827,131 @@ def test_gui_api_preview_chatgpt_follows_canonical_thread():
         assert preview["batch"]["skipped_counts"]["empty_companion_turns"] == 1
 
 
+def test_gui_api_preview_grok_follows_canonical_thread():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        export_path = root / "prod-grok-backend.json"
+
+        def response(
+            response_id,
+            sender,
+            message,
+            parent=None,
+            model="grok-test",
+            timestamp_ms="1767225600000",
+            **extra,
+        ):
+            return {
+                "response": {
+                    "_id": response_id,
+                    "sender": sender,
+                    "message": message,
+                    "parent_response_id": parent,
+                    "model": model,
+                    "create_time": {"$date": {"$numberLong": timestamp_ms}},
+                    **extra,
+                },
+                "share_link": None,
+            }
+
+        export_path.write_text(json.dumps({
+            "conversations": [{
+                "conversation": {
+                    "id": "grok-branchy",
+                    "title": "Grok Branchy",
+                    "create_time": {"$date": {"$numberLong": "1767225600000"}},
+                    "modify_time": {"$date": {"$numberLong": "1767225900000"}},
+                    "leaf_response_id": "a-final",
+                    "workspace_id": None,
+                },
+                "responses": [
+                    response("u1", "human", "Tell me something.", timestamp_ms="1767225600000"),
+                    response("a-old", "assistant", "Abandoned answer.", "u1", timestamp_ms="1767225660000"),
+                    response(
+                        "a-final",
+                        "ASSISTANT",
+                        "Final answer.<grok:render card_id='citation-1' card_type='citation_card'>"
+                        "<argument name='citation_id'>1</argument></grok:render>",
+                        "u1",
+                        timestamp_ms="1767225720000",
+                    ),
+                    # Export-order tail must not override a declared leaf.
+                    response("a-other", "assistant", "Other terminal.", "u1", timestamp_ms="1767225780000"),
+                ],
+            }, {
+                "conversation": {
+                    "id": "grok-fallback",
+                    "title": "Grok Fallback",
+                    "create_time": {"$date": {"$numberLong": "1767226000000"}},
+                },
+                "responses": [
+                    response("u2", "human", "Look at this.", timestamp_ms="1767226000000"),
+                    response(
+                        "a-file",
+                        "assistant",
+                        "",
+                        "u2",
+                        timestamp_ms="1767226060000",
+                        generated_image_urls=["https://example.invalid/image.png"],
+                    ),
+                    response(
+                        "a-empty-error",
+                        "ASSISTANT",
+                        "",
+                        "a-file",
+                        timestamp_ms="1767226120000",
+                        error={"code": "interrupted"},
+                    ),
+                ],
+            }],
+            "projects": [{
+                "workspace_id": "project-1",
+                "name": "Missing Project Chats",
+                "conversations_created_count": 3,
+            }],
+            "tasks": [],
+            "media_posts": [],
+        }), encoding="utf-8")
+
+        api = PulseAPI(root)
+        preview = api.preview_conversation_import("prod-grok-backend.json")
+        assert preview["ok"] is True
+        assert preview["batch"]["source"] == "grok"
+        assert preview["batch"]["source_version"] == "prod-grok-backend"
+        assert preview["batch"]["conversation_count"] == 2
+        assert preview["batch"]["skipped_counts"]["alternate_branch_responses"] == 2
+        assert preview["batch"]["skipped_counts"]["error_responses"] == 1
+        assert preview["batch"]["skipped_counts"]["citation_render_blocks"] == 1
+        assert "no project-linked conversations" in preview["batch"]["warnings"][0]
+
+        branchy = next(
+            item for item in preview["batch"]["conversations"]
+            if item["source_id"] == "grok-branchy"
+        )
+        detail = api.get_import_preview_conversation(preview["preview_id"], branchy["id"])
+        assert [(msg["role"], msg["content"]) for msg in detail["conversation"]["messages"]] == [
+            ("user", "Tell me something."),
+            ("assistant", "Final answer."),
+        ]
+        assert detail["conversation"]["messages"][0]["created_at"] == "2026-01-01T00:00:00+00:00"
+        serialized = json.dumps(detail)
+        assert "Abandoned answer." not in serialized
+        assert "Other terminal." not in serialized
+        assert "grok:render" not in serialized
+        assert "citation_id" not in serialized
+
+        fallback = next(
+            item for item in preview["batch"]["conversations"]
+            if item["source_id"] == "grok-fallback"
+        )
+        detail = api.get_import_preview_conversation(preview["preview_id"], fallback["id"])
+        assert [(msg["role"], msg["content"]) for msg in detail["conversation"]["messages"]] == [
+            ("user", "Look at this."),
+            ("assistant", "[Companion sent an image. Image content was not included in this export.]"),
+        ]
+        assert detail["conversation"]["messages"][1]["attachment_placeholder"] is True
+
+
 def test_gui_api_preview_double_text_is_one_exchange():
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -2661,6 +2786,7 @@ if __name__ == "__main__":
     test_gui_api_import_openrouter_chat_visible_messages_only()
     test_gui_api_preview_claude_import_is_dry_run()
     test_gui_api_preview_chatgpt_follows_canonical_thread()
+    test_gui_api_preview_grok_follows_canonical_thread()
     test_gui_api_preview_double_text_is_one_exchange()
     test_gui_api_stage_import_quarantines_and_resumes()
     test_gui_api_enrichment_plan_pause_resume_and_recovery()

@@ -4116,7 +4116,7 @@ function resetImportPreviewState() {
 }
 
 function setImportNotice(message) {
-  el("importNotice").textContent = message || "Choose a Claude, ChatGPT, OpenRouter, or Markdown export. Preview is read-only.";
+  el("importNotice").textContent = message || "Choose a Claude, ChatGPT, Grok, OpenRouter, or Markdown export. Preview is read-only.";
 }
 
 async function previewImportPath(path = "") {
@@ -4165,9 +4165,12 @@ async function previewImportPath(path = "") {
   el("importConversations").scrollTop = 0;
   el("importDetail").scrollTop = 0;
   const skippedCount = Number(state.importPreview.batch?.skipped_message_count || 0);
-  setImportNotice(skippedCount
-    ? "Preview loaded. Red conversations contain empty or skipped messages you can review in the transcript."
-    : "Preview loaded. Save this review if you want to return to it later.");
+  const batchWarnings = state.importPreview.batch?.warnings || [];
+  setImportNotice(batchWarnings.length
+    ? `Preview loaded with a source warning: ${batchWarnings.join(" ")}`
+    : skippedCount
+      ? "Preview loaded. Red conversations contain empty or skipped messages you can review in the transcript."
+      : "Preview loaded. Save this review if you want to return to it later.");
   if (state.importPreview.selectedId) {
     await selectImportConversation(state.importPreview.selectedId);
   }

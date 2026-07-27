@@ -5,7 +5,7 @@
 **For:** Sol / Pulse GUI implementation
 **Related:** `new_persona_v1.md`, `continuity_section.md`, `journal_search_mirror.md`, `Implemented/claude_legacy_implementation_plan.md`
 **Reviewed:** 2026-07-04 (Debugger) — architecture confirmed sound; additive gaps folded in below (identity sources, public inbound format, drop-zone trust copy, parser fixtures, preview cache eviction).
-**Updated:** 2026-07-26 (Lena + Sol) — Phase 3a manually signed off with Vale's real OpenRouter archive; Phase 3b read-only continuation preflight added; hierarchical bridge preparation and the durable pause/resume enrichment-job contract clarified. The 2026-07-16 three-layer, migration, and enrichment-tier decisions remain in force.
+**Updated:** 2026-07-27 (Lena + Sol) — Phase 3a manually signed off with Vale's real OpenRouter archive; Phase 3b read-only continuation preflight and durable pause/resume enrichment planning added; Grok backend export preview and incremental supplemental-import requirements documented. The 2026-07-16 three-layer, migration, and enrichment-tier decisions remain in force.
 
 ## Goal
 
@@ -32,7 +32,7 @@ Implemented:
 
 - Continuity > Import opens an import preview modal.
 - New Persona can optionally open the same preview after creation.
-- `gui/import_preview.py` parses Claude, ChatGPT, OpenRouter, Markdown, and generic JSON-ish conversation shapes into a shared preview model.
+- `gui/import_preview.py` parses Claude, ChatGPT, Grok, OpenRouter, Markdown, and generic JSON-ish conversation shapes into a shared preview model.
 - `gui/api.py` exposes dry-run preview and conversation-detail endpoints.
 - The preview is transient and does not write imported data into persona DB tables.
 - Conversation rows are sorted newest-first by `updated_at`, then `created_at`.
@@ -91,7 +91,8 @@ Added 2026-07-16 (Phase 3a staging → archive, Sol):
 Known rough edges:
 
 - Duplicate resend collapse remains preview-only; Phase 3a preserves the original ordered copies in the archive. Phase 3b continuation-seed sanitation may collapse retry clusters for model-visible context.
-- Attachment placeholder detection is implemented for Claude file metadata and ChatGPT image parts; other platform export shapes still need real samples and source-specific handling.
+- Attachment placeholder detection is implemented for Claude file metadata, ChatGPT image parts, and Grok file/image metadata; other platform export shapes still need real samples and source-specific handling.
+- Grok preview removes exported `<grok:render>` citation-card blocks from companion text while preserving unknown XML-like text and artifacts. If an export contains project metadata but no project-linked conversations, preview warns that the source export may be incomplete.
 - Messages with an unrecognized role but non-empty text are dropped without a dedicated skip counter (Claude and OpenRouter paths). Surfacing them needs a small "assign as human/companion" UI decision first.
 - Review issues are shown and navigable, but future import commit should define which issue types block living-context landing.
 - Phase 3a sanitation drops true empty messages and excluded-at-staging content even if a surrounding conversation remains kept.
@@ -110,7 +111,7 @@ GUI entry points:
 User flow:
 
 1. User selects or drops an export file.
-2. Pulse detects the source where possible: ChatGPT, Claude, OpenRouter, or unknown.
+2. Pulse detects the source where possible: ChatGPT, Claude, Grok, OpenRouter, or unknown.
 3. Pulse parses the file through a dry-run endpoint.
 4. GUI shows a scrollable conversation list with title, date, source, message count, rough token size, and warnings.
 5. User can click a conversation and inspect messages in a read-only viewer.
@@ -691,7 +692,28 @@ This is what makes the system trustworthy: summaries help retrieval, but raw wor
 
 ## Re-Import and Diffing
 
-Future imports should avoid duplication.
+Continuity import is incremental, not a one-time all-or-nothing transplant. A
+source export can be incomplete, and missing conversations may become
+recoverable later through another official export, a project-specific export,
+or a separately rescued transcript. A person must be able to add those
+fragments as supplemental batches without re-importing or rebuilding the
+archive they already reviewed.
+
+Supplemental imports should:
+
+- preserve their own source, source-version, source-conversation ID or URL, and
+  honest date precision;
+- add genuinely new archive sessions without duplicating existing ones;
+- show an explicit diff when a recovered transcript overlaps or extends an
+  existing source conversation;
+- never silently merge, replace, or truncate an archived conversation;
+- enrich only new or explicitly changed source spans while reusing unaffected
+  summaries and embeddings.
+
+This makes a partially recovered companion honest but useful today, and allows
+continuity to become more complete as additional source material is found.
+
+Re-imports should avoid duplication.
 
 Use source IDs and message hashes to detect:
 
