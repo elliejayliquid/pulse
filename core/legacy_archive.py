@@ -620,12 +620,45 @@ def remove_archived_conversation(
         "SELECT COUNT(*) FROM legacy_summaries WHERE session_id = ?",
         (archive_id,),
     ).fetchone()[0]
+    enrichment_chunk_count = 0
+    enrichment_artifact_count = 0
+    enrichment_chunk_ids: list[str] = []
+    if _table_exists(conn, "legacy_enrichment_chunks"):
+        enrichment_chunk_ids = [
+            str(row[0])
+            for row in conn.execute(
+                "SELECT id FROM legacy_enrichment_chunks WHERE session_id = ?",
+                (archive_id,),
+            ).fetchall()
+        ]
+        enrichment_chunk_count = len(enrichment_chunk_ids)
+    if _table_exists(conn, "legacy_enrichment_artifacts"):
+        enrichment_artifact_count = int(conn.execute(
+            "SELECT COUNT(*) FROM legacy_enrichment_artifacts WHERE session_id = ?",
+            (archive_id,),
+        ).fetchone()[0])
     removed = conn.execute(
         "DELETE FROM legacy_sessions WHERE id = ? AND live_session_id = ''",
         (archive_id,),
     ).rowcount
     if not removed:
         raise ValueError("The archive changed before removal; reload and try again.")
+    if enrichment_chunk_ids and _table_exists(conn, "legacy_enrichment_job_chunks"):
+        placeholders = ",".join("?" for _ in enrichment_chunk_ids)
+        conn.execute(
+            f"DELETE FROM legacy_enrichment_job_chunks WHERE chunk_id IN ({placeholders})",
+            tuple(enrichment_chunk_ids),
+        )
+    if _table_exists(conn, "legacy_enrichment_artifacts"):
+        conn.execute(
+            "DELETE FROM legacy_enrichment_artifacts WHERE session_id = ?",
+            (archive_id,),
+        )
+    if _table_exists(conn, "legacy_enrichment_chunks"):
+        conn.execute(
+            "DELETE FROM legacy_enrichment_chunks WHERE session_id = ?",
+            (archive_id,),
+        )
     conn.execute("DELETE FROM legacy_summaries WHERE session_id = ?", (archive_id,))
     conn.execute("DELETE FROM legacy_messages WHERE session_id = ?", (archive_id,))
     return {
@@ -634,6 +667,8 @@ def remove_archived_conversation(
         "title": item["title"],
         "removed_messages": int(message_count),
         "removed_summaries": int(summary_count),
+        "removed_enrichment_chunks": enrichment_chunk_count,
+        "removed_enrichment_artifacts": enrichment_artifact_count,
     }
 
 

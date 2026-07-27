@@ -26,6 +26,14 @@ from typing import Any
 import yaml
 
 from core import yaml_loader
+from core.archive_enrichment import (
+    ensure_enrichment_tables,
+    latest_enrichment_job,
+    pause_enrichment_job,
+    plan_archive_enrichment,
+    recover_interrupted_enrichment_jobs,
+    resume_enrichment_job,
+)
 from core.legacy_archive import (
     archive_batch_summary,
     archive_batch_status,
@@ -721,6 +729,81 @@ class PulseAPI:
             preflight["safety"]["database_file"] = db_path.name
             preflight["safety"]["database_size"] = db_path.stat().st_size
             return {"ok": True, "preflight": preflight}
+        except (ValueError, OSError, sqlite3.Error) as e:
+            return {"ok": False, "error": str(e)}
+
+    def get_import_enrichment_status(self, persona: str) -> dict:
+        """Return the latest durable enrichment plan and recover stale work."""
+        validation = self._validate_persona_for_db_write(persona)
+        if not validation["ok"]:
+            return validation
+        try:
+            db_path = self._persona_database_path(persona)
+            if not db_path.is_file():
+                return {"ok": True, "job": None, "recovered_jobs": []}
+            with closing(_connect_sqlite(db_path)) as conn:
+                ensure_enrichment_tables(conn)
+                recovered = recover_interrupted_enrichment_jobs(conn)
+                job = latest_enrichment_job(conn)
+                conn.commit()
+            return {"ok": True, "job": job, "recovered_jobs": recovered}
+        except (ValueError, OSError, sqlite3.Error) as e:
+            return {"ok": False, "error": str(e)}
+
+    def plan_import_enrichment(self, persona: str, schedule_mode: str = "paused") -> dict:
+        """Persist an exchange-safe archive plan without running any models."""
+        validation = self._validate_persona_for_db_write(persona)
+        if not validation["ok"]:
+            return validation
+        try:
+            db_path = self._persona_database_path(persona)
+            if not db_path.is_file():
+                return {"ok": False, "error": "Searchable history not found."}
+            with closing(_connect_sqlite(db_path)) as conn:
+                ensure_enrichment_tables(conn)
+                recover_interrupted_enrichment_jobs(conn)
+                job = plan_archive_enrichment(
+                    conn,
+                    schedule_mode=str(schedule_mode or "paused"),
+                    chunk_token_budget=self._enrichment_chunk_budget(persona),
+                )
+                conn.commit()
+            return {"ok": True, "job": job}
+        except (ValueError, OSError, sqlite3.Error) as e:
+            return {"ok": False, "error": str(e)}
+
+    def pause_import_enrichment(self, persona: str, job_id: str) -> dict:
+        """Persist a pause or cooperative pause request for enrichment."""
+        validation = self._validate_persona_for_db_write(persona)
+        if not validation["ok"]:
+            return validation
+        try:
+            db_path = self._persona_database_path(persona)
+            if not db_path.is_file():
+                return {"ok": False, "error": "Enrichment job not found."}
+            with closing(_connect_sqlite(db_path)) as conn:
+                ensure_enrichment_tables(conn)
+                job = pause_enrichment_job(conn, str(job_id or ""))
+                conn.commit()
+            return {"ok": True, "job": job}
+        except (ValueError, OSError, sqlite3.Error) as e:
+            return {"ok": False, "error": str(e)}
+
+    def resume_import_enrichment(self, persona: str, job_id: str) -> dict:
+        """Queue a paused durable plan without repeating completed chunks."""
+        validation = self._validate_persona_for_db_write(persona)
+        if not validation["ok"]:
+            return validation
+        try:
+            db_path = self._persona_database_path(persona)
+            if not db_path.is_file():
+                return {"ok": False, "error": "Enrichment job not found."}
+            with closing(_connect_sqlite(db_path)) as conn:
+                ensure_enrichment_tables(conn)
+                recover_interrupted_enrichment_jobs(conn)
+                job = resume_enrichment_job(conn, str(job_id or ""))
+                conn.commit()
+            return {"ok": True, "job": job}
         except (ValueError, OSError, sqlite3.Error) as e:
             return {"ok": False, "error": str(e)}
 
@@ -3156,6 +3239,16 @@ class PulseAPI:
         except (TypeError, ValueError):
             recent_tail = 4
         return max(1, landing_budget), max(1, recent_tail)
+
+    def _enrichment_chunk_budget(self, persona: str) -> int:
+        """Return the exchange-chunk planning budget, independent of landing."""
+        config = self._merged_config_for(persona)
+        context_budget = config.get("context_budget", {})
+        try:
+            value = int(context_budget.get("enrichment_chunk_tokens") or 1600)
+        except (TypeError, ValueError):
+            value = 1600
+        return max(128, value)
 
     def _configured_legacy_database_path(self, persona: str) -> Path | None:
         config = self._merged_config_for(persona)

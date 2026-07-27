@@ -1128,6 +1128,9 @@ def test_gui_api_stage_import_quarantines_and_resumes():
         assert status["conversations"][keeper_id]["archived"] is True
         assert status["conversations"][keeper_id]["can_remove"] is True
         archive_id = status["conversations"][keeper_id]["archive_id"]
+        archive_plan = api.plan_import_enrichment("demo", "paused")
+        assert archive_plan["ok"] is True
+        assert archive_plan["job"]["total_chunks"] == 1
         from core.legacy_archive import remove_archived_conversation
         with closing(sqlite3.connect(db_path)) as conn:
             conn.execute(
@@ -1175,6 +1178,10 @@ def test_gui_api_stage_import_quarantines_and_resumes():
                 "SELECT COUNT(*) FROM legacy_summaries WHERE session_id = ?",
                 (archive_id,),
             ).fetchone()[0] == 1
+            assert conn.execute(
+                "SELECT COUNT(*) FROM legacy_enrichment_chunks WHERE session_id = ?",
+                (archive_id,),
+            ).fetchone()[0] == 1
             conn.rollback()
 
             conn.execute(
@@ -1204,6 +1211,8 @@ def test_gui_api_stage_import_quarantines_and_resumes():
             assert conn.execute("SELECT COUNT(*) FROM legacy_sessions").fetchone()[0] == 0
             assert conn.execute("SELECT COUNT(*) FROM legacy_messages").fetchone()[0] == 0
             assert conn.execute("SELECT COUNT(*) FROM legacy_summaries").fetchone()[0] == 0
+            assert conn.execute("SELECT COUNT(*) FROM legacy_enrichment_chunks").fetchone()[0] == 0
+            assert conn.execute("SELECT COUNT(*) FROM legacy_enrichment_job_chunks").fetchone()[0] == 0
             # Correction never removes the durable staged review copy.
             assert conn.execute("SELECT COUNT(*) FROM import_conversations").fetchone()[0] == 2
             assert conn.execute("SELECT COUNT(*) FROM import_messages").fetchone()[0] == 5
@@ -1286,6 +1295,177 @@ def test_gui_api_stage_import_quarantines_and_resumes():
                 assert conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
         missing = api.delete_import_batch("demo", resumed["preview_id"])
         assert missing["ok"] is False
+
+
+def test_gui_api_enrichment_plan_pause_resume_and_recovery():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        template_dir = root / "personas" / "_template"
+        (template_dir / "data").mkdir(parents=True)
+        (root / "logs").mkdir()
+        (root / "config.yaml").write_text(
+            "provider:\n  type: local\ncontext_budget:\n  enrichment_chunk_tokens: 1600\n",
+            encoding="utf-8",
+        )
+        (root / "persona.yaml").write_text(
+            "name: Base\nuser_name: User\n",
+            encoding="utf-8",
+        )
+        (template_dir / "config.yaml").write_text("", encoding="utf-8")
+        (template_dir / "persona.yaml").write_text(
+            "name: Your Persona Name\nuser_name: Your Name\nsystem_prompt: Hi.\n",
+            encoding="utf-8",
+        )
+
+        api = PulseAPI(root)
+        assert api.create_persona({
+            "display_name": "Demo",
+            "slug": "demo",
+            "user_name": "Lena",
+        })["ok"] is True
+        db_path = root / "personas" / "demo" / "data" / "demo.db"
+
+        from core.legacy_archive import ensure_legacy_archive_tables
+        with closing(sqlite3.connect(db_path)) as conn:
+            ensure_legacy_archive_tables(conn)
+            conn.execute(
+                "INSERT INTO legacy_sessions("
+                "id, source, source_conversation_id, title, message_count, archived_at"
+                ") VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    "legacy-enrichment-demo",
+                    "chatgpt",
+                    "enrichment-demo",
+                    "Long enough to split",
+                    4,
+                    "2026-07-26T00:00:00+00:00",
+                ),
+            )
+            rows = [
+                (0, "user", "A" * 3600, "2026-07-26T00:00:00+00:00"),
+                (1, "assistant", "B" * 800, "2026-07-26T00:01:00+00:00"),
+                (2, "user", "C" * 3600, "2026-07-26T00:02:00+00:00"),
+                (3, "assistant", "D" * 800, "2026-07-26T00:03:00+00:00"),
+            ]
+            conn.executemany(
+                "INSERT INTO legacy_messages("
+                "session_id, position, role, content, timestamp"
+                ") VALUES ('legacy-enrichment-demo', ?, ?, ?, ?)",
+                rows,
+            )
+            live_before = {
+                table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                for table in ("sessions", "messages", "legacy_sessions", "legacy_messages")
+            }
+            conn.commit()
+
+        planned = api.plan_import_enrichment("demo", "paused")
+        assert planned["ok"] is True
+        job = planned["job"]
+        assert job["created"] is True
+        assert job["status"] == "paused"
+        assert job["schedule_mode"] == "paused"
+        assert job["total_sessions"] == 1
+        assert job["total_chunks"] == 2
+        assert job["total_messages"] == 4
+        assert job["chunk_counts"] == {"pending": 2}
+        assert job["archive_changed"] is False
+        assert job["worker_available"] is False
+
+        planned_again = api.plan_import_enrichment("demo", "paused")
+        assert planned_again["ok"] is True
+        assert planned_again["job"]["id"] == job["id"]
+        assert planned_again["job"]["created"] is False
+        assert planned_again["job"]["idempotent_reuse"] is True
+
+        resumed = api.resume_import_enrichment("demo", job["id"])
+        assert resumed["ok"] is True
+        assert resumed["job"]["status"] == "queued"
+        paused = api.pause_import_enrichment("demo", job["id"])
+        assert paused["ok"] is True
+        assert paused["job"]["status"] == "paused"
+
+        with closing(sqlite3.connect(db_path)) as conn:
+            first_chunk = conn.execute(
+                "SELECT chunk_id FROM legacy_enrichment_job_chunks "
+                "WHERE job_id = ? ORDER BY ordinal LIMIT 1",
+                (job["id"],),
+            ).fetchone()[0]
+            conn.execute(
+                "UPDATE legacy_enrichment_jobs SET status = 'running', "
+                "schedule_mode = 'idle', heartbeat_at = ?, current_chunk_id = ? "
+                "WHERE id = ?",
+                ("2000-01-01T00:00:00+00:00", first_chunk, job["id"]),
+            )
+            conn.execute(
+                "UPDATE legacy_enrichment_job_chunks SET status = 'running', "
+                "claimed_at = ? WHERE job_id = ? AND chunk_id = ?",
+                ("2000-01-01T00:00:00+00:00", job["id"], first_chunk),
+            )
+            conn.commit()
+
+        recovered = api.get_import_enrichment_status("demo")
+        assert recovered["ok"] is True
+        assert recovered["recovered_jobs"] == [job["id"]]
+        assert recovered["job"]["status"] == "queued"
+        assert recovered["job"]["recovery_count"] == 1
+        assert recovered["job"]["current_chunk_id"] == ""
+        assert recovered["job"]["chunk_counts"] == {"pending": 2}
+
+        with closing(sqlite3.connect(db_path)) as conn:
+            conn.execute(
+                "UPDATE legacy_enrichment_jobs SET status = 'pausing', "
+                "pause_requested = 1, heartbeat_at = ? WHERE id = ?",
+                ("2000-01-01T00:00:00+00:00", job["id"]),
+            )
+            conn.commit()
+        recovered_pause = api.get_import_enrichment_status("demo")
+        assert recovered_pause["job"]["status"] == "paused"
+        assert recovered_pause["job"]["recovery_count"] == 2
+
+        with closing(sqlite3.connect(db_path)) as conn:
+            live_after = {
+                table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                for table in ("sessions", "messages", "legacy_sessions", "legacy_messages")
+            }
+            assert live_after == live_before
+            assert conn.execute(
+                "SELECT COUNT(*) FROM legacy_enrichment_chunks"
+            ).fetchone()[0] == 2
+            assert conn.execute(
+                "SELECT COUNT(*) FROM legacy_enrichment_artifacts"
+            ).fetchone()[0] == 0
+            assert conn.execute(
+                "SELECT COUNT(*) FROM legacy_summaries"
+            ).fetchone()[0] == 0
+
+            conn.execute(
+                "INSERT INTO legacy_messages("
+                "session_id, position, role, content, timestamp"
+                ") VALUES (?, ?, ?, ?, ?)",
+                (
+                    "legacy-enrichment-demo",
+                    4,
+                    "user",
+                    "A later archive correction.",
+                    "2026-07-26T00:04:00+00:00",
+                ),
+            )
+            conn.execute(
+                "UPDATE legacy_sessions SET message_count = 5 "
+                "WHERE id = 'legacy-enrichment-demo'"
+            )
+            conn.commit()
+
+        outdated = api.get_import_enrichment_status("demo")
+        assert outdated["job"]["archive_changed"] is True
+        refused_resume = api.resume_import_enrichment("demo", job["id"])
+        assert refused_resume["ok"] is False
+        assert "Refresh" in refused_resume["error"]
+        refreshed = api.plan_import_enrichment("demo", "paused")
+        assert refreshed["ok"] is True
+        assert refreshed["job"]["id"] != job["id"]
+        assert refreshed["job"]["archive_changed"] is False
 
 
 def test_gui_api_archive_migrates_standalone_legacy_db_once():
@@ -2483,6 +2663,7 @@ if __name__ == "__main__":
     test_gui_api_preview_chatgpt_follows_canonical_thread()
     test_gui_api_preview_double_text_is_one_exchange()
     test_gui_api_stage_import_quarantines_and_resumes()
+    test_gui_api_enrichment_plan_pause_resume_and_recovery()
     test_gui_api_archive_migrates_standalone_legacy_db_once()
     test_gui_api_standard_provider_env_fallback()
     test_gui_api_get_lantern_read_only()

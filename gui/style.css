@@ -2979,6 +2979,34 @@ textarea {
   transition: width 180ms ease;
 }
 
+.import-enrichment-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: -3px 0 10px;
+  padding: 6px 8px 6px 12px;
+  border-left: 2px solid rgba(249, 115, 22, 0.35);
+  color: var(--text-tertiary);
+  font: 500 10px/1.4 var(--body);
+}
+
+.import-enrichment-controls > span {
+  min-width: 0;
+}
+
+.import-enrichment-controls > div {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 6px;
+}
+
+.import-enrichment-controls .modal-btn {
+  min-height: 28px;
+  padding: 5px 9px;
+  font-size: 10px;
+}
+
 .import-summary {
   display: flex;
   align-items: center;

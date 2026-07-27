@@ -5,7 +5,7 @@
 **For:** Sol / Pulse GUI implementation
 **Related:** `new_persona_v1.md`, `continuity_section.md`, `journal_search_mirror.md`, `Implemented/claude_legacy_implementation_plan.md`
 **Reviewed:** 2026-07-04 (Debugger) — architecture confirmed sound; additive gaps folded in below (identity sources, public inbound format, drop-zone trust copy, parser fixtures, preview cache eviction).
-**Updated:** 2026-07-26 (Lena + Sol) — Phase 3a manually signed off with Vale's real OpenRouter archive; Phase 3b read-only continuation preflight added and the hierarchical bridge-preparation contract clarified. The 2026-07-16 three-layer, migration, and enrichment-tier decisions remain in force.
+**Updated:** 2026-07-26 (Lena + Sol) — Phase 3a manually signed off with Vale's real OpenRouter archive; Phase 3b read-only continuation preflight added; hierarchical bridge preparation and the durable pause/resume enrichment-job contract clarified. The 2026-07-16 three-layer, migration, and enrichment-tier decisions remain in force.
 
 ## Goal
 
@@ -616,6 +616,40 @@ Progress should be honest:
 - If the user disables old-conversation summarization, disabled work should not count as incomplete.
 - If errors remain, show "complete with errors" rather than pretending everything succeeded.
 
+### Durable pause, resume, and power-loss recovery
+
+Background enrichment is expected to outlive one GUI session. Its state belongs
+in the persona database, not in frontend memory or a process-local queue.
+
+- Plan deterministic, exchange-preserving chunks before a worker starts.
+- Persist jobs, their chunk membership, per-chunk status, attempts, timestamps,
+  content fingerprints, and the current claimed chunk.
+- Commit one completed chunk/artifact at a time. A crash may repeat at most the
+  uncommitted current chunk; completed chunks remain cache hits.
+- `Pause` is cooperative for a running worker: finish or roll back the current
+  atomic chunk, then stop before claiming another.
+- A paused job survives GUI closure, persona restart, and computer restart.
+- A queued/running job writes a heartbeat. On startup/status inspection, stale
+  `running` work returns to `queued`; stale `pausing` work becomes `paused`;
+  any claimed-but-uncommitted chunk returns to `pending`.
+- Resume never resets completed progress. Failed chunks retain attempts and
+  errors for retry/review.
+- If searchable history changed after planning, mark the plan outdated and
+  require an idempotent refresh before queueing it.
+- Removing a chat from searchable history removes its derived chunks/artifacts
+  and invalidates plans that referenced it.
+- Provider choice, privacy consent, and cost approval remain separate durable
+  gates. Recovery must never silently broaden an approved provider or tier.
+
+User-facing scheduling should eventually offer:
+
+- **Not now** — no job, or save a paused plan.
+- **When idle** — durable queue; workers claim chunks only under the idle policy.
+- **Start now** — same durable queue with immediate eligibility.
+
+All three modes use the same persisted job. Changing the schedule does not
+re-plan or duplicate chunks.
+
 User-facing copy should make the tradeoff clear:
 
 ```text
@@ -827,6 +861,19 @@ Status (2026-07-26):
 - Add the enrichment settings window (mode, provider, disclosure, cost estimate).
 - Add progress UI and pause/resume.
 
+Status (2026-07-26):
+
+- `core/archive_enrichment.py` now defines the first durable foundation:
+  deterministic exchange chunks, typed future-artifact metadata, persisted jobs
+  and job/chunk state, idempotent plan reuse, pause/resume transitions, stale
+  worker recovery, and archive-change detection.
+- The importer can create or refresh a paused local plan, queue it for later,
+  pause it again, and display recovered/outdated state. Planning runs no model,
+  embedding, summary, or live-session mutation.
+- No enrichment worker exists yet. `worker_available = false` and GUI copy state
+  this explicitly; queued work is durable but will not be consumed in this
+  checkpoint.
+
 ### Phase 5: Search and Drill-Down
 
 - Search imported archive by keyword and semantic summary.
@@ -866,14 +913,17 @@ or dies long-term.
 
 ## Next Practical Slice (2026-07-26)
 
-Phase 3a is manually signed off. The revised slice:
+The durable planner/state-machine slice is complete. The revised order:
 
-1. Extend summary/job metadata so chunk, rollup, era, and bridge artifacts have
-   explicit type, lineage, coverage, and completion state.
-2. Implement resumable hierarchical bridge preparation with provider/privacy/
-   cost confirmation and no changes to the current live session on failure.
-3. In a separate final apply boundary:
+1. Add the Tier 1 local worker: claim one queued chunk transactionally, generate
+   its local embedding, persist the artifact, heartbeat, and honor pause between
+   chunks. Test interruption/resume with a fresh process.
+2. Connect `When idle` eligibility and honest live progress without making GUI
+   lifetime the only durability boundary.
+3. Add Tier 2 opt-in chunk summaries and recursive rollups with provider/privacy/
+   cost confirmation; reuse them for on-demand bridge preparation.
+4. In a separate final apply boundary:
    persona database backup, current-session summary/close, sanitized landing
    seed creation, and guarded `live_session_id` linkage.
-4. Keep the standalone `legacy.db` migration check separate; it is not a blocker
+5. Keep the standalone `legacy.db` migration check separate; it is not a blocker
    for continuation work.

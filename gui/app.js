@@ -76,6 +76,11 @@ const state = {
     archiveStatus: {},
     checkingSavedImport: false,
   },
+  importEnrichment: {
+    job: null,
+    loading: false,
+    error: "",
+  },
   taskBaselines: {},
   taskDrafts: [],
   taskOriginals: [],
@@ -228,6 +233,10 @@ const fallbackApi = {
   async prepare_import_archive() { return { ok: false, error: "Run through pywebview to review archive additions." }; },
   async archive_import_batch() { return { ok: false, error: "Run through pywebview to add chats to the archive." }; },
   async prepare_import_continuation() { return { ok: false, error: "Run through pywebview to review a live continuation." }; },
+  async get_import_enrichment_status() { return { ok: true, job: null, recovered_jobs: [] }; },
+  async plan_import_enrichment() { return { ok: false, error: "Run through pywebview to plan enrichment." }; },
+  async pause_import_enrichment() { return { ok: false, error: "Run through pywebview to pause enrichment." }; },
+  async resume_import_enrichment() { return { ok: false, error: "Run through pywebview to resume enrichment." }; },
   async get_import_archive_status() { return { ok: false, error: "Run through pywebview to inspect the archive." }; },
   async remove_import_archive_conversation() { return { ok: false, error: "Run through pywebview to correct the archive." }; },
   async list_reminders() { return { ok: false, error: "Run through pywebview to manage reminders." }; },
@@ -3912,14 +3921,91 @@ function openImportDialog(initialPath = "") {
     resetImportPreviewState();
     el("importPath").value = initialPath;
   }
+  state.importEnrichment = { job: null, loading: true, error: "" };
   el("importDialog").classList.remove("hidden");
   document.body.classList.add("modal-open");
   renderImportPreview();
+  void refreshImportEnrichmentStatus();
   if (!initialPath && !state.importPreview.batch) {
     void resumeLatestStagedImport();
   } else {
     setTimeout(() => el("importPath").focus(), 0);
   }
+}
+
+async function refreshImportEnrichmentStatus() {
+  const persona = state.current?.name;
+  if (!persona || persona === "__base__") return;
+  state.importEnrichment.loading = true;
+  state.importEnrichment.error = "";
+  renderImportEnrichmentStatus();
+  const result = await api().get_import_enrichment_status(persona);
+  state.importEnrichment.loading = false;
+  if (!result?.ok) {
+    state.importEnrichment.error = result?.error || "Could not load enrichment status.";
+    renderImportEnrichmentStatus();
+    return;
+  }
+  state.importEnrichment.job = result.job || null;
+  renderImportEnrichmentStatus();
+}
+
+async function planImportEnrichment() {
+  const persona = state.current?.name;
+  if (!persona || persona === "__base__") return;
+  state.importEnrichment.loading = true;
+  state.importEnrichment.error = "";
+  renderImportEnrichmentStatus();
+  setImportNotice("Building a durable exchange-chunk plan. No model will run.");
+  const result = await api().plan_import_enrichment(persona, "paused");
+  state.importEnrichment.loading = false;
+  if (!result?.ok) {
+    state.importEnrichment.error = result?.error || "Could not plan background enrichment.";
+    setImportNotice(state.importEnrichment.error);
+    renderImportEnrichmentStatus();
+    return;
+  }
+  state.importEnrichment.job = result.job || null;
+  renderImportEnrichmentStatus();
+  const job = state.importEnrichment.job || {};
+  setImportNotice(
+    `Enrichment plan saved: ${job.total_chunks || 0} chunks across ${job.total_sessions || 0} chats. `
+    + "It is paused; no model, embedding, or live-session work ran."
+  );
+}
+
+async function pauseImportEnrichment() {
+  const persona = state.current?.name;
+  const jobId = state.importEnrichment.job?.id;
+  if (!persona || persona === "__base__" || !jobId) return;
+  const result = await api().pause_import_enrichment(persona, jobId);
+  if (!result?.ok) {
+    setImportNotice(result?.error || "Could not pause enrichment.");
+    return;
+  }
+  state.importEnrichment.job = result.job || null;
+  renderImportEnrichmentStatus();
+  setImportNotice(
+    result.job?.status === "pausing"
+      ? "Pause requested. A future worker will stop safely between chunks."
+      : "Enrichment queue paused. Completed chunks will remain reusable."
+  );
+}
+
+async function resumeImportEnrichment() {
+  const persona = state.current?.name;
+  const jobId = state.importEnrichment.job?.id;
+  if (!persona || persona === "__base__" || !jobId) return;
+  const result = await api().resume_import_enrichment(persona, jobId);
+  if (!result?.ok) {
+    setImportNotice(result?.error || "Could not queue enrichment.");
+    return;
+  }
+  state.importEnrichment.job = result.job || null;
+  renderImportEnrichmentStatus();
+  setImportNotice(
+    "Enrichment plan queued durably. The processing worker is not connected in this checkpoint, so no model will run yet."
+  );
 }
 
 async function resumeLatestStagedImport() {
@@ -4274,10 +4360,10 @@ async function prepareOrArchiveImport() {
   preview.archiveConfirm = null;
   preview.continuationPreflight = null;
   await refreshImportArchiveStatus();
+  await refreshImportEnrichmentStatus();
   const newlyArchived = Object.entries(preview.archiveStatus || {})
     .filter(([conversationId, item]) => item.archived && !previouslyArchived.has(conversationId))
     .map(([conversationId]) => conversationId);
-  el("importProgressText").textContent = "Keyword search ready";
   renderImportArchiveConfirmation();
   renderImportConversationList();
   updateImportStagedControls();
@@ -4382,12 +4468,10 @@ async function removeImportConversationFromArchive(conversationId) {
   preview.archiveConfirm = null;
   preview.continuationPreflight = null;
   await refreshImportArchiveStatus();
+  await refreshImportEnrichmentStatus();
   renderImportArchiveConfirmation();
   renderImportConversationList();
   updateImportStagedControls();
-  el("importProgressText").textContent = Object.values(preview.archiveStatus || {}).some((item) => item.archived)
-    ? "Keyword search ready"
-    : "Not enriched yet";
   setImportNotice(
     `Removed ${result.title || "the selected conversation"} (${result.removed_messages || 0} messages) from searchable history. Its saved review copy is unchanged.`
   );
@@ -4562,6 +4646,81 @@ function updateImportStagedControls() {
   deleteBtn.disabled = !preview.staged;
 }
 
+function renderImportEnrichmentStatus() {
+  const enrichment = state.importEnrichment || {};
+  const job = enrichment.job;
+  const progressText = el("importProgressText");
+  const progressFill = el("importProgressFill");
+  const detail = el("importEnrichmentDetail");
+  const planBtn = el("importEnrichmentPlanBtn");
+  const pauseBtn = el("importEnrichmentPauseBtn");
+  const resumeBtn = el("importEnrichmentResumeBtn");
+  if (!progressText || !progressFill || !detail || !planBtn || !pauseBtn || !resumeBtn) return;
+
+  pauseBtn.classList.add("hidden");
+  resumeBtn.classList.add("hidden");
+  planBtn.disabled = Boolean(enrichment.loading);
+  if (enrichment.loading) {
+    progressText.textContent = "Checking";
+    progressFill.style.width = "0%";
+    detail.textContent = "Reading the durable enrichment plan...";
+    return;
+  }
+  if (enrichment.error) {
+    progressText.textContent = "Needs attention";
+    progressFill.style.width = "0%";
+    detail.textContent = enrichment.error;
+    planBtn.textContent = "Try planning again";
+    return;
+  }
+  if (!job) {
+    progressText.textContent = "Not scheduled";
+    progressFill.style.width = "0%";
+    detail.textContent = "Plan local, exchange-safe chunks now; no model or embedding worker runs in this checkpoint.";
+    planBtn.textContent = "Plan safely";
+    planBtn.title = "Save a deterministic chunk plan in the companion database without running models.";
+    return;
+  }
+
+  const status = String(job.status || "paused");
+  const statusLabels = {
+    paused: "Paused",
+    queued: "Queued",
+    running: "Running",
+    pausing: "Pausing",
+    completed: "Complete",
+    failed: "Needs attention",
+  };
+  const completed = Number(job.completed_chunks || 0);
+  const total = Number(job.total_chunks || 0);
+  progressText.textContent = job.archive_changed
+    ? "Plan outdated"
+    : `${statusLabels[status] || status} / ${completed} of ${total}`;
+  progressFill.style.width = `${Math.max(0, Math.min(100, Number(job.progress_percent || 0)))}%`;
+  const recoveryText = Number(job.recovery_count || 0)
+    ? ` Recovered safely after ${job.recovery_count} interrupted worker${Number(job.recovery_count) === 1 ? "" : "s"}.`
+    : "";
+  const workerText = job.worker_available
+    ? "The worker will process one durable chunk at a time."
+    : "The processing worker comes next; this checkpoint cannot run models yet.";
+  const changedText = job.archive_changed
+    ? " Searchable history changed; refresh the plan before queueing it."
+    : "";
+  detail.textContent = `${Number(job.total_sessions || 0).toLocaleString()} chats / `
+    + `${total.toLocaleString()} chunks / about ${Number(job.estimated_tokens || 0).toLocaleString()} tokens. `
+    + `${workerText}${recoveryText}${changedText}`;
+
+  planBtn.textContent = "Refresh plan";
+  planBtn.title = "Re-scan searchable history and reuse the same plan when nothing changed.";
+  planBtn.disabled = ["running", "pausing"].includes(status);
+  if (["queued", "running"].includes(status)) {
+    pauseBtn.classList.remove("hidden");
+  }
+  if (["paused", "failed"].includes(status) && !job.archive_changed) {
+    resumeBtn.classList.remove("hidden");
+  }
+}
+
 function renderImportPreview() {
   const preview = state.importPreview;
   const batch = preview.batch;
@@ -4571,13 +4730,7 @@ function renderImportPreview() {
   el("importPath").disabled = checkingSavedImport;
   el("importPicker").disabled = checkingSavedImport;
   el("importPreviewBtn").disabled = checkingSavedImport;
-  const hasArchivedChats = Object.values(preview.archiveStatus || {}).some((item) => item.archived);
-  el("importProgressText").textContent = checkingSavedImport
-    ? "Checking saved review"
-    : (!batch
-    ? "Not started"
-    : (hasArchivedChats ? "Keyword search ready" : "Not enriched yet"));
-  el("importProgressFill").style.width = "0%";
+  renderImportEnrichmentStatus();
   updateImportStagedControls();
   renderImportArchiveConfirmation();
   if (checkingSavedImport && !batch) {
@@ -5543,6 +5696,9 @@ function wireEvents() {
   el("importStageBtn").addEventListener("click", () => { void stageCurrentImport(); });
   el("importArchiveBtn").addEventListener("click", () => { void prepareOrArchiveImport(); });
   el("importContinueBtn").addEventListener("click", () => { void prepareImportContinuation(); });
+  el("importEnrichmentPlanBtn").addEventListener("click", () => { void planImportEnrichment(); });
+  el("importEnrichmentPauseBtn").addEventListener("click", () => { void pauseImportEnrichment(); });
+  el("importEnrichmentResumeBtn").addEventListener("click", () => { void resumeImportEnrichment(); });
   el("importArchiveCancelBtn").addEventListener("click", cancelImportArchiveConfirmation);
   el("importDeleteStagedBtn").addEventListener("click", () => { void deleteStagedImport(); });
   el("importPicker").addEventListener("click", async () => {
