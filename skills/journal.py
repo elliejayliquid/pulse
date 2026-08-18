@@ -146,6 +146,10 @@ class JournalSkill(BaseSkill):
     search_examples = ["write in my journal", "reflect on this", "update identity notes"]
     aliases = ["journal", "reflect", "reflection", "identity", "diary", "write thoughts", "inner state", "housekeeping"]
     categories = ["reflection", "memory", "housekeeping"]
+    # These are everyday continuity actions and are regularly prompted by the
+    # injected journal context. Keep them directly callable; destructive or
+    # rarer update/delete operations remain discoverable on demand.
+    always_tools = ["write_journal", "read_journal", "list_journal_entries"]
 
     def __init__(self, config: dict):
         super().__init__(config)

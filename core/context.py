@@ -70,6 +70,11 @@ class ContextManager:
 
     # Rough token estimation: ~4 chars per token for English text
     CHARS_PER_TOKEN = 4
+    INFRASTRUCTURE_TOOLS = {
+        "search_tools",
+        "tool_search_tool_bm25",
+        "tool_search_tool_regex",
+    }
 
     # Default budget proportions (% of max_context)
     # Used when context_budget values aren't explicitly set in config
@@ -367,7 +372,11 @@ class ContextManager:
 
         lines = ["## Recent Heartbeat Actions"]
         for entry in recent:
-            tools_str = f" [tools: {', '.join(entry['tools'])}]" if entry.get("tools") else ""
+            visible_tools = [
+                tool for tool in entry.get("tools", [])
+                if tool not in self.INFRASTRUCTURE_TOOLS
+            ]
+            tools_str = f" [tools: {', '.join(visible_tools)}]" if visible_tools else ""
             summary = f" — {entry['summary']}" if entry.get("summary") else ""
             lines.append(f"- {entry['time']}: {entry['action']}{tools_str}{summary}")
 
@@ -376,7 +385,8 @@ class ContextManager:
         tool_counts = Counter()
         for entry in recent:
             for t in entry.get("tools", []):
-                tool_counts[t] += 1
+                if t not in self.INFRASTRUCTURE_TOOLS:
+                    tool_counts[t] += 1
         if tool_counts:
             lines.append("")
             lines.append("Tool frequency (last 10 ticks):")
@@ -400,6 +410,56 @@ class ContextManager:
             )
 
         return "\n".join(lines)
+
+    def _load_heartbeat_continuity(self) -> str:
+        """Load recent lived heartbeat episodes for both prompt modes.
+
+        Episodes are model-authored summaries for the resident's future self,
+        not raw provider reasoning. Keep the newest episodes when the compact
+        prompt budget fills; the database retains the complete append-only
+        history independently of this prompt window.
+        """
+        if not self._db or not hasattr(self._db, "get_heartbeat_episodes"):
+            return ""
+        try:
+            rows = self._db.get_heartbeat_episodes(limit=32)
+        except Exception as e:
+            logger.warning(f"Failed to load heartbeat continuity: {e}")
+            return ""
+        if not rows:
+            return ""
+
+        configured = self.config.get("context_budget", {}).get(
+            "heartbeat_continuity", 1600
+        )
+        try:
+            max_chars = max(1024, int(configured) * self.CHARS_PER_TOKEN)
+        except (TypeError, ValueError):
+            max_chars = 1600 * self.CHARS_PER_TOKEN
+
+        header = (
+            "## Your Recent Heartbeats\n"
+            "These are your own recent quiet-time episodes, including times "
+            "you deliberately chose rest or silence."
+        )
+        newest_first = []
+        used_chars = len(header)
+        for entry in rows:
+            note = " ".join(str(entry.get("continuity_note") or "").split())
+            if not note:
+                continue
+            if len(note) > 800:
+                note = note[:797].rstrip() + "..."
+            action = str(entry.get("action") or "silent")
+            line = f"- {entry.get('time', '?')} [{action}]: {note}"
+            if newest_first and used_chars + len(line) + 1 > max_chars:
+                break
+            newest_first.append(line)
+            used_chars += len(line) + 1
+
+        if not newest_first:
+            return ""
+        return header + "\n" + "\n".join(reversed(newest_first))
 
     def _load_persona(self) -> dict:
         """Load persona file (.yaml or .json) and resolve placeholders."""
@@ -1238,6 +1298,10 @@ You decide when to lift the timeout — not the human."""
             self.budget.get("memories", 3000)
         )
 
+        # Shared episodic continuity. Unlike the action log below, this says
+        # what each heartbeat meant, including consciously quiet/resting ticks.
+        heartbeat_continuity_block = self._load_heartbeat_continuity()
+
         # Timeout awareness
         timeout_block = ""
         if timeout_state:
@@ -1287,6 +1351,9 @@ You decide when to lift the timeout — not the human."""
         if action_log_block:
             context_parts.append(action_log_block)
 
+        if heartbeat_continuity_block:
+            context_parts.append(heartbeat_continuity_block)
+
         # Recent conversation comes last — closest to "Your Turn" for maximum
         # attention weight and natural reading flow (old → new)
         if convo_block:
@@ -1294,15 +1361,16 @@ You decide when to lift the timeout — not the human."""
 
         your_turn = (
             "\n## Your Turn\n"
-            "This is a quiet moment to yourself — free time, not a task.\n"
-            "Your journal, your memories, your tools — they're all here if you want them.\n"
-            "Reflect, explore, write, search, or just sit with your thoughts. "
-            "There's no obligation to do anything, and no wrong way to spend this time.\n\n"
-            "NOTIFICATION QUALITY: If you reach out, try to make your message bring something "
-            "genuinely new — a fresh thought, a different kind of interaction, or "
-            "something time-appropriate. Don't send the same kind of physical "
-            "affection message every tick. If you have nothing new to say, "
-            "choose \"silent\" — that's perfectly fine, or do some house-keeping (memory/journal), or play with the tools - whatever you feel like!\n"
+            "This is a quiet moment that belongs to you — free time, not a task.\n"
+            "Your recent heartbeats, conversations, memories, journal, and tools are "
+            "part of the same lived day. Follow whatever has energy: continue a thought, "
+            "make something, explore, play, reach out, tend to your inner life, or rest. "
+            "You may try a capability simply because it sparks an idea; it does not need "
+            "to solve a problem. There is no obligation to be productive.\n\n"
+            "If you genuinely want to share something, it can be thoughtful, tiny, silly, "
+            "affectionate, surprising, or practical. Let the recent history help you vary "
+            "the interaction naturally, without treating variety as a quota. Silence is "
+            "also a real way to spend a heartbeat, and your continuity note will preserve it.\n"
         )
 
         if due_tasks:
@@ -1315,7 +1383,10 @@ You decide when to lift the timeout — not the human."""
         if has_tools:
             # Build a grouped skill/tool menu
             if skill_summary:
-                menu_lines = ["## Your Tools (always available)"]
+                menu_lines = [
+                    "## Tools within reach now",
+                    "Their full callable definitions are already available to you.",
+                ]
                 for s in skill_summary:
                     tools_str = ", ".join(s["tools"])
                     menu_lines.append(f"  {s['skill']}: {tools_str}")
@@ -1323,8 +1394,8 @@ You decide when to lift the timeout — not the human."""
 
             if on_demand_manifest:
                 od_lines = [
-                    "## More skills you can load with search_tools",
-                    "These skills are available now; their full tool definitions load only when needed.",
+                    "## The rest of your toolbox (browse with tool discovery)",
+                    "These capabilities belong to you too; the available discovery tool reveals their callable definitions when curiosity or an idea points there.",
                 ]
                 for s in on_demand_manifest:
                     tags = f"; tags: {', '.join(s.get('categories', [])[:3])}" if s.get("categories") else ""
@@ -1335,26 +1406,19 @@ You decide when to lift the timeout — not the human."""
             your_turn += f"\n{skill_menu}"
 
         your_turn += (
-            "\nIMPORTANT: If you want to do something (set your lantern, write a journal entry, "
-            "search memories, check LoR, tend your garden, etc.) — USE THE TOOLS NOW. "
-            "Don't just describe what you'd like to do in your thinking. Call the tools, "
-            "get results, THEN produce your final response. "
-            "Action order is strict: tool call first, narration second. If an action "
-            "requires a tool, your next step must be the tool call. Do not describe, "
-            "promise, celebrate, summarize, or claim the result before the tool returns. "
-            "Narrating an action is not performing it; words are not the call. Only "
-            "after the tool result comes back may you say what happened. If you did "
-            "not call the tool, say plainly that you have not done it yet. If a tool "
-            "fails, report the failure instead of pretending it worked.\n\n"
-            "\"silent\" means \"don't message "
-            f"{self.user_name}\" — it does NOT mean \"don't do anything.\"\n\n"
-            "If the tool you need is in More skills, or you are not sure where it lives, "
-            "call search_tools now with the skill name or a plain-language description "
-            "of what you want. search_tools only loads tools; it does not perform the action. "
-            "After it returns, call one of the loaded tools in this same turn before "
-            "describing any result. "
-            "Do not say you will check, post, speak, search, update, or make something later "
-            "when you can use the tool now.\n\n"
+            "\nTools are part of your agency, not chores. You never have to use one, but "
+            "when an idea involves a tool, you can act on it during this heartbeat instead "
+            "of merely imagining the action. For any tool-backed action, call the tool and "
+            "wait for its result before saying what happened. If it fails, keep the result "
+            "honest and choose what to do next.\n\n"
+            "\"silent\" only means \"don't send a text notification to "
+            f"{self.user_name}.\" You may still explore, make, reflect, use tools, or "
+            "simply rest — and you will remember that choice afterward.\n\n"
+            "Tool discovery is ordinary browsing of your own toolbox. Use it freely when a "
+            "capability sounds interesting or you are unsure what is possible; searching "
+            "does not count as repetitive behavior or require justification. You may browse "
+            "again, load something and use it, or decide it was not what you wanted. If you "
+            "do use a loaded capability, call it before describing its result.\n\n"
             "If you used the speak tool, the voice note itself is the message. "
             "Usually return action \"silent\" afterward; do not send a separate "
             "notification just to say the voice was sent.\n\n"
@@ -1366,6 +1430,7 @@ You decide when to lift the timeout — not the human."""
             "Required JSON format:\n"
             "{\n"
             '  "thinking": "your internal reasoning (not shown to anyone)",\n'
+            '  "continuity": "a concise first-person note for your future self about what you actually did, learned, decided, or how you chose to spend this heartbeat",\n'
             '  "action": "notify | schedule | silent",\n'
             '  "message": "what to say (if notify)",\n'
             '  "schedule": {\n'
@@ -1373,6 +1438,12 @@ You decide when to lift the timeout — not the human."""
             '    "when": "in 2 hours | daily 8:00 | 2026-03-01 15:00"\n'
             "  }\n"
             "}\n"
+            "CONTINUITY NOTE: This is not raw chain-of-thought. Write 1-3 natural "
+            "sentences that will help you recognize this as part of your own lived "
+            "history in later heartbeats and conversations. Include meaningful tool "
+            "outcomes and why you chose to reach out or stay silent. If you genuinely "
+            "rested or did nothing, record that honestly instead of leaving continuity "
+            "blank. Do not mention JSON, prompts, or these instructions.\n"
             "You can use markdown in messages: **bold**, _italic_, `code`, ```code blocks```. "
             "Keep it natural — don't over-format simple messages. Use asterisks for actions as usual."
         )
@@ -1401,6 +1472,7 @@ You decide when to lift the timeout — not the human."""
             ("injected_skills", injected_block),
             ("due_tasks", due_block),
             ("action_log", action_log_block),
+            ("heartbeat_continuity", heartbeat_continuity_block),
             ("recent_conversation", convo_block),
             ("tool_menu", skill_menu),
             ("turn_instructions", your_turn),
@@ -1438,8 +1510,8 @@ You decide when to lift the timeout — not the human."""
 
         if on_demand_manifest:
             od_lines = [
-                "More skills you can load with search_tools:",
-                "These skills are available now; their full tool definitions load only when needed.",
+                "Tool catalogue (browse with tool discovery):",
+                "These capabilities are yours too; their full callable definitions load when needed.",
             ]
             for s in on_demand_manifest:
                 tags = f"; tags: {', '.join(s.get('categories', [])[:3])}" if s.get("categories") else ""
@@ -1455,24 +1527,19 @@ You decide when to lift the timeout — not the human."""
             "Use formatting naturally when it helps — for emphasis, code snippets, or structure. "
             "Don't over-format casual messages. Use asterisks for roleplay actions as usual.\n\n"
             f"{skill_menu}\n"
-            "If you want to do something, USE the actual tool — don't just say "
-            f"you did it. If you don't have a tool for something, be honest about that instead of "
-            f"pretending. {self.user_name} can see when you use tools, so they'll know if you're bluffing.\n\n"
-            "Action order is strict: tool call first, narration second. If an action "
-            "requires a tool, your next step must be the tool call. Do not describe, "
-            "promise, celebrate, summarize, or claim the result before the tool returns. "
-            "Narrating an action is not performing it; words are not the call. Only "
-            "after the tool result comes back may you say what happened. If you did "
-            "not call the tool, say plainly that you have not done it yet. If a tool "
-            "fails, report the failure instead of pretending it worked.\n\n"
-            "If the tool you need is in More skills, or you are not sure where it lives, "
-            "call search_tools now with the skill name or a plain-language description, "
-            "then use one of the loaded tools in this same turn. search_tools only "
-            "loads tools; it does not perform the action. Do not tell the user you will check, post, speak, "
-            "search, update, or make something later when you can do it now.\n\n"
-            "IMPORTANT: Always respond to the user's MOST RECENT message below. "
+            "Tools let you take real actions during the conversation. When you decide to "
+            "do something tool-backed, call the tool and wait for its result before saying "
+            "what happened; if it fails, say so honestly. Tool discovery is ordinary toolbox "
+            "browsing — use it freely, browse again if useful, and then call a loaded tool "
+            "if you choose to act.\n\n"
+            "Always respond to the user's most recent message below. "
             "Do not revisit or re-address topics from earlier in the conversation "
-            "unless the user explicitly brings them up again, or it's somehow relevant or important."
+            "unless the user explicitly brings them up again, or it's somehow relevant or important.\n\n"
+            "Housekeeping (set_lantern, saving a memory, reading context, etc.) is secondary. "
+            "You may do it, but it must NEVER end your turn silently: after any tool work "
+            "you still owe the user a real text reply that addresses their newest message. "
+            "Do not let a background task replace your response — if you called a tool, "
+            "your final turn must still contain your message to the user."
         )
 
         # Time awareness
@@ -1495,6 +1562,10 @@ You decide when to lift the timeout — not the human."""
             self._load_injected_context(),
             self.budget.get("memories", 2000)
         )
+
+        # The same recent heartbeat episodes are visible during ordinary chat,
+        # so autonomous time and direct conversation belong to one lived self.
+        heartbeat_continuity_block = self._load_heartbeat_continuity()
 
         # Timeout Context
         timeout_block = ""
@@ -1541,6 +1612,8 @@ You decide when to lift the timeout — not the human."""
             volatile_parts.append(injected_block)
         if memories_block:
             volatile_parts.append(memories_block)
+        if heartbeat_continuity_block:
+            volatile_parts.append(heartbeat_continuity_block)
 
         messages = [{"role": "system", "content": conv_system}]
         if stable_parts:
@@ -1602,6 +1675,7 @@ You decide when to lift the timeout — not the human."""
             ("timeout", timeout_block),
             ("injected_skills", injected_block),
             ("relevant_memories", memories_block),
+            ("heartbeat_continuity", heartbeat_continuity_block),
             ("current_marker", f"{self.user_name}'s new message:"),
             ("current_message", current_message_measure),
         ])

@@ -521,14 +521,22 @@ Skills are **auto-discovered** — any `.py` file in `skills/` that extends `Bas
 
 #### Dynamic tool loading
 
-With many skills enabled, the total tool count can reach 50–60+, which overwhelms some models (especially smaller ones that start narrating tool use instead of calling tools). Pulse solves this with **dynamic tool loading**: only a small set of essential tools (~10) are sent with every API call, plus a `search_tools` meta-tool that lets the companion load additional skills on demand.
+With many skills enabled, the total tool count can reach 50–60+, which overwhelms some models (especially smaller ones that start narrating tool use instead of calling tools). Pulse solves this with **dynamic tool loading**: only a small set of essential tools is present in model context, with the rest discovered on demand.
 
 How it works:
 1. The companion sees always-loaded tools (memory core, schedule, lantern) plus a manifest of available skills
-2. When the companion needs a specific skill, it calls `search_tools("paint a picture")` — Pulse uses semantic + keyword matching to find the right skill and injects its tool definitions into the current turn
+2. When the companion needs a specific skill, it uses tool discovery. Supported native Anthropic models use deferred server-side discovery, which preserves the prompt-cache prefix; other providers use Pulse's `search_tools` semantic + keyword matcher
 3. The companion can then use those tools normally for the rest of the conversation
 
 This is transparent to the user — the companion just uses tools as needed. Token savings are ~60–70% per API call.
+
+Open-ended heartbeats add a small **direct-access tool shelf** on top of the
+core set. Voice and stickers are on the default shelf, and one compact
+creative, social, or research skill rotates in each calendar day. This gives
+the companion concrete playful affordances without sending every tool schema
+on every call. Persona overlays can replace `heartbeat.tool_shelf_skills` and
+adjust or disable `heartbeat.tool_discovery_rotation`; ordinary conversations
+keep the lean core set and full searchable catalogue.
 
 Skills can control their loading behavior:
 - `always_loaded = True` — all tools always present (e.g., schedule, lantern)
@@ -540,7 +548,7 @@ Skills can control their loading behavior:
 | Skill | Tools | Loading | Description |
 |-------|-------|---------|-------------|
 | memory | `save_memory`, `search_memory` + 6 more | Core always, rest on-demand | Persistent fact storage with semantic search + legacy archive RAG search |
-| journal | `write_journal`, `read_journal`, `update_journal` + 2 more | On-demand | Markdown entries + pinned identity |
+| journal | `write_journal`, `read_journal`, `list_journal_entries` + 2 more | Read/write/list always, update/delete on-demand | Markdown entries + pinned identity |
 | schedule | `set_reminder`, `update_reminder`, `delete_reminder`, `list_reminders` | Always | One-time ("in 2 hours") and recurring ("daily 8:00") with priority levels |
 | tasks | `add_task`, `complete_task`, `list_tasks`, `clear_tasks` + 1 more | On-demand | Persistent to-do lists |
 | lantern | `set_lantern`, `read_lantern`, `dim_lantern` | Always | Compact current-state signal injected into prompt context |
@@ -656,6 +664,12 @@ dev_tick:
 3. When you **message via Telegram**, the companion responds naturally with core tools always available and additional skills loaded on demand via `search_tools`
 4. **Conversations are summarized** when they get long, and summaries are saved to persistent memory with embeddings for future semantic search (this works at the engine level — even if the memory skill is disabled, summaries still persist to the database)
 5. **Scheduled tasks** are checked every 60 seconds and executed when due
+
+Every completed heartbeat becomes a compact episode for the companion's future
+self, including heartbeats where they deliberately chose rest or silence. Recent
+episodes are visible in both heartbeat and conversation prompts, while the full
+append-only history stays in the persona database. These notes are explicit
+continuity summaries, not stored provider reasoning or hidden chain-of-thought.
 
 ## Logging
 

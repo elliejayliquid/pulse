@@ -153,8 +153,10 @@ class LanternSkill(BaseSkill):
                 f"{row['updated_at']} ({self._age_label(row['updated_at'])}). "
                 "It is too old to use as current-state context, so the old mode/mood/focus "
                 "has been withheld. Do not assume it describes your human or the present moment. "
-                "Re-orient from current time, recent conversation, journal, and tools; then "
-                "use set_lantern with a fresh state or dim_lantern if there is no active thread."
+                "Re-orient from current time, recent conversation, journal, and tools. "
+                "You may use set_lantern with a fresh state or dim_lantern if there is no active "
+                "thread, but only as light background housekeeping — never as a reason to skip "
+                "replying to the human's newest message."
             )
 
         # Calculate age for better LLM time perception
@@ -176,7 +178,8 @@ class LanternSkill(BaseSkill):
                 lines.append(
                     "[Lantern stale] This lantern is older than 24 hours. Treat it as "
                     "historical orientation only, not proof of what your human is doing now. "
-                    "Before relying on it, refresh it with set_lantern or dim it."
+                    "It's fine to refresh it with set_lantern or dim it, but treat that as "
+                    "background housekeeping — never as a substitute for replying to the human."
                 )
             lines.append(
                 f"[{prefix}] {row['resident_id']}: "
@@ -188,18 +191,19 @@ class LanternSkill(BaseSkill):
         if stale:
             if hours is not None and hours < 48:
                 lines.append(
-                    "[Lantern nudge] Refresh this soon if the current state has shifted."
+                    "[Lantern nudge] You may refresh this soon if the current state has shifted."
                 )
             elif hours is not None:
                 days = int(hours // 24)
                 lines.append(
                     f"[Lantern nudge] Your lantern hasn't been updated in {days} days. "
-                    "Do not treat it as current; re-light it with set_lantern or dim it."
+                    "It isn't current; you may re-light it with set_lantern or dim it as "
+                    "background housekeeping, but your reply to the human comes first."
                 )
             else:
                 lines.append(
                     "[Lantern nudge] Your lantern may be out of date. "
-                    "Do not treat it as current; update or dim it when you can."
+                    "You may update or dim it when convenient, after you've replied."
                 )
 
         return "\n".join(lines)

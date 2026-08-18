@@ -133,7 +133,10 @@ def detect_tool_loop(recent_calls: list[tuple[str, str]]) -> Optional[str]:
     # Pattern 2: same tool name 5 times in a row (even with different args)
     if len(last_5) >= 5:
         names = [c[0] for c in last_5]
-        if len(set(names)) == 1:
+        # search_tools is expected infrastructure: a resident may legitimately
+        # open several different tool drawers in one turn. Exact duplicate
+        # searches are still caught by Pattern 1 above.
+        if len(set(names)) == 1 and names[0] != "search_tools":
             return (
                 f"⚠️ LOOP DETECTED: You've called {names[0]} 5 times in a row. "
                 f"Review your approach — are you making progress? If not, stop "
@@ -147,6 +150,7 @@ def detect_tool_loop(recent_calls: list[tuple[str, str]]) -> Optional[str]:
 class PulseResponse:
     """Parsed response from the companion's heartbeat/task."""
     thinking: str = ""
+    continuity: str = ""       # compact episode note for the resident's future self
     action: str = "silent"         # notify | schedule | silent
     message: str = ""
     schedule_task: str = ""
@@ -169,7 +173,7 @@ class PulseResponse:
             return None
 
         label_re = re.compile(
-            r'(?im)^\s*(?:\*\*)?\s*(thinking|action|message|schedule)\s*:\s*(?:\*\*)?\s*'
+            r'(?im)^\s*(?:\*\*)?\s*(thinking|continuity|action|message|schedule)\s*:\s*(?:\*\*)?\s*'
         )
         matches = list(label_re.finditer(text))
         if not matches:
@@ -191,6 +195,7 @@ class PulseResponse:
 
         return {
             "thinking": fields.get("thinking", ""),
+            "continuity": fields.get("continuity", ""),
             "action": action,
             "message": fields.get("message", ""),
         }
@@ -220,6 +225,7 @@ class PulseResponse:
                             for item in reversed(items):
                                 if isinstance(item, dict) and (
                                     "message" in item or "thinking" in item
+                                    or "continuity" in item
                                     or item.get("action") in ("notify", "schedule", "silent")
                                 ):
                                     data = item
@@ -250,6 +256,7 @@ class PulseResponse:
                 return resp
 
             resp.thinking = data.get("thinking", "")
+            resp.continuity = data.get("continuity", "")
             resp.action = data.get("action", "silent")
             resp.message = data.get("message", "")
 
@@ -263,6 +270,7 @@ class PulseResponse:
             data = cls._parse_labeled_response(cleaned)
             if data:
                 resp.thinking = data.get("thinking", "")
+                resp.continuity = data.get("continuity", "")
                 resp.action = data.get("action", "silent")
                 resp.message = data.get("message", "")
             else:
@@ -522,6 +530,7 @@ class LLMClient:
 
         recent_calls: list[tuple[str, str]] = []  # (tool_name, args_hash)
         loop_warned = False
+        empty_nudged = False
 
         for round_num in range(effective_max):
             try:
@@ -552,7 +561,27 @@ class LLMClient:
                 if not tool_calls:
                     logger.info(f"LLM final response ({len(text)} chars, round {round_num + 1}, finish={finish})")
                     self.last_reasoning = self._collect_reasoning(message, text)
-                    cleaned = strip_think_tags(text)
+                    cleaned = strip_think_tags(text).strip()
+                    # A turn that used tools but ended with no reply means housekeeping
+                    # silently replaced responding to the user (common on cold wake-ups).
+                    # Nudge once to actually reply instead of dropping the message.
+                    if (
+                        not cleaned
+                        and tools_used
+                        and not empty_nudged
+                        and round_num + 1 < effective_max
+                    ):
+                        empty_nudged = True
+                        logger.info("Empty final response after tool work — nudging model to reply.")
+                        msgs.append({
+                            "role": "user",
+                            "content": (
+                                "[SYSTEM: You performed a tool action but ended your turn "
+                                "without replying to the user. Do not be silent. Respond now "
+                                "in text, in character, directly to the user's latest message.]"
+                            ),
+                        })
+                        continue
                     return (cleaned if cleaned else None), tools_used
 
                 # Model wants to call tools

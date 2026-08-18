@@ -22,6 +22,9 @@ channels:
 #
 # heartbeat:
 #   interval_minutes: 45
+#   # Optional: choose which on-demand skills stay directly callable during
+#   # this resident's open-ended heartbeats (for example: [tts, sticker, paint]).
+#   tool_shelf_skills: [tts, sticker]
 #
 # paths:
 #   memories: "personas/my_persona/data/memories"

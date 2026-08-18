@@ -617,6 +617,42 @@ class PulseDatabase:
             result.append(d)
         return result
 
+    # ── Heartbeat Episodes ───────────────────────────────────────────
+
+    def save_heartbeat_episode(self, time: str, action: str,
+                               continuity_note: str,
+                               tools: list[str] | None = None,
+                               note_source: str = "model") -> int:
+        """Persist one lived heartbeat for future resident continuity.
+
+        Unlike ``action_log``, this is an append-only episodic record rather
+        than a short anti-repetition ring buffer. It intentionally stores a
+        compact self-narrative, never provider reasoning or hidden scratchpad.
+        """
+        cur = self.conn.execute(
+            "INSERT INTO heartbeat_episodes "
+            "(time, action, continuity_note, tools, note_source) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (time, action, continuity_note, json.dumps(tools or []), note_source),
+        )
+        self.conn.commit()
+        return cur.lastrowid
+
+    def get_heartbeat_episodes(self, limit: int = 20) -> list[dict]:
+        """Get recent heartbeat episodes, newest first."""
+        rows = self.conn.execute(
+            "SELECT * FROM heartbeat_episodes ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["tools"] = json.loads(item.get("tools") or "[]")
+            except (json.JSONDecodeError, TypeError):
+                item["tools"] = []
+            result.append(item)
+        return result
+
     # ── Usage ────────────────────────────────────────────────
 
     def record_usage(self, date: str, prompt_tokens: int,
@@ -939,7 +975,8 @@ class PulseDatabase:
         # Whitelist table names to prevent injection
         valid = {
             "messages", "sessions", "memories", "schedules", "tasks",
-            "dev_journal", "action_log", "usage", "journal_entries", "identity",
+            "dev_journal", "action_log", "heartbeat_episodes", "usage",
+            "journal_entries", "identity",
             "garden_plants", "timeouts", "lor_read_state"
         }
         if table not in valid:
@@ -1038,6 +1075,19 @@ CREATE TABLE IF NOT EXISTS action_log (
     tools   TEXT NOT NULL DEFAULT '[]',
     summary TEXT NOT NULL DEFAULT ''
 );
+
+-- Append-only lived heartbeat continuity. This is intentionally separate
+-- from action_log, whose 20-row ring buffer only regulates repetition.
+CREATE TABLE IF NOT EXISTS heartbeat_episodes (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    time            TEXT NOT NULL,
+    action          TEXT NOT NULL,
+    continuity_note TEXT NOT NULL,
+    tools           TEXT NOT NULL DEFAULT '[]',
+    note_source     TEXT NOT NULL DEFAULT 'model'
+);
+CREATE INDEX IF NOT EXISTS idx_heartbeat_episodes_time
+    ON heartbeat_episodes(time DESC, id DESC);
 
 -- Token usage tracking
 CREATE TABLE IF NOT EXISTS usage (

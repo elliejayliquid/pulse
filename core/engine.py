@@ -85,6 +85,7 @@ class PulseEngine:
                 cache_ttl=provider_config.get("cache_ttl", "5m"),
                 cache_automatic=provider_config.get("cache_automatic", False),
                 cache_diagnostics=provider_config.get("cache_diagnostics", False),
+                native_tool_search=provider_config.get("native_tool_search", True),
             )
         elif provider_type == "openai":
             self.llm = OpenAIResponsesClient(
@@ -613,6 +614,83 @@ class PulseEngine:
         return self.context.save_conversation(history)
 
     @staticmethod
+    def _heartbeat_continuity_note(response: PulseResponse | None,
+                                   tools_used: list[str] | None = None
+                                   ) -> tuple[str, str]:
+        """Return a compact episode note and its source.
+
+        The preferred note is the model's explicit ``continuity`` field. Never
+        fall back to provider reasoning or ``thinking``: those can contain raw
+        scratchpad depending on the backend. Older/noncompliant models receive
+        a small factual fallback so even a consciously quiet tick is not erased.
+        """
+        explicit_value = getattr(response, "continuity", "") or ""
+        explicit = str(explicit_value).strip()
+        if explicit:
+            return explicit[:2000], "model"
+
+        meaningful_tools = []
+        for tool in tools_used or []:
+            if tool in ContextManager.INFRASTRUCTURE_TOOLS:
+                continue
+            if tool not in meaningful_tools:
+                meaningful_tools.append(tool)
+        friendly_tools = ", ".join(
+            tool.replace("_", " ") for tool in meaningful_tools
+        )
+
+        action = getattr(response, "action", "") or "silent"
+        message = str(getattr(response, "message", "") or "").strip()
+        if friendly_tools:
+            if action == "notify":
+                note = f"I used {friendly_tools}, then chose to reach out."
+            elif action == "schedule":
+                note = f"I used {friendly_tools}, then scheduled a follow-up."
+            elif response is None:
+                note = (
+                    f"I used {friendly_tools} during this heartbeat, but the turn "
+                    "ended before I wrote a fuller continuity note."
+                )
+            else:
+                note = f"I used {friendly_tools}, then chose to stay quiet."
+            return note, "fallback"
+
+        if action == "notify":
+            if message:
+                return f"I chose to reach out during this heartbeat: {message}"[:2000], "fallback"
+            return "I chose to reach out during this heartbeat.", "fallback"
+        if action == "schedule":
+            return "I used this heartbeat to schedule a future follow-up.", "fallback"
+        if response is not None:
+            return (
+                "I spent this heartbeat quietly and chose not to act or reach out.",
+                "fallback",
+            )
+        return "", ""
+
+    def _save_heartbeat_episode(self, response: PulseResponse | None,
+                                tools_used: list[str] | None = None) -> int | None:
+        """Persist a lived heartbeat without storing raw model reasoning."""
+        if not self.db:
+            return None
+        note, note_source = self._heartbeat_continuity_note(response, tools_used)
+        if not note:
+            return None
+        action = getattr(response, "action", "") or "silent"
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+        try:
+            return self.db.save_heartbeat_episode(
+                timestamp,
+                action,
+                note,
+                tools=tools_used or [],
+                note_source=note_source,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to save heartbeat continuity: {e}")
+            return None
+
+    @staticmethod
     def _is_voice_delivery_meta(response: PulseResponse | None) -> bool:
         """True when the final heartbeat notification only describes speak()."""
         if not response or response.action != "notify" or not response.message:
@@ -796,13 +874,19 @@ class PulseEngine:
             history_reply = f"{skill_text}\n{reply}"
         else:
             history_reply = reply or skill_text
+
+        # Persist the user's message to history even when there's no reply to
+        # store. Otherwise an empty reply (e.g. wake-up housekeeping) silently
+        # discards the incoming message, and the companion loses all memory of
+        # it — exactly the "I never received your first message" symptom.
+        timestamp = datetime.now().strftime("[%b %d, %I:%M %p]")
+        image_note = " [sent an image]" if image_url else ""
         if not history_reply:
-            return None, tools_used, reasoning, []
+            history.append({"role": "user", "content": f"{timestamp} {message}{image_note}"})
+            return None, tools_used, reasoning, self.context.save_conversation(history)
 
         # Update conversation history (store text only — images are too large to persist)
         # Timestamps help the companion understand temporal flow
-        timestamp = datetime.now().strftime("[%b %d, %I:%M %p]")
-        image_note = " [sent an image]" if image_url else ""
         history.append({"role": "user", "content": f"{timestamp} {message}{image_note}"})
         history.append({"role": "assistant", "content": history_reply})
 
@@ -898,7 +982,11 @@ class PulseEngine:
         ]
         # Run in thread — this is also a sync HTTP call
         # Don't pass tools — this is a utility call, not a conversation
-        response = await asyncio.to_thread(self.llm.chat, summary_prompt)
+        # A summary prompt is unique and never reused. Anthropic's ordinary
+        # chat path would otherwise buy a 1h cache entry for the full old
+        # conversation, doubling input cost with no later read.
+        summary_chat = getattr(self.llm, "chat_uncached", self.llm.chat)
+        response = await asyncio.to_thread(summary_chat, summary_prompt)
         if response and response.raw:
             summary = strip_think_tags(response.raw).strip()
             if summary:
@@ -980,6 +1068,10 @@ class PulseEngine:
         if thinking:
             parts.append(f'💬 "{thinking}"')
 
+        continuity_note, _ = self._heartbeat_continuity_note(response, tools_used)
+        if continuity_note:
+            parts.append(f'🧭 Remembers: "{continuity_note}"')
+
         if response:
             action = response.action or "silent"
             parts.append(f"→ {action}")
@@ -1008,9 +1100,19 @@ class PulseEngine:
             return None
 
         # Free-think tick — companion decides what to do
-        tools = self.skill_registry.get_always_tools() if self.skill_registry else []
-        skill_summary = self.skill_registry.get_skill_summary() if self.skill_registry else []
-        on_demand_manifest = self.skill_registry.get_on_demand_manifest() if self.skill_registry else []
+        if self.skill_registry:
+            shelf_names = self.skill_registry.get_heartbeat_shelf_names()
+            tools = self.skill_registry.get_heartbeat_tools(shelf_names)
+            if shelf_names:
+                logger.info(f"Heartbeat tool shelf: {', '.join(shelf_names)}")
+            skill_summary = self.skill_registry.get_skill_summary(tools)
+            on_demand_manifest = self.skill_registry.get_on_demand_manifest(
+                exclude_skills=set(shelf_names)
+            )
+        else:
+            tools = []
+            skill_summary = []
+            on_demand_manifest = []
 
         messages = self.context.build_heartbeat_prompt(
             has_tools=bool(tools), skill_summary=skill_summary,
@@ -1086,6 +1188,13 @@ class PulseEngine:
                 await self._send_heartbeat_debug(
                     None, tools_used, int(elapsed)
                 )
+
+        # Keep autonomous time and direct conversation in one lived history.
+        # Record only after an actual model turn (a response or tool use); quiet
+        # hours and unavailable-provider skips return above and are not falsely
+        # described as experiences the resident had.
+        if response is not None or tools_used:
+            self._save_heartbeat_episode(response, tools_used)
 
         return response
 

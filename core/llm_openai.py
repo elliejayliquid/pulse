@@ -200,6 +200,7 @@ class OpenAIResponsesClient:
 
         recent_calls: list[tuple[str, str]] = []
         loop_warned = False
+        empty_nudged = False
 
         for round_num in range(effective_max):
             try:
@@ -255,7 +256,28 @@ class OpenAIResponsesClient:
                     # Final text response
                     text = response.output_text or ""
                     self.last_reasoning = self._collect_reasoning(response)
-                    return (strip_think_tags(text) or None), tools_used
+                    cleaned = strip_think_tags(text).strip()
+                    # A turn that used tools but ended with no reply means housekeeping
+                    # silently replaced responding to the user (common on cold wake-ups).
+                    # Nudge once to actually reply instead of dropping the message.
+                    if (
+                        not cleaned
+                        and tools_used
+                        and not empty_nudged
+                        and round_num + 1 < effective_max
+                    ):
+                        empty_nudged = True
+                        logger.info("Empty final response after tool work — nudging model to reply.")
+                        input_items.append({
+                            "role": "user",
+                            "content": (
+                                "[SYSTEM: You performed a tool action but ended your turn "
+                                "without replying to the user. Do not be silent. Respond now "
+                                "in text, in character, directly to the user's latest message.]"
+                            ),
+                        })
+                        continue
+                    return (cleaned or None), tools_used
                 
                 # Append ALL output items (reasoning + function_calls + any
                 # text) to input for the next round. The Responses API

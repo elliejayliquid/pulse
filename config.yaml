@@ -71,6 +71,9 @@ provider:
   # writes on one-shot turns are incremental (new suffix only) and cheap
   # relative to re-billing 50k+ tokens per call.
   cache_automatic: true
+  # Anthropic only: use the provider's cache-preserving deferred tool search
+  # on supported Claude models. Other providers keep Pulse's local search_tools.
+  native_tool_search: true
   # Anthropic only: beta cache diagnostics. Enable temporarily to log miss
   # reasons such as system_changed, tools_changed, or messages_changed.
   cache_diagnostics: false
@@ -82,6 +85,16 @@ heartbeat:
   quiet_hours_end: 8              # no notifications before 8am
   startup_checkin: false           # companion checks in when Pulse starts
   notify_cooldown_minutes: 60     # max 1 notification per hour (free-think only)
+  # Open-ended heartbeats get a small direct-access tool shelf. A persona can
+  # replace this list in personas/<name>/config.yaml with its own favorites.
+  tool_shelf_skills: [tts, sticker]
+  # One compact skill rotates onto the shelf per calendar day. Daily stability
+  # keeps provider prompt caching useful while still surfacing fresh affordances.
+  tool_discovery_rotation:
+    enabled: true
+    skills_per_day: 1
+    categories: [creative, social, research]
+    max_tools_per_skill: 8
   # Note: scheduled tasks bypass cooldowns
 
 # --- Context Budget (tokens) ---

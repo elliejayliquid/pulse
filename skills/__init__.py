@@ -15,11 +15,13 @@ Usage:
     result = registry.execute("save_memory", {"text": "..."})
 """
 
+import hashlib
 import importlib
 import inspect
 import logging
 import pkgutil
 import re
+from datetime import date
 
 import numpy as np
 
@@ -132,6 +134,102 @@ class SkillRegistry:
             tools.append(self._search_tools_definition())
         return tools
 
+    def get_heartbeat_shelf_names(self, day_key: str | None = None) -> list[str]:
+        """Return the small, daily-stable set of on-demand skills kept in reach.
+
+        A heartbeat is open-ended, so a few concrete creative/social affordances
+        matter more there than in an ordinary user-directed conversation.  The
+        rotating slot changes only once per local calendar day: enough novelty
+        to prevent a permanent chore-shaped toolbox without invalidating the
+        provider tool cache on every tick.
+        """
+        heartbeat = self.config.get("heartbeat", {}) or {}
+
+        configured_favorites = heartbeat.get(
+            "tool_shelf_skills", ["tts", "sticker"]
+        )
+        if isinstance(configured_favorites, str):
+            configured_favorites = [configured_favorites]
+        if not isinstance(configured_favorites, list):
+            configured_favorites = ["tts", "sticker"]
+
+        names = []
+        for raw_name in configured_favorites:
+            name = str(raw_name).strip()
+            if name in self._on_demand_skills and name not in names:
+                names.append(name)
+
+        rotation = heartbeat.get("tool_discovery_rotation", {}) or {}
+        if not isinstance(rotation, dict) or not rotation.get("enabled", True):
+            return names
+
+        try:
+            slots = max(0, min(2, int(rotation.get("skills_per_day", 1))))
+        except (TypeError, ValueError):
+            slots = 1
+        try:
+            max_tools = max(1, min(12, int(rotation.get("max_tools_per_skill", 8))))
+        except (TypeError, ValueError):
+            max_tools = 8
+
+        raw_categories = rotation.get(
+            "categories", ["creative", "social", "research"]
+        )
+        if isinstance(raw_categories, str):
+            raw_categories = [raw_categories]
+        categories = {
+            str(category).strip().lower()
+            for category in (raw_categories or [])
+            if str(category).strip()
+        }
+
+        candidates = []
+        for name, skill in self._on_demand_skills.items():
+            if name in names:
+                continue
+            skill_categories = {
+                str(category).strip().lower()
+                for category in (getattr(skill, "categories", []) or [])
+            }
+            if categories and not (categories & skill_categories):
+                continue
+            if len(self._on_demand_tools.get(name, [])) > max_tools:
+                continue
+            candidates.append(name)
+
+        if not candidates or slots == 0:
+            return names
+
+        identity = str(self.config.get("_persona_name") or "pulse")
+        rotation_day = day_key or date.today().isoformat()
+        seed = f"{identity}:{rotation_day}"
+        candidates.sort(
+            key=lambda name: hashlib.sha256(
+                f"{seed}:{name}".encode("utf-8")
+            ).digest()
+        )
+        names.extend(candidates[:slots])
+        return names
+
+    def get_heartbeat_tools(self, shelf_names: list[str] | None = None) -> list[dict]:
+        """Always-loaded tools plus the heartbeat's direct-access shelf."""
+        names = (
+            self.get_heartbeat_shelf_names()
+            if shelf_names is None else shelf_names
+        )
+        tools = self.get_always_tools()
+        seen = {
+            tool.get("function", {}).get("name")
+            for tool in tools
+        }
+        for name in names:
+            for tool in self._on_demand_tools.get(name, []):
+                tool_name = tool.get("function", {}).get("name")
+                if tool_name and tool_name not in seen:
+                    tools.append(tool)
+                    seen.add(tool_name)
+        return tools
+
     def get_all_tools(self) -> list[dict]:
         """All tool definitions (for scheduled tasks that might need anything)."""
         tools = []
@@ -139,15 +237,18 @@ class SkillRegistry:
             tools.extend(skill.get_tools())
         return tools
 
-    def get_skill_summary(self) -> list[dict]:
-        """Compact summary of always-loaded skills and their tool names."""
+    def get_skill_summary(self, tools: list[dict] | None = None) -> list[dict]:
+        """Compact summary of the supplied (or always-loaded) tool set."""
+        visible_tools = self._always_tools if tools is None else tools
+        visible_names = {
+            td.get("function", {}).get("name", "?") for td in visible_tools
+        }
         summary = []
         for name, skill in self.skills.items():
             tool_names = [
                 t.get("function", {}).get("name", "?")
                 for t in skill.get_tools()
-                if t.get("function", {}).get("name", "?") in
-                {td["function"]["name"] for td in self._always_tools}
+                if t.get("function", {}).get("name", "?") in visible_names
             ]
             if tool_names:
                 summary.append({"skill": name, "tools": tool_names})
@@ -175,10 +276,15 @@ class SkillRegistry:
             examples = list(getattr(skill, "aliases", []) or [])[:3]
         return [str(example).strip() for example in examples if str(example).strip()]
 
-    def get_on_demand_manifest(self) -> list[dict]:
+    def get_on_demand_manifest(
+        self, exclude_skills: set[str] | None = None
+    ) -> list[dict]:
         """Compact summaries for prompt injection."""
+        excluded = exclude_skills or set()
         manifest = []
         for name, skill in self._on_demand_skills.items():
+            if name in excluded:
+                continue
             tool_count = len(self._on_demand_tools.get(name, []))
             tool_names = [
                 td["function"]["name"]
@@ -271,13 +377,15 @@ class SkillRegistry:
             "function": {
                 "name": "search_tools",
                 "description": (
-                    "Load additional tools that are available but not shown in full yet. "
-                    "Use this whenever a task may need an on-demand skill. "
+                    "Browse and load additional tools whose full definitions are not "
+                    "currently in reach. Use this freely whenever you are curious about "
+                    "what you can do, want a different kind of interaction, or need a "
+                    "capability from the catalogue. Searching is ordinary toolbox "
+                    "browsing and never needs an apology or special justification. "
                     "Available skills: " + skill_list + ". "
-                    "After this returns, matching tools are available immediately "
-                    "in this same turn. search_tools opens the toolbox; it does "
-                    "not perform the requested action. Next, call the loaded tool "
-                    "that actually does the work before describing any result."
+                    "Matching tool definitions become callable immediately in this same "
+                    "turn. Browsing does not itself perform an action; if you decide to "
+                    "do something, call the loaded tool before claiming its result."
                 ),
                 "parameters": {
                     "type": "object",
@@ -354,10 +462,10 @@ class SkillRegistry:
                 result_parts.append(f"  Workflow: {skill.workflow}")
 
         result_text = (
-            f"Loaded {len(tools)} tools. They are available now in this same turn. "
-            "No requested action has been performed yet; search_tools only opens "
-            "access to tools. If you intended to act, call the appropriate loaded "
-            "tool now before describing any result.\n" + "\n".join(result_parts)
+            f"Loaded {len(tools)} tools; they are callable now in this same turn. "
+            "Explore them freely, browse again, or decide not to act. Browsing the "
+            "toolbox has not used any of these capabilities yet, so call the tool you "
+            "choose before describing its result.\n" + "\n".join(result_parts)
         )
         return tools, result_text
 

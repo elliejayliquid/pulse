@@ -26,10 +26,32 @@ from core.llm import (
 logger = logging.getLogger(__name__)
 
 CACHE_DIAGNOSTICS_BETA = "cache-diagnosis-2026-04-07"
+NATIVE_TOOL_SEARCH_TYPE = "tool_search_tool_bm25_20251119"
+NATIVE_TOOL_SEARCH_NAME = "tool_search_tool_bm25"
 _MISSING = object()
 
 
-def _openai_tools_to_anthropic(tools: list[dict]) -> list[dict]:
+def _supports_native_tool_search(model_name: str) -> bool:
+    """Return whether Anthropic documents native tool search for this model."""
+    normalized = (model_name or "").lower()
+    supported_markers = (
+        "claude-opus-4-5",
+        "claude-opus-4-6",
+        "claude-opus-4-7",
+        "claude-opus-4-8",
+        "claude-sonnet-4-5",
+        "claude-sonnet-4-6",
+        "claude-haiku-4-5",
+        "claude-opus-5",
+        "claude-fable-5",
+        "claude-mythos-5",
+    )
+    return any(marker in normalized for marker in supported_markers)
+
+
+def _openai_tools_to_anthropic(
+    tools: list[dict], *, defer_loading: bool = False
+) -> list[dict]:
     """Convert OpenAI-format tool definitions to Anthropic format.
 
     OpenAI:  {"type": "function", "function": {"name", "description", "parameters"}}
@@ -38,11 +60,14 @@ def _openai_tools_to_anthropic(tools: list[dict]) -> list[dict]:
     converted = []
     for tool in tools:
         func = tool.get("function", {})
-        converted.append({
+        converted_tool = {
             "name": func.get("name", ""),
             "description": func.get("description", ""),
             "input_schema": func.get("parameters", {"type": "object", "properties": {}}),
-        })
+        }
+        if defer_loading:
+            converted_tool["defer_loading"] = True
+        converted.append(converted_tool)
     return converted
 
 
@@ -195,6 +220,43 @@ def _obj_get(obj: Any, name: str, default=None):
     return getattr(obj, name, default)
 
 
+def _content_block_to_dict(block: Any) -> dict:
+    """Serialize an Anthropic SDK content block without dropping server blocks."""
+    if isinstance(block, dict):
+        return dict(block)
+
+    model_dump = getattr(block, "model_dump", None)
+    if callable(model_dump):
+        try:
+            return model_dump(mode="json", exclude_none=True)
+        except TypeError:
+            return model_dump(exclude_none=True)
+
+    dict_dump = getattr(block, "dict", None)
+    if callable(dict_dump):
+        return dict_dump(exclude_none=True)
+
+    to_dict = getattr(block, "to_dict", None)
+    if callable(to_dict):
+        return to_dict()
+
+    block_type = _obj_get(block, "type", "")
+    fields_by_type = {
+        "text": ("text",),
+        "thinking": ("thinking", "signature"),
+        "redacted_thinking": ("data",),
+        "tool_use": ("id", "name", "input"),
+        "server_tool_use": ("id", "name", "input"),
+        "tool_search_tool_result": ("tool_use_id", "content"),
+    }
+    result = {"type": block_type}
+    for field in fields_by_type.get(block_type, ()):
+        value = _obj_get(block, field, _MISSING)
+        if value is not _MISSING and value is not None:
+            result[field] = value
+    return result
+
+
 class AnthropicClient:
     """Native Anthropic API client with prompt caching and tool_use support."""
 
@@ -205,7 +267,8 @@ class AnthropicClient:
                  api_key: str = "", usage_tracker=None,
                  reasoning: bool = False, provider_type: str = "anthropic",
                  cache_ttl: str = "5m", cache_automatic: bool = False,
-                 cache_diagnostics: bool = False):
+                 cache_diagnostics: bool = False,
+                 native_tool_search: bool = True):
         self.client = Anthropic(api_key=api_key)
         self.model_name = model_name
         self.temperature = temperature
@@ -226,6 +289,9 @@ class AnthropicClient:
         self._cache_ttl = cache_ttl if cache_ttl in ("5m", "1h") else "5m"
         self._cache_automatic = bool(cache_automatic)
         self._cache_diagnostics = bool(cache_diagnostics)
+        self._native_tool_search = (
+            bool(native_tool_search) and _supports_native_tool_search(model_name)
+        )
         self._diagnostics_disabled = False
         self._diagnostics_previous_ids: dict[str, str] = {}
 
@@ -239,6 +305,40 @@ class AnthropicClient:
         # channel to surface specific reasons ("API 500", "disconnected",
         # etc.) instead of a generic "LLM didn't respond" message.
         self.last_error: str = ""
+
+    def _build_anthropic_tools(self, tools: list[dict], skill_registry) -> tuple[list[dict], bool]:
+        """Build a stable Anthropic tool catalogue, deferring non-resident tools."""
+        if not self._native_tool_search or not hasattr(skill_registry, "get_all_tools"):
+            return _openai_tools_to_anthropic(tools), False
+
+        resident_tools = []
+        resident_names = set()
+        for tool in tools:
+            func = tool.get("function", {})
+            name = func.get("name", "")
+            if not name or name == "search_tools" or name in resident_names:
+                continue
+            resident_tools.append(tool)
+            resident_names.add(name)
+
+        deferred_tools = []
+        seen_names = set(resident_names)
+        for tool in skill_registry.get_all_tools():
+            name = tool.get("function", {}).get("name", "")
+            if not name or name == "search_tools" or name in seen_names:
+                continue
+            deferred_tools.append(tool)
+            seen_names.add(name)
+
+        anthropic_tools = [{
+            "type": NATIVE_TOOL_SEARCH_TYPE,
+            "name": NATIVE_TOOL_SEARCH_NAME,
+        }]
+        anthropic_tools.extend(_openai_tools_to_anthropic(resident_tools))
+        anthropic_tools.extend(
+            _openai_tools_to_anthropic(deferred_tools, defer_loading=True)
+        )
+        return anthropic_tools, True
 
     def _cache_control(self) -> dict:
         control = {"type": "ephemeral"}
@@ -472,23 +572,40 @@ class AnthropicClient:
         return blocks
 
     def chat(self, messages: list[dict]) -> Optional[PulseResponse]:
-        """Send messages and get a parsed PulseResponse.
+        """Send a cacheable message and return a parsed PulseResponse."""
+        return self._chat(messages, use_cache=True)
 
-        Used for heartbeat ticks and scheduled tasks (expects JSON format).
-        """
+    def chat_uncached(self, messages: list[dict]) -> Optional[PulseResponse]:
+        """Send a one-shot utility message without creating prompt-cache entries."""
+        return self._chat(messages, use_cache=False)
+
+    def _chat(self, messages: list[dict], *, use_cache: bool) -> Optional[PulseResponse]:
+        """Send messages for heartbeats/tasks or one-shot internal utilities."""
         self.last_error = ""
         try:
+            if not use_cache:
+                logger.info("Anthropic one-shot utility call: prompt caching disabled")
+            cache_control = (
+                self._cache_control() if self._enable_caching and use_cache else None
+            )
             system_parts, anthropic_msgs = _convert_messages(
                 messages,
-                cache_control=self._cache_control() if self._enable_caching else None,
+                cache_control=cache_control,
             )
-            system_blocks = self._build_system_blocks(system_parts)
-            diagnostics_key = self._diagnostics_key(system_blocks)
+            if use_cache:
+                system_blocks = self._build_system_blocks(system_parts)
+                diagnostics_key = self._diagnostics_key(system_blocks)
+            else:
+                system_blocks = [
+                    {"type": "text", "text": part}
+                    for part in system_parts if part
+                ]
+                diagnostics_key = None
 
             create_kwargs = self._create_kwargs(
                 system=system_blocks,
                 messages=anthropic_msgs,
-                automatic_cache=self._cache_automatic,
+                automatic_cache=self._cache_automatic and use_cache,
             )
             # Retry loop for transient 500 errors
             response = None
@@ -550,7 +667,18 @@ class AnthropicClient:
             messages,
             cache_control=self._cache_control() if self._enable_caching else None,
         )
-        anthropic_tools = _openai_tools_to_anthropic(tools) if tools else []
+        anthropic_tools, using_native_tool_search = self._build_anthropic_tools(
+            tools, skill_registry
+        ) if tools else ([], False)
+        if using_native_tool_search:
+            deferred_count = sum(
+                1 for tool in anthropic_tools if tool.get("defer_loading")
+            )
+            logger.info(
+                "Anthropic native tool search: "
+                f"{len(anthropic_tools) - deferred_count - 1} resident, "
+                f"{deferred_count} deferred"
+            )
         tools_used = []
         # Reset captured reasoning and error per call so a previous chain
         # of thought / error never leaks forward into the next reply.
@@ -564,6 +692,7 @@ class AnthropicClient:
 
         recent_calls: list[tuple[str, str]] = []
         loop_warned = False
+        empty_nudged = False
 
         system_blocks = self._build_system_blocks(system_parts)
         diagnostics_key = self._diagnostics_key(system_blocks)
@@ -602,9 +731,10 @@ class AnthropicClient:
                 text_parts = []
                 tool_uses = []
                 for block in response.content:
-                    if block.type == "text":
-                        text_parts.append(block.text)
-                    elif block.type == "tool_use":
+                    block_type = _obj_get(block, "type", "")
+                    if block_type == "text":
+                        text_parts.append(_obj_get(block, "text", ""))
+                    elif block_type == "tool_use":
                         tool_uses.append(block)
 
                 text = "\n".join(text_parts)
@@ -613,35 +743,56 @@ class AnthropicClient:
                 if not tool_uses or stop == "end_turn":
                     logger.info(f"Anthropic final response ({len(text)} chars, round {round_num + 1}, stop={stop})")
                     self.last_reasoning = extract_think_content(text)
-                    cleaned = strip_think_tags(text)
+                    cleaned = strip_think_tags(text).strip()
+                    # A turn that used tools but ended with no reply means housekeeping
+                    # silently replaced responding to the user (common on cold wake-ups).
+                    # Nudge once to actually reply instead of dropping the message.
+                    if (
+                        not cleaned
+                        and tools_used
+                        and not empty_nudged
+                        and round_num + 1 < effective_max
+                    ):
+                        empty_nudged = True
+                        logger.info(
+                            "Empty final response after tool work — nudging model to reply."
+                        )
+                        anthropic_msgs.append({
+                            "role": "user",
+                            "content": (
+                                "[SYSTEM: You performed a tool action but ended your turn "
+                                "without replying to the user. Do not be silent. Respond now "
+                                "in text, in character, directly to the user's latest message.]"
+                            ),
+                        })
+                        continue
                     return (cleaned if cleaned else None), tools_used
 
                 # Model wants to call tools
                 logger.info(f"Anthropic requested {len(tool_uses)} tool call(s) (round {round_num + 1})")
 
                 # Add the assistant's full response (text + tool_use blocks)
-                assistant_content = []
-                for block in response.content:
-                    if block.type == "text":
-                        assistant_content.append({"type": "text", "text": block.text})
-                    elif block.type == "tool_use":
-                        assistant_content.append({
-                            "type": "tool_use",
-                            "id": block.id,
-                            "name": block.name,
-                            "input": block.input,
-                        })
+                # Preserve the entire response. Native tool search returns
+                # server_tool_use and tool_search_tool_result blocks that must
+                # be sent back unchanged alongside the eventual client tool call.
+                assistant_content = [
+                    _content_block_to_dict(block) for block in response.content
+                ]
                 anthropic_msgs.append({"role": "assistant", "content": assistant_content})
 
                 # Execute tools and collect results
                 tool_results = []
                 for tu in tool_uses:
-                    func_name = tu.name
-                    args = tu.input or {}
+                    func_name = _obj_get(tu, "name", "")
+                    args = _obj_get(tu, "input", {}) or {}
                     logger.info(f"Executing tool: {func_name}({args})")
                     tools_used.append(func_name)
 
-                    if func_name == "search_tools" and hasattr(skill_registry, 'search_tools'):
+                    if (
+                        not using_native_tool_search
+                        and func_name == "search_tools"
+                        and hasattr(skill_registry, 'search_tools')
+                    ):
                         found_tools, result = skill_registry.search_tools(args.get("query", ""))
                         if found_tools:
                             added_tools = extend_tools_unique(tools, found_tools)
@@ -655,7 +806,7 @@ class AnthropicClient:
 
                     tool_results.append({
                         "type": "tool_result",
-                        "tool_use_id": tu.id,
+                        "tool_use_id": _obj_get(tu, "id", ""),
                         "content": result_str,
                     })
 
@@ -697,8 +848,13 @@ class AnthropicClient:
             create_kwargs = self._create_kwargs(
                 system=system_blocks,
                 messages=anthropic_msgs,
+                tools=anthropic_tools if anthropic_tools else None,
                 automatic_cache=self._cache_automatic,
             )
+            if anthropic_tools:
+                # Keep deferred tool definitions available so any preserved
+                # tool_reference blocks remain valid, but force a text closeout.
+                create_kwargs["tool_choice"] = {"type": "none"}
 
             # Retry loop for transient 500 errors
             response = None
