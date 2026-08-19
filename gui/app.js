@@ -548,10 +548,19 @@ function normalizeKeyStatus(status = {}) {
   const configuredKeyMatches = Boolean(apiKeyEnv && apiKeyEnv === expected);
   const providerKeyStatus = status.provider_key_status || {};
   const providerKeySet = providerKeyStatus[providerType];
+  const knownProviderKeys = new Set(Object.values(EXPECTED_ENV_VARS));
+  const apiKeyMismatch = (
+    !providerChanged
+    && Boolean(apiKeyEnv)
+    && Boolean(expected)
+    && knownProviderKeys.has(apiKeyEnv)
+    && apiKeyEnv !== expected
+  );
   return {
     provider_type: providerType,
     api_key_env: apiKeyEnv,
     expected_api_key_env: expected,
+    api_key_mismatch: apiKeyMismatch,
     api_key_set: providerKeySet !== undefined
       ? Boolean(providerKeySet)
       : providerChanged && providerType !== "local" && !configuredKeyMatches
@@ -2503,6 +2512,10 @@ function renderProviderWarnings(status) {
   const box = el("providerWarnings");
   const messages = [];
 
+  if (status.api_key_mismatch) {
+    messages.push(`${providerDisplayName(status)} key mismatch — reading from ${status.api_key_env}, expected ${status.expected_api_key_env}. Re-select the provider to reset it.`);
+  }
+
   if (providerKeyMissing(status)) {
     const envVar = providerKeyEnv(status);
     if (status.provider_type === "custom" && !envVar) {
@@ -3251,6 +3264,11 @@ function syncBaseUrlVisibility() {
   el("baseUrlRow").classList.toggle("hidden", !isCustom);
 }
 
+function syncApiKeyEnvVisibility() {
+  const isCustom = el("providerType").value === "custom";
+  el("apiKeyEnvRow").classList.toggle("hidden", !isCustom);
+}
+
 function syncAnthropicCacheVisibility() {
   const isAnthropic = el("providerType").value === "anthropic";
   el("anthropicCacheRow").classList.toggle("hidden", !isAnthropic);
@@ -3284,11 +3302,13 @@ function renderProvider(data) {
   el("providerType").value = text(summary.provider_type);
   el("providerModel").value = text(summary.provider_model);
   el("providerBaseUrl").value = text(summary.base_url);
+  el("providerApiKeyEnv").value = text(data.key_status?.api_key_env || "");
   el("maxContext").value = text(summary.provider_max_context ?? summary.max_context);
   el("anthropicCacheTtl").value = text(summary.cache_ttl, "5m");
   el("anthropicCacheAutomatic").checked = Boolean(summary.cache_automatic);
   el("anthropicCacheDiagnostics").checked = Boolean(summary.cache_diagnostics);
   syncBaseUrlVisibility();
+  syncApiKeyEnvVisibility();
   syncAnthropicCacheVisibility();
   syncLocalServerVisibility();
   el("ttsVoice").value = text(tts.voice_description);
@@ -3342,6 +3362,11 @@ function syncTtsMode() {
 }
 
 function editableSnapshot() {
+  const providerType = el("providerType").value;
+  const savedProviderType = state.current?.summary?.provider_type || "";
+  const providerChanged = Boolean(savedProviderType) && savedProviderType !== providerType;
+  const apiKeyEnvValue = el("providerApiKeyEnv").value;
+  const writeApiKeyEnv = providerChanged || Boolean(apiKeyEnvValue);
   return {
     identity: {
       name: el("identityName").value,
@@ -3353,9 +3378,10 @@ function editableSnapshot() {
       traits: [...state.currentTraits],
     },
     provider: {
-      type: el("providerType").value,
+      type: providerType,
       model: el("providerModel").value,
       base_url: el("providerBaseUrl").value,
+      ...(writeApiKeyEnv ? { api_key_env: apiKeyEnvValue } : {}),
       max_context: el("maxContext").value,
       cache_ttl: el("anthropicCacheTtl").value,
       cache_automatic: Boolean(el("anthropicCacheAutomatic").checked),
@@ -3450,6 +3476,7 @@ function setEditableState(data) {
     "voiceNotes",
     "providerModel",
     "providerBaseUrl",
+    "providerApiKeyEnv",
     "maxContext",
     "lsLlamaCppDir",
     "lsModelsDir",
@@ -5784,6 +5811,7 @@ function wireEvents() {
     "voiceNotes",
     "providerModel",
     "providerBaseUrl",
+    "providerApiKeyEnv",
     "maxContext",
     "lsLlamaCppDir",
     "lsModelsDir",
@@ -5808,8 +5836,10 @@ function wireEvents() {
     el(id)?.addEventListener("change", () => setDirty(hasEditableChanges()));
   });
   el("providerType").addEventListener("change", () => {
+    el("providerApiKeyEnv").value = "";
     maybeBumpCloudContext();
     syncBaseUrlVisibility();
+    syncApiKeyEnvVisibility();
     syncAnthropicCacheVisibility();
     syncLocalServerVisibility();
     syncTuningProviderHints();

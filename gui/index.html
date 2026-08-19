@@ -226,6 +226,9 @@
           <div id="baseUrlRow" class="field-grid one hidden">
             <label title="API endpoint URL for custom providers (e.g. https://api.nanogpt.com/v1). Not needed for standard providers — they auto-configure">Base URL<input id="providerBaseUrl" type="text" placeholder="https://api.example.com/v1"></label>
           </div>
+          <div id="apiKeyEnvRow" class="field-grid one hidden">
+            <label title="Environment variable name that holds this provider's API key. Leave empty for standard providers so their default key (e.g. OPENROUTER_API_KEY) is used">API Key Env Var<input id="providerApiKeyEnv" type="text" placeholder="MY_API_KEY"></label>
+          </div>
           <div id="anthropicCacheRow" class="field-grid three hidden">
             <label title="Anthropic prompt cache lifetime for explicit stable-prefix caching">Cache TTL
               <select id="anthropicCacheTtl">

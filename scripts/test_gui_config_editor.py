@@ -519,6 +519,43 @@ def test_config_editor_rejects_unknown_fields():
         assert "null bytes" in result["error"]
 
 
+def test_config_editor_provider_api_key_env():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        persona_dir = root / "personas" / "demo"
+        persona_dir.mkdir(parents=True)
+        (persona_dir / "persona.yaml").write_text("name: Demo\n", encoding="utf-8")
+        (persona_dir / "config.yaml").write_text(
+            "provider:\n  type: openrouter\n", encoding="utf-8"
+        )
+
+        api = PulseAPI(root)
+
+        result = api.preview_persona_save("demo", {
+            "provider": {"api_key_env": "MY_PERSONA_API_KEY"},
+        })
+        assert result["ok"] is True
+
+        result = api.preview_persona_save("demo", {
+            "provider": {"api_key_env": ""},
+        })
+        assert result["ok"] is True
+
+        for bad in ("9LIVES", "MY KEY", "MY-KEY"):
+            result = api.preview_persona_save("demo", {
+                "provider": {"api_key_env": bad},
+            })
+            assert result["ok"] is False
+            assert "API Key Env Var" in result["error"]
+
+        result = api.save_persona("demo", {
+            "provider": {"type": "openrouter", "api_key_env": "MY_PERSONA_API_KEY"},
+        })
+        assert result["ok"] is True
+        config_text = (persona_dir / "config.yaml").read_text(encoding="utf-8")
+        assert 'api_key_env: "MY_PERSONA_API_KEY"' in config_text
+
+
 def test_writer_sets_new_top_level_field():
     assert _set_top_level_field("", "model", "Grok") == 'model: "Grok"\n'
 
@@ -694,6 +731,7 @@ def test_preview_diff_handles_missing_final_newline():
 if __name__ == "__main__":
     test_config_editor_preview_and_save()
     test_config_editor_rejects_unknown_fields()
+    test_config_editor_provider_api_key_env()
     test_writer_sets_new_top_level_field()
     test_writer_updates_existing_top_level_field()
     test_writer_sets_nested_field_parent_exists()

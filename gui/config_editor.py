@@ -33,6 +33,7 @@ PROVIDER_FIELDS = {
     "model": "Provider Model",
     "max_context": "Max Context",
     "base_url": "Base URL",
+    "api_key_env": "API Key Env Var",
     "cache_ttl": "Anthropic Cache TTL",
     "cache_automatic": "Anthropic Automatic Cache",
     "cache_diagnostics": "Anthropic Cache Diagnostics",
@@ -421,6 +422,11 @@ class ConfigEditor:
             return value
         if key in ("model", "base_url"):
             return self._clean_text(value, label)
+        if key == "api_key_env":
+            cleaned = self._clean_text(value, label).strip()
+            if cleaned and not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", cleaned):
+                raise ValueError(f"{label} must be empty or a valid environment variable name.")
+            return cleaned
         if key == "cache_ttl":
             if not isinstance(value, str) or value not in {"5m", "1h"}:
                 raise ValueError(f"{label} must be 5m or 1h.")
