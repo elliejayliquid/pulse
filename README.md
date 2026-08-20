@@ -13,7 +13,7 @@ Pulse gives your AI companion a life of their own. It runs in the background, le
 - **Heartbeat loop** — Your companion gets periodic "free-think" ticks where they can decide to reach out, stay quiet, journal, or schedule follow-ups
 - **Telegram chat** — Bidirectional messaging with tool use (your companion can save memories, set reminders, search their journal mid-conversation). Tools are loaded dynamically — only ~10 core tools per API call, with 50+ more available on demand via semantic search
 - **Persistent memory** — Semantic search over stored facts and conversation summaries, stored in per-persona SQLite databases
-- **Legacy conversation archive** — Import your conversation history from ChatGPT (and soon Claude, Grok, Gemini, etc.) with RAG-powered semantic search over summarized sessions
+- **Legacy conversation archive** — Preview and curate exports from ChatGPT, Claude, Grok, OpenRouter, Markdown, and common JSON shapes in the GUI, then add sanitized chats to persona-local searchable history. Live continuation and background semantic enrichment are still in progress
 - **Journal** — Pinned identity entries (who am I, who is my human, what's our relationship) plus transient reflections as clean markdown with YAML frontmatter
 - **Self-scheduling** — The companion can set their own reminders and recurring tasks ("daily 8:00"), with priority levels (urgent/routine/creative)
 - **Cloud or local** — Use a local GGUF model via llama.cpp, or any OpenAI-compatible API (OpenRouter, OpenAI, etc.)
@@ -284,36 +284,42 @@ Original JSON files are kept as backups — they're not deleted.
 
 Bring your conversation history with you. Pulse can import conversations from previous AI providers so your companion can search and reference things you discussed before they existed.
 
-**Currently supported:**
+> **Importer status:** The GUI workflow is usable now for preview, saved review,
+> curation, and archive-only import. It is still under active development; live
+> continuation and automatic semantic enrichment are review/planning surfaces,
+> not completed apply/worker flows yet.
 
-- ✅ **ChatGPT** — full pipeline (export → import → RAG)
-- ✅ **Claude** — full pipeline (export → import → RAG)
+**Available now:**
 
-**Planned:**
+- Preview Claude, ChatGPT, Grok, OpenRouter, Markdown, and common JSON export
+  shapes. Previewing is read-only and never modifies the source export.
+- Review long transcripts in a windowed UI, inspect parser warnings, keep or
+  exclude conversations/exchanges, and optionally select one continuation
+  candidate.
+- Save the review into persona-local staging tables and resume it later.
+- Add only the kept, sanitized dialogue to the persona database's
+  `legacy_sessions` / `legacy_messages` archive. This does not replace or close
+  the active chat, inject the raw export into prompts, or create memories or
+  journal entries.
+- Search archived history immediately through full-text/archive tools. An
+  archive-only import with no continuation selected is a complete supported
+  outcome.
+- Remove an archived conversation while it is still archive-only. Once a future
+  live continuation is linked, Pulse refuses that narrow removal path rather
+  than silently breaking provenance.
 
-- 🔜 Gemini
-- 🔜 Grok
-- 🔜 Generic markdown/JSON
+**Still in progress:**
 
-**How it works:**
+- Applying the reviewed continuation plan to create a live landing session.
+- Running resumable background summary/embedding enrichment from the GUI. The
+  durable planner and pause/resume state exist, but the worker is not wired yet.
+- Incremental re-import with explicit overlap diffs and artifact reuse.
+- More real-export fixtures and source-specific handling as provider formats
+  evolve; Gemini does not yet have a dedicated parser.
 
-The import is a 3-stage pipeline:
-
-1. **Export** — Convert the provider's raw export (e.g. ChatGPT's `conversations.json`) into clean per-conversation markdown files
-2. **Import** — Load those markdown files into a `legacy.db` SQLite database with full-text search
-3. **RAG** — Generate LLM-powered summaries and embeddings for each conversation, enabling semantic search
-
-```bash
-# Stage 1: Export conversations.json to markdown
-python scripts/export_chatgpt.py --force                   # for ChatGPT
-python scripts/export_claude.py --input "path/to/claude.json" --force  # for Claude
-
-# Stage 2: Import markdown files into legacy.db
-python scripts/import_chatgpt.py --dir "path/to/conversations" --db "path/to/legacy.db" --source claude
-
-# Stage 3: Generate summaries + embeddings (requires a running LLM endpoint)
-python scripts/rag_import.py --execute --endpoint http://127.0.0.1:8001/v1
-```
+The older `export_*`, `import_chatgpt.py`, and `rag_import.py` scripts remain for
+developer-era/manual archive workflows. They are not the current GUI import
+contract.
 
 **Migrating an older standalone archive:**
 
