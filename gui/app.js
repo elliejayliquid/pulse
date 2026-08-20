@@ -3363,10 +3363,7 @@ function syncTtsMode() {
 
 function editableSnapshot() {
   const providerType = el("providerType").value;
-  const savedProviderType = state.current?.summary?.provider_type || "";
-  const providerChanged = Boolean(savedProviderType) && savedProviderType !== providerType;
   const apiKeyEnvValue = el("providerApiKeyEnv").value;
-  const writeApiKeyEnv = providerChanged || Boolean(apiKeyEnvValue);
   return {
     identity: {
       name: el("identityName").value,
@@ -3381,7 +3378,9 @@ function editableSnapshot() {
       type: providerType,
       model: el("providerModel").value,
       base_url: el("providerBaseUrl").value,
-      ...(writeApiKeyEnv ? { api_key_env: apiKeyEnvValue } : {}),
+      // Keep empty values in the snapshot so clearing a stale override remains
+      // detectable even when the provider field becomes hidden again.
+      api_key_env: apiKeyEnvValue,
       max_context: el("maxContext").value,
       cache_ttl: el("anthropicCacheTtl").value,
       cache_automatic: Boolean(el("anthropicCacheAutomatic").checked),

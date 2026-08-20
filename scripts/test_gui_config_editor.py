@@ -555,6 +555,13 @@ def test_config_editor_provider_api_key_env():
         config_text = (persona_dir / "config.yaml").read_text(encoding="utf-8")
         assert 'api_key_env: "MY_PERSONA_API_KEY"' in config_text
 
+        result = api.save_persona("demo", {
+            "provider": {"api_key_env": ""},
+        })
+        assert result["ok"] is True
+        config_text = (persona_dir / "config.yaml").read_text(encoding="utf-8")
+        assert 'api_key_env: ""' in config_text
+
 
 def test_writer_sets_new_top_level_field():
     assert _set_top_level_field("", "model", "Grok") == 'model: "Grok"\n'
