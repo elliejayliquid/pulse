@@ -1423,13 +1423,12 @@ You decide when to lift the timeout — not the human."""
             "Usually return action \"silent\" afterward; do not send a separate "
             "notification just to say the voice was sent.\n\n"
             "When you're done (after any tool calls), respond with VALID JSON ONLY. "
-            "Do not use markdown labels like \"thinking:\" or \"action:\". "
+            "Do not use markdown labels like \"continuity:\" or \"action:\". "
             "Do not wrap the JSON in prose or code fences. If you want to stay silent "
             "after using tools, return exactly this shape with action set to \"silent\" "
             "and message left empty.\n\n"
             "Required JSON format:\n"
             "{\n"
-            '  "thinking": "your internal reasoning (not shown to anyone)",\n'
             '  "continuity": "a concise first-person note for your future self about what you actually did, learned, decided, or how you chose to spend this heartbeat",\n'
             '  "action": "notify | schedule | silent",\n'
             '  "message": "what to say (if notify)",\n'

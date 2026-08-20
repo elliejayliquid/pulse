@@ -1053,7 +1053,7 @@ class PulseEngine:
         return True
 
     async def _send_heartbeat_debug(self, response, tools_used, elapsed_secs):
-        """Send heartbeat inner monologue to Telegram (debug mode)."""
+        """Send compact heartbeat outcome diagnostics to Telegram."""
         telegram = self.channels.get("telegram")
         if not telegram:
             return
@@ -1063,10 +1063,6 @@ class PulseEngine:
         if tools_used:
             unique_tools = ", ".join(dict.fromkeys(tools_used))
             parts.append(f"🔧 {unique_tools}")
-
-        thinking = self.llm.last_reasoning or (response.thinking if response else "")
-        if thinking:
-            parts.append(f'💬 "{thinking}"')
 
         continuity_note, _ = self._heartbeat_continuity_note(response, tools_used)
         if continuity_note:
