@@ -26,6 +26,9 @@ provider:
 model:
   max_context: 16384
   max_response_tokens: 1024
+tts:
+  preload: false
+  idle_unload_minutes: 5
 skills:
   memory:
     enabled: true
@@ -89,6 +92,8 @@ voice_notes: Warm.
         assert demo["summary"]["server"]["port"] == 8012
         assert demo["summary"]["model_file"] == ""
         assert demo["summary"]["mmproj_file"] == ""
+        assert demo["summary"]["tts"]["preload"] is False
+        assert demo["summary"]["tts"]["idle_unload_minutes"] == 5
         assert demo["key_status"]["provider_type"] == "openrouter"
         assert demo["key_status"]["api_key_env"] == "DEMO_KEY"
         assert demo["key_status"]["expected_api_key_env"] == "OPENROUTER_API_KEY"
@@ -102,7 +107,11 @@ voice_notes: Warm.
 
         preview_result = api.preview_persona_save("demo", {
             "identity": {"model": "Demo Model 2"},
-            "tts": {"voice_description": "Warm demo voice."},
+            "tts": {
+                "preload": True,
+                "idle_unload_minutes": 10,
+                "voice_description": "Warm demo voice.",
+            },
         })
         assert preview_result["ok"] is True
         assert preview_result["preview"]["has_changes"] is True

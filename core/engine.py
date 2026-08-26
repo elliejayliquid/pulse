@@ -1388,7 +1388,8 @@ class PulseEngine:
             logger.info(f"Heartbeat interval: {self.interval // 60} minutes")
         logger.info(f"Quiet hours: {self.quiet_start}:00 - {self.quiet_end}:00")
 
-        # Determine TTS warmup state before the first "running" status write
+        # Determine TTS startup-preparation state before the first status write.
+        # With lazy loading (the default), warmup returns without loading a model.
         tts_skill = None
         if self.skill_registry:
             tts_skill = self.skill_registry.get_skill("tts")
@@ -1403,9 +1404,9 @@ class PulseEngine:
             logger.warning("LLM server is not available — will retry on each tick.")
             self._write_runtime_status("running", True, llm_available=False)
 
-        # Warm up the TTS model in the background so the first voice generation
-        # (companion's speak tool OR Telegram 🔊 button) doesn't pay the cold
-        # start tax. Fire-and-forget — failures fall back to lazy loading.
+        # Prepare TTS in the background. Configured preloading pays the cold-start
+        # cost now; the default lazy path simply marks TTS ready for first use.
+        # Fire-and-forget — failures fall back to lazy loading.
         if tts_skill:
             asyncio.create_task(self._warmup_tts(tts_skill))
 

@@ -75,6 +75,8 @@ context_budget:
   recent_tail_exchanges: 4
 
 tts:
+  preload: false
+  idle_unload_minutes: 5
   voice_description: "Old voice"
   voice_sample: ""
   voice_sample_text: ""
@@ -138,6 +140,8 @@ context:
                 "voice_notes": "",
             },
             "tts": {
+                "preload": True,
+                "idle_unload_minutes": 12,
                 "voice_description": "New voice",
                 "voice_sample": "personas/demo/data/tts/ref.ogg",
                 "voice_sample_text": "Reference text",
@@ -235,6 +239,8 @@ context:
 
         config_text = (persona_dir / "config.yaml").read_text(encoding="utf-8")
         assert "# Persona config overlay" in config_text
+        assert "preload: true" in config_text
+        assert "idle_unload_minutes: 12" in config_text
         assert 'voice_description: "New voice"' in config_text
         assert 'voice_sample: "personas/demo/data/tts/ref.ogg"' in config_text
         assert 'voice_sample_text: "Reference text"' in config_text
@@ -298,6 +304,18 @@ def test_config_editor_rejects_unknown_fields():
         (persona_dir / "config.yaml").write_text("tts: {}\nskills:\n  tts:\n    enabled: true\n", encoding="utf-8")
 
         api = PulseAPI(root)
+        result = api.preview_persona_save("demo", {
+            "tts": {"preload": "true"},
+        })
+        assert result["ok"] is False
+        assert "true or false" in result["error"]
+
+        result = api.preview_persona_save("demo", {
+            "tts": {"idle_unload_minutes": -1},
+        })
+        assert result["ok"] is False
+        assert "between 0 and 1440" in result["error"]
+
         result = api.preview_persona_save("demo", {
             "heartbeat": {"quiet_hours_start": 24},
         })

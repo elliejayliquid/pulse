@@ -187,6 +187,8 @@ voice:
 # Requires CUDA GPU with enough VRAM alongside your LLM model.
 # voice_description defines the companion's voice identity.
 tts:
+  preload: false                  # true = warm at startup; false = load only when first used
+  idle_unload_minutes: 5          # free model/graphs after inactivity; 0 = keep resident
   voice_description: ""           # e.g. "Warm young male, clear midrange, slightly playful"
   voice_sample: ""                # path to reference OGG/WAV — enables clone mode (consistent voice)
   voice_sample_text: ""           # transcript of the reference clip (required for clone mode)

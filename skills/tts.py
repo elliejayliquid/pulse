@@ -175,11 +175,13 @@ def chunk_for_tts(text: str, max_chunk_chars: int = 300,
     return result
 
 
-def _get_engine():
+def _get_engine(idle_unload_minutes: float = 5):
     global _engine
     if _engine is None:
         from core.tts import TTSEngine
-        _engine = TTSEngine()
+        _engine = TTSEngine(idle_unload_minutes=idle_unload_minutes)
+    else:
+        _engine.configure_idle_unload(idle_unload_minutes)
     return _engine
 
 
@@ -195,6 +197,16 @@ class TTSSkill(BaseSkill):
         super().__init__(config)
         tts_config = config.get("tts", {})
         self.voice_description = tts_config.get("voice_description", "")
+        self.preload = tts_config.get("preload", False) is True
+        try:
+            self.idle_unload_minutes = float(
+                tts_config.get("idle_unload_minutes", 5)
+            )
+            if self.idle_unload_minutes < 0:
+                raise ValueError("idle lifetime cannot be negative")
+        except (TypeError, ValueError):
+            logger.warning("[TTS] Invalid idle_unload_minutes; using 5 minutes.")
+            self.idle_unload_minutes = 5.0
         # Queue of (ogg_path, spoken_text) tuples — supports multiple speak()
         # calls per turn. Telegram drains the queue in order; engine joins the
         # texts into conversation history so nothing said aloud is forgotten.
@@ -272,7 +284,7 @@ class TTSSkill(BaseSkill):
         if not self.voice_description and not self.clone_mode:
             return "Voice not configured — add tts.voice_description to config."
 
-        engine = _get_engine()
+        engine = _get_engine(self.idle_unload_minutes)
 
         # speak() is companion-authored audio, so strip roleplay/stage
         # directions and chunk longer notes.  The manual audio button uses the
@@ -339,7 +351,7 @@ class TTSSkill(BaseSkill):
         if not chunks:
             return None
 
-        engine = _get_engine()
+        engine = _get_engine(self.idle_unload_minutes)
         import asyncio
         try:
             if len(chunks) == 1:
@@ -384,26 +396,26 @@ class TTSSkill(BaseSkill):
             _engine.unload()
 
     async def warmup(self):
-        """Preload the voice model into VRAM at startup.
+        """Optionally preload the voice model into VRAM at startup.
 
-        Without this, the first 🔊 tap (or first speak() call) pays a cold-start
-        tax of 20-40s while Qwen3 weights stream off disk into VRAM. With this,
-        the load happens in the background during Pulse startup, alongside
-        llama-server warmup, so the first user-visible generation is fast.
+        Lazy loading is the default so an unused voice does not retain several
+        gigabytes of model and CUDA-graph memory. With tts.preload enabled, the
+        load happens in the background during Pulse startup instead.
 
         Safe to fail — if warmup errors out, on-demand synthesis will still
         attempt to load the model on first use. We just log and move on.
         """
         if not self.is_configured:
             return
+        if not self.preload:
+            logger.info("[TTS] Preload disabled — voice model will load on first use.")
+            return
         try:
-            engine = _get_engine()
+            engine = _get_engine(self.idle_unload_minutes)
             if self.clone_mode:
-                # Clone mode also builds the voice prompt from the reference
-                # clip, which is the other slow first-call cost
-                await engine._ensure_clone_loaded(self.voice_sample, self.voice_sample_text)
+                await engine.preload(self.voice_sample, self.voice_sample_text)
             else:
-                await engine._ensure_design_loaded()
+                await engine.preload()
             logger.info("[TTS] Warmup complete — voice model preloaded.")
         except Exception as e:
             logger.warning(f"[TTS] Warmup failed (will retry on first synthesis): {e}")

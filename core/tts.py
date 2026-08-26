@@ -16,10 +16,12 @@ Output is OGG/Opus (Telegram voice format).
 """
 
 import asyncio
+import gc
 import logging
 import platform
 import shutil
 import tempfile
+import threading
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -57,16 +59,102 @@ def _find_ffmpeg() -> Path:
 class TTSEngine:
     """Qwen3-TTS wrapper — supports both VoiceDesign and voice-clone modes."""
 
-    def __init__(self):
+    def __init__(self, idle_unload_minutes: float = 5):
         self._design_model = None   # VoiceDesign 1.7B
         self._clone_model = None    # Base 0.6B
         self._clone_prompt = None   # cached clone prompt (from reference clip)
         self._lock = asyncio.Lock()
         self._active_mode = None    # "design" or "clone"
+        self._lifecycle_lock = threading.Lock()
+        self._active_generations = 0
+        self._idle_timer = None
+        self._idle_timer_generation = 0
+        self._idle_unload_seconds = 0.0
+        self.configure_idle_unload(idle_unload_minutes)
 
     @property
     def is_loaded(self) -> bool:
         return self._design_model is not None or self._clone_model is not None
+
+    def configure_idle_unload(self, minutes: float):
+        """Set the idle model lifetime; zero keeps a loaded model resident."""
+        try:
+            seconds = float(minutes) * 60
+            if seconds < 0:
+                raise ValueError("idle lifetime cannot be negative")
+        except (TypeError, ValueError):
+            seconds = 5 * 60
+        with self._lifecycle_lock:
+            self._idle_unload_seconds = seconds
+            self._cancel_idle_timer_locked()
+            if self.is_loaded and self._active_generations == 0:
+                self._schedule_idle_unload_locked()
+
+    def _cancel_idle_timer_locked(self):
+        self._idle_timer_generation += 1
+        if self._idle_timer is not None:
+            self._idle_timer.cancel()
+            self._idle_timer = None
+
+    def _schedule_idle_unload_locked(self):
+        if self._idle_unload_seconds <= 0 or not self.is_loaded:
+            return
+        self._idle_timer_generation += 1
+        generation = self._idle_timer_generation
+        timer = threading.Timer(
+            self._idle_unload_seconds,
+            self._idle_unload,
+            args=(generation,),
+        )
+        timer.daemon = True
+        self._idle_timer = timer
+        timer.start()
+
+    def _begin_generation(self):
+        with self._lifecycle_lock:
+            self._cancel_idle_timer_locked()
+            self._active_generations += 1
+
+    def _end_generation(self):
+        with self._lifecycle_lock:
+            self._active_generations = max(0, self._active_generations - 1)
+            if self._active_generations == 0:
+                self._schedule_idle_unload_locked()
+
+    def _idle_unload(self, generation: int):
+        with self._lifecycle_lock:
+            if generation != self._idle_timer_generation:
+                return
+            self._idle_timer = None
+            if self._active_generations != 0:
+                return
+            self._unload_locked(reason="idle timeout")
+
+    def _unload_locked(self, reason: str | None = None):
+        unloaded = []
+        if self._design_model is not None:
+            del self._design_model
+            self._design_model = None
+            unloaded.append("design")
+        if self._clone_model is not None:
+            del self._clone_model
+            self._clone_model = None
+            self._clone_prompt = None
+            unloaded.append("clone")
+        self._active_mode = None
+        if not unloaded:
+            return
+
+        # Qwen and the CUDA graph wrapper can form reference cycles. Collect
+        # those before returning unused CUDA allocations to the driver.
+        gc.collect()
+        try:
+            import torch
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
+        suffix = f" ({reason})" if reason else ""
+        logger.info(f"[TTS] Unloaded: {', '.join(unloaded)}{suffix}")
 
     # ------------------------------------------------------------------
     # Design mode (VoiceDesign 1.7B)
@@ -222,24 +310,22 @@ class TTSEngine:
     # ------------------------------------------------------------------
 
     def unload(self):
-        """Free GPU memory for both models."""
-        unloaded = []
-        if self._design_model is not None:
-            del self._design_model
-            self._design_model = None
-            unloaded.append("design")
-        if self._clone_model is not None:
-            del self._clone_model
-            self._clone_model = None
-            self._clone_prompt = None
-            unloaded.append("clone")
-        if unloaded:
-            try:
-                import torch
-                torch.cuda.empty_cache()
-            except Exception:
-                pass
-            logger.info(f"[TTS] Unloaded: {', '.join(unloaded)}")
+        """Free both models and cancel any pending idle eviction."""
+        with self._lifecycle_lock:
+            self._cancel_idle_timer_locked()
+            self._unload_locked()
+
+    async def preload(self, ref_audio_path: Path | None = None,
+                      ref_text: str | None = None):
+        """Load the configured model now, then begin its idle lifetime."""
+        self._begin_generation()
+        try:
+            if ref_audio_path and ref_text:
+                await self._ensure_clone_loaded(ref_audio_path, ref_text)
+            else:
+                await self._ensure_design_loaded()
+        finally:
+            self._end_generation()
 
     async def speak(self, text: str, voice_description: str,
                     emotion: str = "",
@@ -250,10 +336,13 @@ class TTSEngine:
         If ref_audio_path + ref_text are provided, uses clone mode (0.6B).
         Otherwise uses design mode (1.7B) with voice_description + emotion.
         """
-        if ref_audio_path and ref_text:
-            return await self._speak_clone(text, ref_audio_path, ref_text)
-        else:
+        self._begin_generation()
+        try:
+            if ref_audio_path and ref_text:
+                return await self._speak_clone(text, ref_audio_path, ref_text)
             return await self._speak_design(text, voice_description, emotion)
+        finally:
+            self._end_generation()
 
     async def speak_chunked(self, chunks: list[str], voice_description: str,
                             emotion: str = "",
@@ -261,33 +350,37 @@ class TTSEngine:
                             ref_text: str | None = None,
                             silence_ms: int = 400) -> Path:
         """Generate speech for each chunk, concatenate with silence gaps, return single OGG."""
-        import numpy as np
-        
-        all_wavs = []
-        sample_rate = 24000
-        
-        for chunk in chunks:
-            if ref_audio_path and ref_text:
-                wav_data, sr = await self._generate_clone(chunk, ref_audio_path, ref_text)
-            else:
-                wav_data, sr = await self._generate_design(chunk, voice_description, emotion)
-                
-            sample_rate = sr
-            all_wavs.append(wav_data)
-            
-        if not all_wavs:
-            raise ValueError("No chunks provided to speak_chunked")
-            
-        silence = np.zeros(int(sample_rate * silence_ms / 1000), dtype=all_wavs[0].dtype)
-        
-        combined_wavs = []
-        for i, wav in enumerate(all_wavs):
-            combined_wavs.append(wav)
-            if i < len(all_wavs) - 1:
-                combined_wavs.append(silence)
-                
-        final_wav = np.concatenate(combined_wavs)
-        return await self._wavs_to_ogg(final_wav, sample_rate)
+        self._begin_generation()
+        try:
+            import numpy as np
+
+            all_wavs = []
+            sample_rate = 24000
+
+            for chunk in chunks:
+                if ref_audio_path and ref_text:
+                    wav_data, sr = await self._generate_clone(chunk, ref_audio_path, ref_text)
+                else:
+                    wav_data, sr = await self._generate_design(chunk, voice_description, emotion)
+
+                sample_rate = sr
+                all_wavs.append(wav_data)
+
+            if not all_wavs:
+                raise ValueError("No chunks provided to speak_chunked")
+
+            silence = np.zeros(int(sample_rate * silence_ms / 1000), dtype=all_wavs[0].dtype)
+
+            combined_wavs = []
+            for i, wav in enumerate(all_wavs):
+                combined_wavs.append(wav)
+                if i < len(all_wavs) - 1:
+                    combined_wavs.append(silence)
+
+            final_wav = np.concatenate(combined_wavs)
+            return await self._wavs_to_ogg(final_wav, sample_rate)
+        finally:
+            self._end_generation()
 
     async def _generate_design(self, text: str, voice_description: str,
                                emotion: str = "") -> tuple:

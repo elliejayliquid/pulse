@@ -23,3 +23,6 @@ personas/*
 !personas/_template/
 # 5. Un-ignore future additions to the _template folder
 !personas/_template/**
+screenshots
+logs
+designs
