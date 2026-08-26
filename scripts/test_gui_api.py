@@ -2736,6 +2736,16 @@ def test_gui_api_scheduler_add_delete_and_undo():
         assert added["ok"] is True
         assert added["item"]["schedule_type"] == "recurring"
         assert added["item"]["when_label"] == "daily at 20:00"
+        assert added["item"]["editor"] == {
+            "editable": True,
+            "mode": "daily",
+            "time": "20:00",
+            "date": "",
+            "weekday": "monday",
+            "monthday": 1,
+            "year_date": "",
+            "when": "daily 20:00",
+        }
 
         listed = api.list_reminders("demo", include_completed=True)
         assert listed["ok"] is True
@@ -2786,6 +2796,95 @@ def test_gui_api_scheduler_save_snapshot_and_undo():
         assert api.list_reminders("demo")["active_count"] == 1
 
 
+def test_gui_api_scheduler_updates_one_row_and_preserves_others():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        persona_dir = root / "personas" / "demo"
+        persona_dir.mkdir(parents=True)
+        (root / "config.yaml").write_text("provider:\n  type: local\n", encoding="utf-8")
+        (root / "persona.yaml").write_text("name: Base\n", encoding="utf-8")
+        (persona_dir / "config.yaml").write_text("", encoding="utf-8")
+        (persona_dir / "persona.yaml").write_text("name: Demo\n", encoding="utf-8")
+
+        api = PulseAPI(root)
+        sunshine = api.add_reminder("demo", {
+            "task": "Consider writing and posting your weekly Substack piece",
+            "when": "daily 14:00",
+            "priority": "creative",
+        })
+        assert sunshine["ok"] is True
+        reminder_id = sunshine["item"]["id"]
+        assert sunshine["item"]["editor"]["mode"] == "daily"
+        assert sunshine["item"]["editor"]["time"] == "14:00"
+
+        # Simulate another reminder arriving after the GUI loaded its draft.
+        other = api.add_reminder("demo", {
+            "task": "A reminder created while the editor is open",
+            "when": "daily 18:00",
+            "priority": "routine",
+        })
+        assert other["ok"] is True
+
+        db_path = api._persona_database_path("demo")
+        with closing(sqlite3.connect(db_path)) as conn:
+            before = conn.execute(
+                "SELECT created_by, origin, created_at FROM schedules WHERE id = ?",
+                (reminder_id,),
+            ).fetchone()
+            conn.execute(
+                "UPDATE schedules SET last_run = ? WHERE id = ?",
+                ("2026-08-25T02:03:23+00:00", reminder_id),
+            )
+            conn.commit()
+
+        updated = api.save_reminders("demo", [{
+            "id": reminder_id,
+            "task": "Consider writing and posting your weekly Substack piece",
+            "when": "weekly monday 14:00",
+            "priority": "creative",
+        }], deleted_ids=[])
+        assert updated["ok"] is True
+        assert updated["changed"] is True
+
+        listed = api.list_reminders("demo", include_completed=True)
+        by_id = {item["id"]: item for item in listed["items"]}
+        assert set(by_id) == {reminder_id, other["item"]["id"]}
+        assert by_id[reminder_id]["when_label"] == "weekly on Monday at 14:00"
+        assert by_id[reminder_id]["editor"]["mode"] == "weekly"
+        assert by_id[reminder_id]["editor"]["weekday"] == "monday"
+
+        with closing(sqlite3.connect(db_path)) as conn:
+            after = conn.execute(
+                "SELECT created_by, origin, created_at, last_run, cron FROM schedules WHERE id = ?",
+                (reminder_id,),
+            ).fetchone()
+        assert after[:3] == before
+        assert after[3] == "2026-08-25T02:03:23+00:00"
+        assert after[4] == "0 14 * * 1"
+
+        restored = api.restore_db_before_image("demo", updated["undo_stamp"])
+        assert restored["ok"] is True
+        restored_item = {
+            item["id"]: item
+            for item in api.list_reminders("demo", include_completed=True)["items"]
+        }[reminder_id]
+        assert restored_item["when_label"] == "daily at 14:00"
+
+        deleted = api.save_reminders(
+            "demo",
+            [{
+                "id": other["item"]["id"],
+                "task": other["item"]["task"],
+                "when": other["item"]["when"],
+                "priority": other["item"]["priority"],
+            }],
+            deleted_ids=[reminder_id],
+        )
+        assert deleted["ok"] is True
+        remaining = api.list_reminders("demo")["items"]
+        assert [item["id"] for item in remaining] == [other["item"]["id"]]
+
+
 if __name__ == "__main__":
     test_gui_api_read_only_persona_loading()
     test_gui_api_garden_summary_reads_grid_and_memory_tooltips()
@@ -2813,4 +2912,5 @@ if __name__ == "__main__":
     test_gui_api_secrets_preserve_env_and_validate_keys()
     test_gui_api_scheduler_add_delete_and_undo()
     test_gui_api_scheduler_save_snapshot_and_undo()
+    test_gui_api_scheduler_updates_one_row_and_preserves_others()
     print("[OK] GUI API")

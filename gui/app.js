@@ -88,6 +88,8 @@ const state = {
   scheduleDrafts: [],
   scheduleOriginals: [],
   scheduleUndoStamp: "",
+  scheduleEditingKey: "",
+  scheduleEditorBaseline: null,
   currentSkill: "",
 };
 
@@ -1145,12 +1147,13 @@ function renderSkillDialogBody(skill) {
         </div>
         <div class="skill-tool-card task-editor-card">
           <div class="skill-garden-head schedule-add-head">
-            <span>Add reminder</span>
+            <span id="scheduleEditorTitle">Add reminder</span>
             <div class="schedule-head-actions">
-              <strong>Staged until Save</strong>
-              <div id="skillScheduleNotice" class="schedule-local-status hidden"></div>
+              <strong id="scheduleEditorStageLabel">Staged until Save</strong>
+              <button id="scheduleCancelEditBtn" class="schedule-cancel-edit hidden" type="button">Cancel edit</button>
             </div>
           </div>
+          <div id="skillScheduleNotice" class="schedule-local-status hidden"></div>
           <div class="task-add-row schedule-add-row">
             <label class="task-editor-field wide" title="What should this persona remind you about or follow up on?">
               <span>Reminder</span>
@@ -1340,6 +1343,8 @@ function openSkillDialog(skillName) {
     state.scheduleUndoStamp = "";
     state.scheduleOriginals = [];
     state.scheduleDrafts = [];
+    state.scheduleEditingKey = "";
+    state.scheduleEditorBaseline = null;
     loadScheduleSkillSummary();
     syncScheduleSaveButton();
   }
@@ -1641,7 +1646,7 @@ async function handleSkillClose() {
     );
     if (!ok) return;
   }
-  if (state.currentSkill === "schedule" && scheduleDraftDirty()) {
+  if (state.currentSkill === "schedule" && (scheduleDraftDirty() || scheduleEditorDirty())) {
     const ok = await showConfirm(
       "Discard reminder changes?",
       "Reminder changes are staged in this window. Closing now will discard unsaved edits.",
@@ -1867,6 +1872,7 @@ async function loadScheduleSkillSummary() {
   const reminders = result.items || [];
   state.scheduleOriginals = reminders.map(normalizeScheduleDraft);
   state.scheduleDrafts = reminders.map(normalizeScheduleDraft);
+  resetScheduleEditor();
   renderScheduleDraftPanels();
   syncScheduleSaveButton();
 }
@@ -1877,10 +1883,11 @@ function renderScheduleSkillSummary(data) {
   const rows = active.length ? active.map((item) => `
     <div class="skill-tool-row schedule-summary-row">
       <div>
-        <strong>${escapeHtml(item.task || "Untitled reminder")}</strong>
+        <strong title="${escapeHtml(item.task || "Untitled reminder")}">${escapeHtml(item.task || "Untitled reminder")}</strong>
         <span>${escapeHtml(item.when_label || "")}</span>
       </div>
       <b class="${item.priority === "urgent" ? "warn" : "ready"}">${escapeHtml(item.priority || "routine")}</b>
+      <button class="task-delete-mini schedule-edit-mini" type="button" data-schedule-edit="${escapeHtml(scheduleDraftKey(item))}" title="Edit reminder" aria-label="Edit ${escapeHtml(item.task || "reminder")}" ${item.editor?.editable === false ? "disabled" : ""}>✎</button>
       <button class="task-delete-mini" type="button" data-schedule-delete="${escapeHtml(scheduleDraftKey(item))}" title="Delete reminder">×</button>
     </div>
   `).join("") : `
@@ -1928,8 +1935,12 @@ function normalizeScheduleDraft(item) {
     enabled: item.enabled !== false,
     completed: Boolean(item.completed),
     schedule_type: item.schedule_type || "once",
+    cron: item.cron || "",
+    run_at: item.run_at || "",
+    run_at_local: item.run_at_local || "",
     when_label: item.when_label || "",
-    when: item.when || "",
+    when: item.when || item.editor?.when || "",
+    editor: item.editor ? { ...item.editor } : null,
     deleted: Boolean(item.deleted),
   };
 }
@@ -1950,17 +1961,20 @@ function scheduleDraftPayload(items) {
         task: item.task || "",
         priority: item.priority || "routine",
       };
-      if (item.id) {
-        payload.id = item.id;
-      } else {
-        payload.when = item.when || "";
-      }
+      if (item.id) payload.id = item.id;
+      if (item.when) payload.when = item.when;
       return payload;
     });
 }
 
 function scheduleDraftDirty() {
   return JSON.stringify(scheduleDraftPayload(state.scheduleDrafts)) !== JSON.stringify(scheduleDraftPayload(state.scheduleOriginals));
+}
+
+function scheduleDeletedIds() {
+  return state.scheduleDrafts
+    .filter((item) => item.id && item.deleted)
+    .map((item) => item.id);
 }
 
 function syncScheduleSaveButton() {
@@ -1971,6 +1985,9 @@ function syncScheduleSaveButton() {
 }
 
 function wireScheduleSummaryControls(root) {
+  root.querySelectorAll("[data-schedule-edit]").forEach((button) => {
+    button.addEventListener("click", () => { void beginScheduleEdit(button.dataset.scheduleEdit); });
+  });
   root.querySelectorAll("[data-schedule-delete]").forEach((button) => {
     button.addEventListener("click", () => { void deleteReminderFromSkillEditor(button.dataset.scheduleDelete); });
   });
@@ -1978,6 +1995,7 @@ function wireScheduleSummaryControls(root) {
 
 function wireScheduleSkillEditor() {
   el("scheduleMode")?.addEventListener("change", syncScheduleFields);
+  el("scheduleCancelEditBtn")?.addEventListener("click", () => { void cancelScheduleEdit(); });
   document.querySelectorAll(".schedule-add-btn").forEach((button) => {
     button.addEventListener("click", () => { void addReminderFromSkillEditor(); });
   });
@@ -2000,6 +2018,98 @@ function wireScheduleSkillEditor() {
     el(id)?.addEventListener("change", syncSchedulePreview);
   });
   syncScheduleFields();
+}
+
+function scheduleEditorSnapshot() {
+  return {
+    task: text(el("scheduleTaskText")?.value),
+    mode: el("scheduleMode")?.value || "once",
+    priority: el("schedulePriority")?.value || "routine",
+    date: text(el("scheduleDate")?.value),
+    once_time: text(el("scheduleOnceTime")?.value),
+    time: text(el("scheduleTime")?.value),
+    weekday: el("scheduleWeekday")?.value || "monday",
+    monthday: text(el("scheduleMonthday")?.value || "1"),
+    year_date: text(el("scheduleYearDate")?.value),
+  };
+}
+
+function scheduleEditorDirty() {
+  if (!state.scheduleEditingKey || !state.scheduleEditorBaseline) return false;
+  return JSON.stringify(scheduleEditorSnapshot()) !== JSON.stringify(state.scheduleEditorBaseline);
+}
+
+function syncScheduleEditorMode() {
+  const editing = Boolean(state.scheduleEditingKey);
+  if (el("scheduleEditorTitle")) el("scheduleEditorTitle").textContent = editing ? "Edit reminder" : "Add reminder";
+  el("scheduleEditorStageLabel")?.classList.toggle("hidden", editing);
+  el("scheduleCancelEditBtn")?.classList.toggle("hidden", !editing);
+  if (el("scheduleAddBtn")) el("scheduleAddBtn").textContent = editing ? "Update Reminder" : "Add Reminder";
+}
+
+function resetScheduleEditor() {
+  state.scheduleEditingKey = "";
+  state.scheduleEditorBaseline = null;
+  if (el("scheduleTaskText")) el("scheduleTaskText").value = "";
+  if (el("scheduleMode")) el("scheduleMode").value = "once";
+  if (el("schedulePriority")) el("schedulePriority").value = "routine";
+  if (el("scheduleDate")) el("scheduleDate").value = "";
+  if (el("scheduleOnceTime")) el("scheduleOnceTime").value = "";
+  if (el("scheduleTime")) el("scheduleTime").value = "";
+  if (el("scheduleWeekday")) el("scheduleWeekday").value = "monday";
+  if (el("scheduleMonthday")) el("scheduleMonthday").value = "1";
+  if (el("scheduleYearDate")) el("scheduleYearDate").value = "";
+  syncScheduleEditorMode();
+  syncScheduleFields();
+}
+
+async function beginScheduleEdit(reminderKey) {
+  const reminder = findScheduleDraft(reminderKey);
+  if (!reminder || reminder.deleted) return;
+  if (state.scheduleEditingKey === reminderKey) {
+    el("scheduleTaskText")?.focus({ preventScroll: true });
+    return;
+  }
+  if (reminder.editor?.editable === false) {
+    setScheduleSkillNotice("This custom schedule cannot be edited with the simple recurrence controls yet.");
+    return;
+  }
+  if (state.scheduleEditingKey && state.scheduleEditingKey !== reminderKey) {
+    const canceled = await cancelScheduleEdit();
+    if (!canceled) return;
+  }
+  const editor = reminder.editor || {};
+  state.scheduleEditingKey = reminderKey;
+  if (el("scheduleTaskText")) el("scheduleTaskText").value = reminder.task || "";
+  if (el("scheduleMode")) el("scheduleMode").value = editor.mode || "once";
+  if (el("schedulePriority")) el("schedulePriority").value = reminder.priority || "routine";
+  if (el("scheduleDate")) el("scheduleDate").value = editor.date || "";
+  if (el("scheduleOnceTime")) el("scheduleOnceTime").value = editor.mode === "once" ? editor.time || "" : "";
+  if (el("scheduleTime")) el("scheduleTime").value = editor.mode === "once" ? "" : editor.time || "";
+  if (el("scheduleWeekday")) el("scheduleWeekday").value = editor.weekday || "monday";
+  if (el("scheduleMonthday")) el("scheduleMonthday").value = String(editor.monthday || 1);
+  if (el("scheduleYearDate")) el("scheduleYearDate").value = editor.year_date || "";
+  syncScheduleEditorMode();
+  syncScheduleFields();
+  state.scheduleEditorBaseline = scheduleEditorSnapshot();
+  setScheduleSkillNotice("");
+  el("scheduleTaskText")?.focus({ preventScroll: true });
+}
+
+async function cancelScheduleEdit(confirmDirty = true) {
+  if (!state.scheduleEditingKey) return true;
+  if (confirmDirty && scheduleEditorDirty()) {
+    const ok = await showConfirm(
+      "Discard reminder edits?",
+      "The changes currently shown in the editor have not been applied to the staged reminder.",
+      "Discard",
+      "secondary"
+    );
+    if (!ok) return false;
+  }
+  resetScheduleEditor();
+  setScheduleSkillNotice("");
+  return true;
 }
 
 function syncScheduleFields() {
@@ -2075,6 +2185,33 @@ function schedulePreviewText() {
   return `Repeats every ${yearly.monthLabel} ${yearly.day} at ${timeValue}.`;
 }
 
+function scheduleWhenLabelFromFields() {
+  const mode = el("scheduleMode")?.value || "once";
+  const timeValue = mode === "once"
+    ? text(el("scheduleOnceTime")?.value).trim()
+    : text(el("scheduleTime")?.value).trim();
+  if (mode === "once") return `once on ${text(el("scheduleDate")?.value).trim()} at ${timeValue}`;
+  if (mode === "daily") return `daily at ${timeValue}`;
+  if (mode === "weekly") return `weekly on ${titleCase(el("scheduleWeekday")?.value || "monday")} at ${timeValue}`;
+  if (mode === "monthly") return `monthly on day ${Number(el("scheduleMonthday")?.value || 1)} at ${timeValue}`;
+  const yearly = scheduleYearMonthDay();
+  return yearly ? `yearly on ${yearly.monthLabel} ${yearly.day} at ${timeValue}` : "yearly";
+}
+
+function scheduleEditorFieldsFromControls(when) {
+  const mode = el("scheduleMode")?.value || "once";
+  return {
+    editable: true,
+    mode,
+    time: mode === "once" ? text(el("scheduleOnceTime")?.value) : text(el("scheduleTime")?.value),
+    date: text(el("scheduleDate")?.value),
+    weekday: el("scheduleWeekday")?.value || "monday",
+    monthday: Number(el("scheduleMonthday")?.value || 1),
+    year_date: text(el("scheduleYearDate")?.value),
+    when,
+  };
+}
+
 function titleCase(value) {
   const raw = text(value).trim();
   return raw ? raw.charAt(0).toUpperCase() + raw.slice(1) : "";
@@ -2105,23 +2242,43 @@ async function addReminderFromSkillEditor() {
     );
     return;
   }
-  state.scheduleDrafts.push(normalizeScheduleDraft({
-    temp_id: `new-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-    task,
-    short_task: task,
-    priority,
-    enabled: true,
-    completed: false,
-    schedule_type: el("scheduleMode")?.value === "once" ? "once" : "recurring",
-    when,
-    when_label: when,
-  }));
-  if (el("scheduleTaskText")) el("scheduleTaskText").value = "";
-  if (el("scheduleDate")) el("scheduleDate").value = "";
-  if (el("scheduleOnceTime")) el("scheduleOnceTime").value = "";
+  const editor = scheduleEditorFieldsFromControls(when);
+  const staged = state.scheduleEditingKey ? findScheduleDraft(state.scheduleEditingKey) : null;
+  if (staged && staged.task === task && staged.priority === priority && staged.when === when) {
+    resetScheduleEditor();
+    setScheduleSkillNotice("No reminder changes to stage.");
+    return;
+  }
+  if (staged) {
+    staged.task = task;
+    staged.short_task = task;
+    staged.priority = priority;
+    staged.schedule_type = editor.mode === "once" ? "once" : "recurring";
+    staged.when = when;
+    staged.when_label = scheduleWhenLabelFromFields();
+    staged.editor = editor;
+  } else {
+    state.scheduleDrafts.push(normalizeScheduleDraft({
+      temp_id: `new-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      task,
+      short_task: task,
+      priority,
+      enabled: true,
+      completed: false,
+      schedule_type: editor.mode === "once" ? "once" : "recurring",
+      when,
+      when_label: scheduleWhenLabelFromFields(),
+      editor,
+    }));
+  }
+  const wasEditing = Boolean(staged);
+  resetScheduleEditor();
   renderScheduleDraftPanels();
-  syncSchedulePreview();
-  setScheduleSkillNotice("Reminder staged. Press Save to write it to the database.");
+  setScheduleSkillNotice(
+    wasEditing
+      ? "Reminder update staged. Press Save to write it to the database."
+      : "Reminder staged. Press Save to write it to the database."
+  );
 }
 
 async function deleteReminderFromSkillEditor(reminderId) {
@@ -2136,17 +2293,26 @@ async function deleteReminderFromSkillEditor(reminderId) {
   const reminder = findScheduleDraft(reminderId);
   if (!reminder) return;
   reminder.deleted = true;
+  if (state.scheduleEditingKey === reminderId) resetScheduleEditor();
   renderScheduleDraftPanels();
   setScheduleSkillNotice("Reminder removed from draft. Press Save to confirm.");
 }
 
 async function saveReminderDrafts() {
   if (!state.current || state.current.name === "__base__") return false;
+  if (state.scheduleEditingKey) {
+    setScheduleSkillNotice("Update the reminder or cancel edit mode before saving staged changes.");
+    return false;
+  }
   if (!scheduleDraftDirty()) {
     setScheduleSkillNotice("No reminder changes to save.");
     return false;
   }
-  const result = await api().save_reminders(state.current.name, scheduleDraftPayload(state.scheduleDrafts));
+  const result = await api().save_reminders(
+    state.current.name,
+    scheduleDraftPayload(state.scheduleDrafts),
+    scheduleDeletedIds()
+  );
   if (!result.ok) {
     setScheduleSkillNotice(result.error || "Could not save reminders.", state.scheduleUndoStamp);
     return false;

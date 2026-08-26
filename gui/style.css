@@ -2089,10 +2089,18 @@ textarea {
 }
 
 .schedule-summary-row {
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
   gap: 10px;
   padding: 8px 10px;
   min-height: 54px;
+}
+
+.schedule-summary-row strong {
+  display: -webkit-box;
+  overflow: hidden;
+  white-space: normal;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .task-quick-check {
@@ -2149,6 +2157,27 @@ textarea {
   border-color: rgba(239, 68, 68, 0.34);
   background: rgba(239, 68, 68, 0.08);
   color: var(--danger);
+}
+
+.schedule-edit-mini {
+  font-size: 15px;
+}
+
+.schedule-edit-mini:hover {
+  border-color: rgba(var(--accent-rgb), 0.38);
+  background: rgba(var(--accent-rgb), 0.1);
+  color: var(--accent-soft);
+}
+
+.schedule-edit-mini:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+
+.schedule-edit-mini:disabled:hover {
+  border-color: transparent;
+  background: transparent;
+  color: var(--text-tertiary);
 }
 
 .task-editor-card {
@@ -2253,11 +2282,29 @@ textarea {
   gap: 4px;
 }
 
+.schedule-cancel-edit {
+  min-height: 22px;
+  padding: 0 8px;
+  border: 1px solid rgba(var(--accent-rgb), 0.3);
+  border-radius: 999px;
+  background: rgba(var(--accent-rgb), 0.08);
+  color: var(--accent-soft);
+  font: 700 10px/1 var(--body);
+  cursor: pointer;
+}
+
+.schedule-cancel-edit:hover {
+  border-color: var(--accent);
+  background: rgba(var(--accent-rgb), 0.14);
+}
+
 .schedule-local-status {
   display: flex;
   align-items: center;
+  justify-self: end;
   gap: 6px;
-  max-width: 220px;
+  max-width: 100%;
+  text-align: right;
   color: var(--accent-soft);
   font: 700 10px/1.25 var(--body);
 }
