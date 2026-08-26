@@ -11,3 +11,15 @@ personal_usage_notes.md
 .claude
 AGENTS.md
 CLAUDE.md
+
+# --- Personas Data Rules ---
+# 1. Ignore all folders ending in personas/ by default
+*personas/
+# 2. Un-ignore your specific folder so Git is allowed to look inside it
+!personas/
+# 3. Ignore all the actual personal files inside that folder
+personas/*
+# 4. Un-ignore just the template folder so the main repo tracks it!
+!personas/_template/
+# 5. Un-ignore future additions to the _template folder
+!personas/_template/**

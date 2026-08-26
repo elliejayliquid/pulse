@@ -1,6 +1,0 @@
-# Only the _template/ directory is tracked in git.
-# All real personas contain personal data — never commit them.
-*
-!.gitignore
-!_template/
-!_template/**
