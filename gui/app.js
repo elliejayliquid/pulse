@@ -875,6 +875,21 @@ function stagedMcpServers() {
   return state.current.config.skills.mcp.servers;
 }
 
+function ttsConfig() {
+  state.current.config = state.current.config || {};
+  state.current.config.tts = state.current.config.tts || {};
+  return state.current.config.tts;
+}
+
+function ttsRuntimeValue(key, fallback) {
+  const tts = state.current?.config?.tts || {};
+  return tts[key] ?? fallback;
+}
+
+function setTtsRuntimeField(key, value) {
+  ttsConfig()[key] = value;
+}
+
 function ttsSkillMode() {
   const tts = state.current?.config?.tts || {};
   const hasDescription = Boolean(text(tts.voice_description).trim());
@@ -1049,6 +1064,19 @@ function renderSkillDialogBody(skill) {
   if (skill?.name === "tts") {
     return `
       <div class="skill-setting-stack">
+        <div class="skill-setting-stack">
+          <label class="check-row skill-setting-check" title="Load the voice model during Pulse startup instead of waiting for the first voice request.">
+            <span>Preload voice model at startup</span>
+            <input id="skillTtsPreload" type="checkbox" ${ttsRuntimeValue("preload", false) === true ? "checked" : ""}>
+          </label>
+          <p class="field-hint">Off (recommended) loads the model on the first voice request. On loads it during Pulse startup for faster first speech and higher idle RAM use.</p>
+        </div>
+        <div class="skill-setting-stack">
+          <label class="sample-path-label" title="Release the voice model and CUDA graphs after this many minutes without voice generation. Set to 0 to keep them resident.">Idle Unload (minutes)
+            <input id="skillTtsIdleUnload" type="number" min="0" max="1440" step="1" value="${escapeHtml(String(ttsRuntimeValue("idle_unload_minutes", 5)))}">
+          </label>
+          <p class="field-hint">Releases the voice model after this many unused minutes. 0 keeps it loaded until Pulse stops.</p>
+        </div>
         <div class="skill-setting-summary">
           <div><span>Mode</span><strong>${escapeHtml(ttsSkillMode())}</strong></div>
           <div><span>Tool</span><strong>speak</strong></div>
@@ -1061,7 +1089,7 @@ function renderSkillDialogBody(skill) {
           <strong>${escapeHtml(ttsSkillDescription())}</strong>
           <span>${escapeHtml(ttsSkillBackendNote())} Model choice is fixed for now; future versions may expose more TTS backends here.</span>
         </div>
-        <button id="skillOpenTtsSection" class="subtle-wide-btn" type="button">Open TTS Voice Section</button>
+        <button id="skillOpenTtsSection" class="subtle-wide-btn" type="button">Edit Voice Identity</button>
       </div>
     `;
   }
@@ -1262,7 +1290,7 @@ function openSkillDialog(skillName) {
                 : skill.name === "journal"
                   ? "Jump to the Continuity journal browser."
                   : skill.name === "tts"
-                    ? "Review voice-message status and jump to voice setup."
+                    ? "Configure when the voice model loads and unloads, and review voice status."
                     : skill.name === "sticker"
                       ? "Check sticker pack readiness for this persona."
                       : skill.name === "tasks"
@@ -1281,7 +1309,7 @@ function openSkillDialog(skillName) {
         : skill.name === "journal"
           ? "Journal records are managed in the Continuity section."
           : skill.name === "tts"
-            ? "Voice settings are edited in the TTS Voice section."
+            ? ""
             : skill.name === "sticker"
               ? "Sticker selection still happens through companion tools."
               : skill.name === "tasks"
@@ -1289,7 +1317,7 @@ function openSkillDialog(skillName) {
                 : skill.name === "schedule"
                   ? "Reminder changes are staged here until you press Save."
     : "Changes here are staged until you use the main Save button.";
-  el("skillNotice").classList.remove("hidden");
+  el("skillNotice").classList.toggle("hidden", !el("skillNotice").textContent);
   el("skillBody").innerHTML = renderSkillDialogBody(skill);
   bindSkillDialogControls(skill);
 
@@ -1498,6 +1526,15 @@ function bindSkillDialogControls(skill) {
   }
 
   if (skill?.name === "tts") {
+    el("skillTtsPreload")?.addEventListener("change", (event) => {
+      setTtsRuntimeField("preload", event.target.checked);
+      setDirty(hasEditableChanges());
+    });
+    el("skillTtsIdleUnload")?.addEventListener("input", (event) => {
+      const raw = event.target.value;
+      setTtsRuntimeField("idle_unload_minutes", raw === "" ? "" : Number(raw));
+      setDirty(hasEditableChanges());
+    });
     el("skillOpenTtsSection")?.addEventListener("click", () => {
       closeSkillDialog();
       openTtsVoiceSection();
@@ -3414,6 +3451,8 @@ function editableSnapshot() {
       recent_tail_exchanges: el("tuningTailExchanges")?.value || "",
     },
     tts: {
+      preload: ttsRuntimeValue("preload", false) === true,
+      idle_unload_minutes: ttsRuntimeValue("idle_unload_minutes", 5),
       voice_description: el("ttsVoice").value,
       voice_sample: el("ttsSample").value,
       voice_sample_text: el("ttsSampleText").value,
@@ -3595,7 +3634,9 @@ function collectEditableChanges() {
 
   for (const [key, value] of Object.entries(current.tts)) {
     if (value !== original.tts?.[key]) {
-      changes.tts[key] = value;
+      changes.tts[key] = key === "idle_unload_minutes"
+        ? numberOrEmpty(value)
+        : value;
     }
   }
 
@@ -5385,6 +5426,11 @@ async function pickModelFile(inputId) {
 function validateSaveFields() {
   if (el("ttsSample").value && !el("ttsSampleText").value) {
     return "Voice sample is set but transcript is empty - clone mode needs both.";
+  }
+  const idleRaw = String(ttsRuntimeValue("idle_unload_minutes", 5)).trim();
+  const idleMinutes = Number(idleRaw);
+  if (!idleRaw || !Number.isFinite(idleMinutes) || idleMinutes < 0 || idleMinutes > 1440) {
+    return "TTS idle unload must be between 0 and 1440 minutes.";
   }
   return validateHeartbeatFields() || validateProviderAndTuningFields();
 }

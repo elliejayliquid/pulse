@@ -23,6 +23,8 @@ IDENTITY_FIELDS = {
 }
 
 TTS_FIELDS = {
+    "preload": "TTS Preload",
+    "idle_unload_minutes": "TTS Idle Unload Minutes",
     "voice_description": "TTS Voice Description",
     "voice_sample": "TTS Voice Sample",
     "voice_sample_text": "TTS Voice Sample Text",
@@ -326,7 +328,7 @@ class ConfigEditor:
         return {
             "identity": normalized_identity,
             "tts": {
-                key: self._clean_text(value, TTS_FIELDS[key])
+                key: self._clean_tts_value(key, value)
                 for key, value in tts.items()
             },
             "provider": {
@@ -389,6 +391,20 @@ class ConfigEditor:
         if len(value) > 20000:
             raise ValueError(f"{label} is too long.")
         return value.replace("\r\n", "\n").replace("\r", "\n")
+
+    def _clean_tts_value(self, key: str, value: Any) -> str | int | float | bool:
+        label = TTS_FIELDS[key]
+        if key == "preload":
+            if type(value) is not bool:
+                raise ValueError(f"{label} must be true or false.")
+            return value
+        if key == "idle_unload_minutes":
+            if type(value) not in (int, float):
+                raise ValueError(f"{label} must be a number.")
+            if not 0 <= value <= 1440:
+                raise ValueError(f"{label} must be between 0 and 1440.")
+            return value
+        return self._clean_text(value, label)
 
     def _clean_traits(self, value: Any) -> list[str]:
         if not isinstance(value, list):
