@@ -41,7 +41,7 @@ PROVIDER_FIELDS = {
     "cache_diagnostics": "Anthropic Cache Diagnostics",
 }
 
-PROVIDER_TYPES = {"local", "openrouter", "openai", "anthropic", "custom"}
+PROVIDER_TYPES = {"local", "openrouter", "openai", "anthropic", "bedrock", "custom"}
 
 SERVER_FIELDS = {
     "llama_cpp_dir": "llama.cpp Directory",

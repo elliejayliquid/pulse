@@ -1778,6 +1778,46 @@ channels:
         assert status["telegram_set"] is True
 
 
+def test_gui_api_bedrock_provider_uses_explicit_key_override():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        persona_dir = root / "personas" / "demo"
+        persona_dir.mkdir(parents=True)
+        (root / "logs").mkdir()
+
+        (root / "config.yaml").write_text("", encoding="utf-8")
+        (root / "persona.yaml").write_text("name: Base\n", encoding="utf-8")
+        (persona_dir / "config.yaml").write_text(
+            """
+provider:
+  type: bedrock
+  api_key_env: AWS_BEDROCK_API_KEY
+  base_url: https://bedrock-runtime.us-east-1.amazonaws.com
+  model: us.anthropic.claude-sonnet-4-5-20250929-v1:0
+""",
+            encoding="utf-8",
+        )
+        (persona_dir / "persona.yaml").write_text("name: Demo\n", encoding="utf-8")
+        (persona_dir / ".env").write_text(
+            "AWS_BEDROCK_API_KEY=secret\n",
+            encoding="utf-8",
+        )
+
+        api = PulseAPI(root)
+        loaded = api.load_persona("demo")
+        status = loaded["key_status"]
+        assert loaded["summary"]["provider_type"] == "bedrock"
+        assert status["api_key_env"] == "AWS_BEDROCK_API_KEY"
+        assert status["expected_api_key_env"] == "AWS_BEARER_TOKEN_BEDROCK"
+        assert status["api_key_set"] is True
+        assert status["api_key_source"] == "persona"
+
+        secrets = api.get_secrets("demo")
+        assert secrets["api_key_env"] == "AWS_BEDROCK_API_KEY"
+        secret_by_key = {item["key"]: item for item in secrets["secrets"]}
+        assert secret_by_key["AWS_BEDROCK_API_KEY"]["source"] == "persona"
+
+
 def test_gui_api_get_lantern_read_only():
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -2900,6 +2940,7 @@ if __name__ == "__main__":
     test_gui_api_enrichment_plan_pause_resume_and_recovery()
     test_gui_api_archive_migrates_standalone_legacy_db_once()
     test_gui_api_standard_provider_env_fallback()
+    test_gui_api_bedrock_provider_uses_explicit_key_override()
     test_gui_api_get_lantern_read_only()
     test_gui_api_lantern_update_and_dim_write_safely()
     test_gui_api_list_memories_read_only_with_history_views()

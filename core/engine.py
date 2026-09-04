@@ -70,9 +70,11 @@ class PulseEngine:
         # accept it. None unless explicitly configured.
         top_k = model_config.get("top_k")
 
-        if provider_type == "anthropic":
+        if provider_type in ("anthropic", "bedrock"):
             if AnthropicClient is None:
-                raise RuntimeError("Anthropic provider selected, but the anthropic package is not installed.")
+                raise RuntimeError(
+                    f"{provider_type.title()} provider selected, but the anthropic package is not installed."
+                )
             self.llm = AnthropicClient(
                 endpoint=endpoint,
                 model_name=model_name,
@@ -86,6 +88,7 @@ class PulseEngine:
                 cache_automatic=provider_config.get("cache_automatic", False),
                 cache_diagnostics=provider_config.get("cache_diagnostics", False),
                 native_tool_search=provider_config.get("native_tool_search", True),
+                provider_type=provider_type,
             )
         elif provider_type == "openai":
             self.llm = OpenAIResponsesClient(

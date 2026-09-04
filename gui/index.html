@@ -217,6 +217,7 @@
                 <option value="openrouter">OpenRouter</option>
                 <option value="openai">OpenAI</option>
                 <option value="anthropic">Anthropic</option>
+                <option value="bedrock">AWS Bedrock</option>
                 <option value="custom">Custom</option>
               </select>
             </label>
@@ -224,7 +225,7 @@
             <label title="Context budget used when this persona runs through a cloud/API provider. Local llama.cpp uses the Local Server context size instead">API Context<input id="maxContext" type="number" min="1024" max="1048576"></label>
           </div>
           <div id="baseUrlRow" class="field-grid one hidden">
-            <label title="API endpoint URL for custom providers (e.g. https://api.nanogpt.com/v1). Not needed for standard providers — they auto-configure">Base URL<input id="providerBaseUrl" type="text" placeholder="https://api.example.com/v1"></label>
+            <label title="API endpoint URL for custom providers, or the regional Runtime endpoint for AWS Bedrock. Other standard providers auto-configure.">Base URL<input id="providerBaseUrl" type="text" placeholder="https://api.example.com/v1"></label>
           </div>
           <div id="apiKeyEnvRow" class="field-grid one hidden">
             <label title="Environment variable name that holds this provider's API key. Leave empty for standard providers so their default key (e.g. OPENROUTER_API_KEY) is used">API Key Env Var<input id="providerApiKeyEnv" type="text" placeholder="MY_API_KEY"></label>

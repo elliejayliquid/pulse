@@ -422,7 +422,7 @@ def test_config_editor_rejects_unknown_fields():
         assert result["ok"] is False
         assert "Provider Type" in result["error"]
 
-        for provider_type in ("local", "openrouter", "openai", "anthropic", "custom"):
+        for provider_type in ("local", "openrouter", "openai", "anthropic", "bedrock", "custom"):
             result = api.preview_persona_save("demo", {
                 "provider": {"type": provider_type},
             })

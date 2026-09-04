@@ -79,6 +79,7 @@ PROVIDER_KEY_ENV = {
     "openai": "OPENAI_API_KEY",
     "openrouter": "OPENROUTER_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",
+    "bedrock": "AWS_BEARER_TOKEN_BEDROCK",
 }
 
 # Silence noisy HTTP request logs (httpx logs every Telegram poll)

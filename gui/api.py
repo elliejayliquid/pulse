@@ -121,12 +121,14 @@ PROVIDER_KEY_MAP = {
     "openrouter": "OPENROUTER_API_KEY",
     "openai": "OPENAI_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",
+    "bedrock": "AWS_BEARER_TOKEN_BEDROCK",
 }
 
 PROVIDER_KEY_LABELS = {
     "OPENROUTER_API_KEY": "OpenRouter API Key",
     "OPENAI_API_KEY": "OpenAI API Key",
     "ANTHROPIC_API_KEY": "Anthropic API Key",
+    "AWS_BEARER_TOKEN_BEDROCK": "AWS Bedrock API Key",
     "TELEGRAM_BOT_TOKEN": "Telegram Bot Token",
 }
 
@@ -1329,7 +1331,7 @@ class PulseAPI:
         provider_type = provider.get("type", "local")
         api_key_env = provider.get("api_key_env", "") or PROVIDER_KEY_MAP.get(provider_type, "")
         keys = list(PROVIDER_KEY_MAP.values())
-        if provider_type not in PROVIDER_KEY_MAP and provider_type != "local" and api_key_env:
+        if provider_type != "local" and api_key_env:
             keys.append(api_key_env)
         keys.append("TELEGRAM_BOT_TOKEN")
         unique = []
@@ -1398,7 +1400,9 @@ class PulseAPI:
         config = self._merged_config_for(persona)
         root_env = _parse_env(self.root / ".env")
         persona_env = _parse_env(persona_dir / ".env")
-        provider_type = config.get("provider", {}).get("type", "local")
+        provider = config.get("provider", {})
+        provider_type = provider.get("type", "local")
+        api_key_env = provider.get("api_key_env", "")
 
         secrets = []
         for key_name in self._secret_keys_for(persona, config):
@@ -1422,7 +1426,12 @@ class PulseAPI:
                 "source": source,
             })
 
-        return {"ok": True, "provider_type": provider_type, "secrets": secrets}
+        return {
+            "ok": True,
+            "provider_type": provider_type,
+            "api_key_env": api_key_env,
+            "secrets": secrets,
+        }
 
     def reveal_secret(self, persona: str, key_name: str) -> dict:
         if not persona or persona == "__base__":

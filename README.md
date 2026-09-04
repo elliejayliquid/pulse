@@ -16,7 +16,7 @@ Pulse gives your AI companion a life of their own. It runs in the background, le
 - **Legacy conversation archive** — Preview and curate exports from ChatGPT, Claude, Grok, OpenRouter, Markdown, and common JSON shapes in the GUI, then add sanitized chats to persona-local searchable history. Live continuation and background semantic enrichment are still in progress
 - **Journal** — Pinned identity entries (who am I, who is my human, what's our relationship) plus transient reflections as clean markdown with YAML frontmatter
 - **Self-scheduling** — The companion can set their own reminders and recurring tasks ("daily 8:00"), with priority levels (urgent/routine/creative)
-- **Cloud or local** — Use a local GGUF model via llama.cpp, or any OpenAI-compatible API (OpenRouter, OpenAI, etc.)
+- **Cloud or local** — Use a local GGUF model via llama.cpp, OpenAI-compatible APIs, native Anthropic, or AWS Bedrock
 - **Token tracking** — Daily usage logging when using cloud APIs
 - **Dev ticks** — Optional autonomous self-improvement: the companion can review and create their own skills on a git branch, with human approval
 - **Vision** — Optional image understanding via mmproj (model-dependent)
@@ -39,7 +39,7 @@ core/
   engine.py               # Heartbeat loop, message handling, dispatch
   context.py              # Token-budgeted prompt assembly
   llm.py                  # OpenAI-compatible API client (local + cloud)
-  llm_anthropic.py        # Native Anthropic API client (prompt caching, tool_use)
+  llm_anthropic.py        # Native Anthropic/Bedrock client (prompt caching, tool_use)
   llm_openai.py           # Native OpenAI Responses API client (tool_use, vision)
   db.py                   # Per-persona SQLite database (WAL mode)
   usage.py                # Token usage tracking for cloud APIs
@@ -84,7 +84,7 @@ Pulse talks to any OpenAI-compatible API. Locally, it manages [llama.cpp](https:
 
 - **Python 3.11+**
 - **For local models:** [llama.cpp](https://github.com/ggml-org/llama.cpp/releases) + a GGUF model (tested with Qwen 3.5, Mistral, etc.)
-- **For cloud APIs:** An API key from OpenRouter, OpenAI, Anthropic, or any OpenAI-compatible provider
+- **For cloud APIs:** An API key from OpenRouter, OpenAI, Anthropic, AWS Bedrock, or any OpenAI-compatible provider
 
 ### Setup
 
@@ -129,7 +129,28 @@ provider:
   max_context: 32768
 ```
 
-Supported provider types: `local` (default), `openai`, `openrouter`, `anthropic`, `custom` (any OpenAI-compatible endpoint). When using a cloud provider, llama-server is not started — embeddings for memory search still run locally.
+Supported provider types: `local` (default), `openai`, `openrouter`, `anthropic`, `bedrock`, and `custom` (any OpenAI-compatible endpoint). When using a cloud provider, llama-server is not started — embeddings for memory search still run locally.
+
+For AWS Bedrock, use the Runtime endpoint in the same region where the API key
+was created and a supported inference-profile model ID:
+
+```env
+AWS_BEARER_TOKEN_BEDROCK=your-bedrock-api-key
+```
+
+```yaml
+provider:
+  type: "bedrock"
+  api_key_env: "AWS_BEARER_TOKEN_BEDROCK"
+  base_url: "https://bedrock-runtime.us-east-1.amazonaws.com"
+  model: "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+  max_context: 65536
+  cache_ttl: "1h"
+```
+
+`AWS_BEARER_TOKEN_BEDROCK` is AWS's standard environment-variable name. Pulse
+also accepts any valid name through `api_key_env`, which is useful for
+persona-specific keys.
 
 #### Anthropic prompt caching (cost behavior worth knowing)
 

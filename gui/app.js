@@ -4,6 +4,7 @@ const PROVIDER_LABELS = {
   openrouter: "OpenRouter API Key",
   openai: "OpenAI API Key",
   anthropic: "Anthropic API Key",
+  bedrock: "AWS Bedrock API Key",
   custom: "API Key",
 };
 
@@ -11,6 +12,7 @@ const PROVIDER_NAMES = {
   openrouter: "OpenRouter",
   openai: "OpenAI",
   anthropic: "Anthropic",
+  bedrock: "AWS Bedrock",
   custom: "Custom",
 };
 
@@ -18,6 +20,7 @@ const EXPECTED_ENV_VARS = {
   openrouter: "OPENROUTER_API_KEY",
   openai: "OPENAI_API_KEY",
   anthropic: "ANTHROPIC_API_KEY",
+  bedrock: "AWS_BEARER_TOKEN_BEDROCK",
 };
 
 const MEMORY_STATUSES = ["current", "historical", "superseded", "archived"];
@@ -493,7 +496,7 @@ function syncTuningProviderHints() {
   const effortField = el("tuningEffort");
   const showLabel = el("tuningShowReasoning")?.closest("label");
 
-  if (providerType === "anthropic") {
+  if (providerType === "anthropic" || providerType === "bedrock") {
     const hint = "Anthropic thinking summaries are not currently requested or displayed by Pulse. This setting is saved for future support, but Claude API reasoning will not appear yet.";
     if (reasoningLabel) reasoningLabel.title = hint;
     if (effortField) effortField.title = "Saved for future Anthropic thinking support. Pulse currently does not send Anthropic adaptive thinking or effort parameters.";
@@ -563,7 +566,9 @@ function normalizeKeyStatus(status = {}) {
     api_key_env: apiKeyEnv,
     expected_api_key_env: expected,
     api_key_mismatch: apiKeyMismatch,
-    api_key_set: providerKeySet !== undefined
+    api_key_set: !providerChanged && Boolean(apiKeyEnv)
+      ? Boolean(status.api_key_set)
+      : providerKeySet !== undefined
       ? Boolean(providerKeySet)
       : providerChanged && providerType !== "local" && !configuredKeyMatches
         ? false
@@ -2787,9 +2792,10 @@ function secretInputPlaceholder(secret) {
 function selectedSecretKeys(data) {
   const providerType = selectedProviderType({ provider_type: data.provider_type });
   const keys = ["TELEGRAM_BOT_TOKEN"];
-  const expectedKey = EXPECTED_ENV_VARS[providerType];
-  if (expectedKey) {
-    keys.unshift(expectedKey);
+  const configuredKey = text(data.api_key_env).trim();
+  const providerKey = configuredKey || EXPECTED_ENV_VARS[providerType];
+  if (providerKey) {
+    keys.unshift(providerKey);
   } else if (providerType === "custom") {
     const standardKeys = new Set(Object.values(EXPECTED_ENV_VARS).concat("TELEGRAM_BOT_TOKEN"));
     const customSecret = (data.secrets || []).find((secret) => !standardKeys.has(secret.key));
@@ -3463,17 +3469,20 @@ async function saveAvatarEditor() {
 }
 
 function syncBaseUrlVisibility() {
-  const isCustom = el("providerType").value === "custom";
-  el("baseUrlRow").classList.toggle("hidden", !isCustom);
+  const providerType = el("providerType").value;
+  const needsBaseUrl = providerType === "custom" || providerType === "bedrock";
+  el("baseUrlRow").classList.toggle("hidden", !needsBaseUrl);
 }
 
 function syncApiKeyEnvVisibility() {
-  const isCustom = el("providerType").value === "custom";
-  el("apiKeyEnvRow").classList.toggle("hidden", !isCustom);
+  const providerType = el("providerType").value;
+  const supportsOverride = providerType === "custom" || providerType === "bedrock";
+  el("apiKeyEnvRow").classList.toggle("hidden", !supportsOverride);
 }
 
 function syncAnthropicCacheVisibility() {
-  const isAnthropic = el("providerType").value === "anthropic";
+  const providerType = el("providerType").value;
+  const isAnthropic = providerType === "anthropic" || providerType === "bedrock";
   el("anthropicCacheRow").classList.toggle("hidden", !isAnthropic);
 }
 

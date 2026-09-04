@@ -1,8 +1,9 @@
 """
-LLM client — native Anthropic API.
+LLM client — native Anthropic Messages API.
 
 Uses the Anthropic Python SDK directly (not via OpenAI compatibility shim)
-to get native features: prompt caching, proper tool_use format, etc.
+against either Anthropic's API or Amazon Bedrock, while retaining one Messages
+API-shaped interface for prompt caching, proper tool_use format, etc.
 
 Same interface as LLMClient so the engine can swap them transparently.
 """
@@ -10,10 +11,17 @@ Same interface as LLMClient so the engine can swap them transparently.
 import hashlib
 import json
 import logging
+import re
 import time
 from typing import Any, Optional
 
-from anthropic import Anthropic, APIConnectionError, APIStatusError, InternalServerError
+from anthropic import (
+    Anthropic,
+    AnthropicBedrock,
+    APIConnectionError,
+    APIStatusError,
+    InternalServerError,
+)
 
 from core.llm import (
     PulseResponse,
@@ -26,9 +34,25 @@ from core.llm import (
 logger = logging.getLogger(__name__)
 
 CACHE_DIAGNOSTICS_BETA = "cache-diagnosis-2026-04-07"
+NATIVE_TOOL_SEARCH_BETA = "tool-search-tool-2025-10-19"
 NATIVE_TOOL_SEARCH_TYPE = "tool_search_tool_bm25_20251119"
 NATIVE_TOOL_SEARCH_NAME = "tool_search_tool_bm25"
 _MISSING = object()
+_BEDROCK_ENDPOINT_RE = re.compile(
+    r"^https://bedrock-runtime\.([a-z0-9-]+)\.amazonaws\.com/?$",
+    re.IGNORECASE,
+)
+
+
+def _bedrock_region(endpoint: str) -> str:
+    """Extract and validate the AWS region from a Bedrock Runtime endpoint."""
+    match = _BEDROCK_ENDPOINT_RE.fullmatch((endpoint or "").strip())
+    if not match:
+        raise ValueError(
+            "AWS Bedrock base_url must look like "
+            "https://bedrock-runtime.REGION.amazonaws.com"
+        )
+    return match.group(1).lower()
 
 
 def _supports_native_tool_search(model_name: str) -> bool:
@@ -269,7 +293,30 @@ class AnthropicClient:
                  cache_ttl: str = "5m", cache_automatic: bool = False,
                  cache_diagnostics: bool = False,
                  native_tool_search: bool = True):
-        self.client = Anthropic(api_key=api_key)
+        self._provider_type = (provider_type or "anthropic").lower()
+        if self._provider_type == "bedrock":
+            # AnthropicBedrock preserves the Messages API interface Pulse uses
+            # while translating calls to Bedrock's supported InvokeModel API.
+            # Its api_key parameter sends AWS's required bearer authorization.
+            region = _bedrock_region(endpoint)
+            try:
+                self.client = AnthropicBedrock(
+                    api_key=api_key,
+                    aws_region=region,
+                    base_url=endpoint.rstrip("/"),
+                )
+            except TypeError as e:
+                if "api_key" not in str(e):
+                    raise
+                raise RuntimeError(
+                    "AWS Bedrock API keys require anthropic[bedrock]>=0.120.2. "
+                    "Install Pulse's current requirements and try again."
+                ) from e
+        else:
+            # Keep the SDK's canonical base URL. Pulse's historical Anthropic
+            # endpoint includes `/v1`, while the SDK appends `/v1/messages`;
+            # combining them would produce `/v1/v1/messages`.
+            self.client = Anthropic(api_key=api_key)
         self.model_name = model_name
         self.temperature = temperature
         self.max_tokens = max_tokens
@@ -280,7 +327,7 @@ class AnthropicClient:
         self.top_k = top_k
         self._available = None
         self._usage = usage_tracker
-        self._provider_name = "anthropic"
+        self._provider_name = self._provider_type
         self._enable_caching = True  # prompt caching for cost savings
         # Cache TTL: "5m" (default) or "1h". The 1h tier costs 2x to write
         # vs 1.25x for 5m, but saves the rewrite cost across longer gaps.
@@ -362,7 +409,13 @@ class AnthropicClient:
         }
         if tools:
             kwargs["tools"] = tools
-        if self._enable_caching and automatic_cache:
+        # Bedrock supports explicit cache checkpoints but not Anthropic's
+        # top-level automatic cache_control field.
+        if (
+            self._enable_caching
+            and automatic_cache
+            and self._provider_type != "bedrock"
+        ):
             kwargs["cache_control"] = self._cache_control()
         return kwargs
 
@@ -471,7 +524,7 @@ class AnthropicClient:
             return beta_messages.create(
                 **create_kwargs,
                 diagnostics={"previous_message_id": previous_id},
-                betas=[CACHE_DIAGNOSTICS_BETA],
+                betas=[CACHE_DIAGNOSTICS_BETA, *self._request_betas(create_kwargs)],
             )
         except AttributeError as e:
             logger.debug(f"Anthropic typed cache diagnostics unavailable: {e}")
@@ -486,9 +539,12 @@ class AnthropicClient:
             betas = [part.strip() for part in existing_beta.split(",") if part.strip()]
             if CACHE_DIAGNOSTICS_BETA not in betas:
                 betas.append(CACHE_DIAGNOSTICS_BETA)
-            extra_headers["anthropic-beta"] = ",".join(betas)
         else:
-            extra_headers["anthropic-beta"] = CACHE_DIAGNOSTICS_BETA
+            betas = [CACHE_DIAGNOSTICS_BETA]
+        for beta in self._request_betas(create_kwargs):
+            if beta not in betas:
+                betas.append(beta)
+        extra_headers["anthropic-beta"] = ",".join(betas)
 
         extra_body = dict(create_kwargs.pop("extra_body", {}) or {})
         extra_body["diagnostics"] = {"previous_message_id": previous_id}
@@ -499,6 +555,25 @@ class AnthropicClient:
             extra_body=extra_body,
         )
 
+    def _request_betas(self, create_kwargs: dict) -> list[str]:
+        """Return provider-specific beta flags required by this request."""
+        if self._provider_type != "bedrock":
+            return []
+        tools = create_kwargs.get("tools") or []
+        if any(tool.get("type") == NATIVE_TOOL_SEARCH_TYPE for tool in tools):
+            return [NATIVE_TOOL_SEARCH_BETA]
+        return []
+
+    def _create_message_plain(self, create_kwargs: dict):
+        """Create a message with request-required betas but no diagnostics."""
+        betas = self._request_betas(create_kwargs)
+        if betas:
+            return self.client.beta.messages.create(
+                **create_kwargs,
+                betas=betas,
+            )
+        return self.client.messages.create(**create_kwargs)
+
     def _create_message(self, create_kwargs: dict, diagnostics_key: str | None = None):
         """Create a message, optionally adding Anthropic cache diagnostics."""
         if (
@@ -506,7 +581,7 @@ class AnthropicClient:
             or self._diagnostics_disabled
             or not diagnostics_key
         ):
-            return self.client.messages.create(**create_kwargs)
+            return self._create_message_plain(create_kwargs)
 
         previous_id = self._diagnostics_previous_ids.get(diagnostics_key)
         try:
@@ -516,13 +591,13 @@ class AnthropicClient:
                 raise
             self._diagnostics_disabled = True
             logger.warning(f"Anthropic cache diagnostics unsupported by installed SDK; retrying normally: {e}")
-            return self.client.messages.create(**create_kwargs)
+            return self._create_message_plain(create_kwargs)
         except APIStatusError as e:
             if not self._diagnostics_error(e):
                 raise
             self._diagnostics_disabled = True
             logger.warning(f"Anthropic cache diagnostics rejected by API; retrying normally: {e}")
-            return self.client.messages.create(**create_kwargs)
+            return self._create_message_plain(create_kwargs)
 
         response_id = _obj_get(response, "id")
         if response_id:

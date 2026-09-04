@@ -49,16 +49,16 @@ model:
 
 # --- Provider ---
 # Controls where the LLM runs. Default "local" uses llama.cpp (server: section above).
-# Set to "openai", "openrouter", "anthropic", or "custom" to use a cloud API instead.
+# Set to "openai", "openrouter", "anthropic", "bedrock", or "custom" to use a cloud API instead.
 # When using a cloud provider, the server: section is ignored (no llama-server started).
 # Embeddings for memory search always run locally regardless of provider.
 provider:
-  type: "local"                      # "local", "openai", "openrouter", "anthropic", "custom"
+  type: "local"                      # "local", "openai", "openrouter", "anthropic", "bedrock", "custom"
   api_key_env: ""                    # env var name holding the API key (e.g. "OPENROUTER_API_KEY")
-  base_url: ""                       # auto-set per type; override for "custom"
+  base_url: ""                       # auto-set except "custom"/"bedrock"; Bedrock: https://bedrock-runtime.REGION.amazonaws.com
   model: ""                          # API model name (e.g. "anthropic/claude-sonnet-4-20250514")
   max_context: 32768                 # context budget for API calls (controls cost)
-  # Anthropic only: prompt cache TTL. "5m" (default) or "1h".
+  # Anthropic/Bedrock: prompt cache TTL. "5m" (default) or "1h".
   # 1h costs 2x to write vs 1.25x for 5m, but the cache survives longer
   # gaps between calls. Pays off if a written cache is read at least one
   # extra time before expiring — ideal for personas with heartbeats every
@@ -71,7 +71,7 @@ provider:
   # writes on one-shot turns are incremental (new suffix only) and cheap
   # relative to re-billing 50k+ tokens per call.
   cache_automatic: true
-  # Anthropic only: use the provider's cache-preserving deferred tool search
+  # Anthropic/Bedrock: use the provider's cache-preserving deferred tool search
   # on supported Claude models. Other providers keep Pulse's local search_tools.
   native_tool_search: true
   # Anthropic only: beta cache diagnostics. Enable temporarily to log miss
