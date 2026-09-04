@@ -12,9 +12,11 @@ import asyncio
 import base64
 import logging
 from pathlib import Path
+import httpx
 import telegramify_markdown
 from telegram import InputFile, Update, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from telegram.constants import ParseMode
+from telegram.error import TimedOut
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -41,6 +43,37 @@ _VOICE_REVIEW_HINT = "\n\n_Reply to this message to edit_"
 from channels.base import Channel
 
 logger = logging.getLogger(__name__)
+
+
+def _exception_chain(error: BaseException):
+    """Yield an exception and its explicit causes without looping forever."""
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        yield current
+        current = current.__cause__ or current.__context__
+
+
+def _definitely_not_delivered(error: BaseException) -> bool:
+    """Return True only when the transport proves no request reached Telegram."""
+    safe_transport_failures = (
+        httpx.ConnectError,
+        httpx.ConnectTimeout,
+        httpx.PoolTimeout,
+    )
+    return any(isinstance(item, safe_transport_failures) for item in _exception_chain(error))
+
+
+def _delivery_timed_out(error: BaseException) -> bool:
+    """Return True for timeouts where Telegram may already have accepted the send."""
+    timeout_types = (
+        TimedOut,
+        httpx.ReadTimeout,
+        httpx.WriteTimeout,
+        TimeoutError,
+    )
+    return any(isinstance(item, timeout_types) for item in _exception_chain(error))
 
 
 def _voice_duration_seconds(ogg_path: Path) -> int | None:
@@ -298,8 +331,17 @@ class TelegramChannel(Channel):
                     )
                     logger.info(f"Telegram message sent: {message[:50]}...")
                     return sent_msg.message_id
-                except Exception:
-                    if parse_mode:
+                except Exception as e:
+                    if _delivery_timed_out(e) and not _definitely_not_delivered(e):
+                        # A read/write timeout can happen after Telegram accepted
+                        # the message. Sending plain text as a fallback here would
+                        # create a second, identical Telegram message.
+                        logger.warning(
+                            "Telegram message delivery uncertain after timeout; "
+                            "not sending a fallback to avoid a duplicate."
+                        )
+                        return None
+                    if parse_mode and "parse" in str(e).lower():
                         logger.warning("MarkdownV2 send failed, falling back to plain text")
                         sent_msg = await self.app.bot.send_message(
                             chat_id=self.chat_id,
@@ -360,8 +402,9 @@ class TelegramChannel(Channel):
             pass
 
     async def _reply_with_retry(self, message, text: str, retries: int = 3,
-                                reply_markup=None, markdown: bool = False) -> Message | None:
-        """Send a reply with retry on timeout.
+                                reply_markup=None, markdown: bool = False,
+                                retry_delay: float = 3) -> Message | None:
+        """Send a reply, retrying only failures known to precede delivery.
 
         Automatically splits messages that exceed Telegram's 4096-char limit.
         If `reply_markup` is provided, it's attached only to the LAST chunk
@@ -406,14 +449,30 @@ class TelegramChannel(Channel):
                         logger.warning(f"MarkdownV2 parse failed, falling back to plain text: {e}")
                         return await self._reply_with_retry(
                             message, text, retries=retries,
-                            reply_markup=reply_markup
+                            reply_markup=reply_markup,
+                            retry_delay=retry_delay,
                         )
-                    if attempt < retries:
-                        logger.warning(f"Reply attempt {attempt}/{retries} failed ({e}), retrying in 3s...")
-                        await asyncio.sleep(3)
-                    else:
-                        logger.error(f"Reply failed after {retries} attempts: {e}")
+                    # Telegram has no idempotency key for sendMessage. A timeout
+                    # can therefore mean "delivered, but its acknowledgement was
+                    # lost". Retrying that request is what produced duplicate
+                    # replies in practice, so fail closed and leave /resend as an
+                    # explicit recovery action.
+                    if _delivery_timed_out(e) and not _definitely_not_delivered(e):
+                        logger.warning(
+                            "Reply delivery uncertain after timeout; not retrying "
+                            "automatically to avoid a duplicate. Use /resend if it "
+                            "did not arrive."
+                        )
                         return None
+                    if attempt < retries and _definitely_not_delivered(e):
+                        logger.warning(
+                            f"Reply attempt {attempt}/{retries} failed before delivery "
+                            f"({e}), retrying in {retry_delay:g}s..."
+                        )
+                        await asyncio.sleep(retry_delay)
+                        continue
+                    logger.error(f"Reply failed without a safe retry: {e}")
+                    return None
         return last_sent
 
     async def _download_photo_with_retry(self, photo, retries: int = 3) -> bytearray:
