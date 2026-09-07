@@ -52,7 +52,7 @@ const state = {
   avatarModal: null,
   currentCoreAnchor: null,
   coreBaseline: {},
-  memoryBrowse: { view: "active", kind: "fact", page: 0, pageSize: 25, total: 0, hasMore: false, items: [] },
+  memoryBrowse: { view: "active", kind: "fact", scope: "all", page: 0, pageSize: 25, total: 0, hasMore: false, items: [], shared: false },
   memoryDetailId: "",
   memoryBaselines: {},
   memoryUndoStamp: "",
@@ -5927,6 +5927,9 @@ function wireEvents() {
   el("memoryTypeTabs").querySelectorAll("[data-memory-kind]").forEach((button) => {
     button.addEventListener("click", () => { void setMemoryKind(button.dataset.memoryKind); });
   });
+  el("memoryScopeTabs").querySelectorAll("[data-memory-scope]").forEach((button) => {
+    button.addEventListener("click", () => { void setMemoryScope(button.dataset.memoryScope); });
+  });
   el("journalCloseBtn").addEventListener("click", () => { void hideJournalDialog(); });
   el("journalDialog").addEventListener("pointerdown", (event) => {
     journalBackdropPointerDown = event.target === el("journalDialog");
@@ -6428,7 +6431,7 @@ async function openMemoriesDialog() {
     setNotice("Choose a persona first.", "warning", NOTICE_WARNING_MS);
     return;
   }
-  state.memoryBrowse = { view: "active", kind: "fact", page: 0, pageSize: 25, total: 0, hasMore: false, items: [] };
+  state.memoryBrowse = { view: "active", kind: "fact", scope: "all", page: 0, pageSize: 25, total: 0, hasMore: false, items: [], shared: false };
   state.memoryDetailId = "";
   state.memoryBaselines = {};
   state.memoryUndoStamp = "";
@@ -6437,6 +6440,7 @@ async function openMemoriesDialog() {
   document.body.classList.add("modal-open");
   syncMemoryTabs();
   syncMemoryTypeTabs();
+  syncMemoryScopeTabs();
   showMemoryList();
   await loadMemoryPage(1);
 }
@@ -6446,12 +6450,13 @@ async function openAddMemoryDialog() {
     setNotice("Choose a persona first.", "warning", NOTICE_WARNING_MS);
     return;
   }
-  state.memoryBrowse = { view: "active", kind: "fact", page: 0, pageSize: 25, total: 0, hasMore: false, items: [] };
+  state.memoryBrowse = { view: "active", kind: "fact", scope: "all", page: 0, pageSize: 25, total: 0, hasMore: false, items: [], shared: false };
   state.memoryUndoStamp = "";
   el("memoriesDialog").classList.remove("hidden");
   document.body.classList.add("modal-open");
   syncMemoryTabs();
   syncMemoryTypeTabs();
+  syncMemoryScopeTabs();
   showAddMemoryForm();
 }
 
@@ -6482,6 +6487,15 @@ async function setMemoryKind(kind) {
   await loadMemoryPage(1);
 }
 
+async function setMemoryScope(scope) {
+  if (!scope || scope === state.memoryBrowse.scope) return;
+  if (!(await confirmDiscardMemoryEdits())) return;
+  state.memoryBrowse = { ...state.memoryBrowse, scope, page: 0, total: 0, hasMore: false, items: [] };
+  syncMemoryScopeTabs();
+  showMemoryList();
+  await loadMemoryPage(1);
+}
+
 function syncMemoryTabs() {
   el("memoryViewTabs").querySelectorAll("[data-memory-view]").forEach((button) => {
     button.classList.toggle("active", button.dataset.memoryView === state.memoryBrowse.view);
@@ -6494,11 +6508,22 @@ function syncMemoryTypeTabs() {
   });
 }
 
+function syncMemoryScopeTabs() {
+  const tabs = el("memoryScopeTabs");
+  tabs.classList.toggle("hidden", !state.memoryBrowse.shared);
+  tabs.querySelectorAll("[data-memory-scope]").forEach((button) => {
+    const active = button.dataset.memoryScope === state.memoryBrowse.scope;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", String(active));
+  });
+}
+
 function showMemoryList() {
   state.memoryDetailId = "";
   state.memoryBaselines = {};
   el("memoryViewTabs").classList.remove("hidden");
   el("memoryTypeTabs").classList.remove("hidden");
+  syncMemoryScopeTabs();
   el("memoryDetail").classList.add("hidden");
   el("memoryDetail").innerHTML = "";
   el("memoriesBody").classList.remove("hidden");
@@ -6510,6 +6535,7 @@ function showAddMemoryForm() {
   state.memoryBaselines = { new: memoryBaseline(defaultMemoryDraft()) };
   el("memoryViewTabs").classList.add("hidden");
   el("memoryTypeTabs").classList.add("hidden");
+  el("memoryScopeTabs").classList.add("hidden");
   el("memoryDetail").classList.remove("hidden");
   el("memoriesBody").classList.add("hidden");
   el("memoryLoadMoreBtn").classList.add("hidden");
@@ -6539,7 +6565,8 @@ async function loadMemoryPage(page) {
     state.memoryBrowse.view,
     state.memoryBrowse.kind,
     page,
-    state.memoryBrowse.pageSize
+    state.memoryBrowse.pageSize,
+    state.memoryBrowse.scope
   );
   if (!result.ok) {
     el("memoriesSubtitle").textContent = "Could not read memories.";
@@ -6550,9 +6577,11 @@ async function loadMemoryPage(page) {
   state.memoryBrowse.total = result.total || 0;
   state.memoryBrowse.hasMore = Boolean(result.has_more);
   state.memoryBrowse.shared = Boolean(result.shared);
+  if (!state.memoryBrowse.shared) state.memoryBrowse.scope = "all";
   state.memoryBrowse.items = page === 1
     ? (result.items || [])
     : state.memoryBrowse.items.concat(result.items || []);
+  syncMemoryScopeTabs();
   renderMemoryList(result.db_path || "");
 }
 
@@ -6560,7 +6589,8 @@ function renderMemoryList(dbPath = "") {
   const browse = state.memoryBrowse;
   const viewLabel = browse.view === "archived" ? "Archived" : "Active";
   const kindLabel = humanizeMemoryKind(browse.kind);
-  el("memoriesSubtitle").textContent = `${viewLabel} ${kindLabel.toLowerCase()} / showing ${browse.items.length} of ${browse.total}${browse.shared ? " / shared pool" : ""}`;
+  const scopeLabel = browse.shared && browse.scope === "personal" ? ` / ${memoryResidentLabel(state.current?.name)} only` : "";
+  el("memoriesSubtitle").textContent = `${viewLabel} ${kindLabel.toLowerCase()} / showing ${browse.items.length} of ${browse.total}${browse.shared ? " / shared pool" : ""}${scopeLabel}`;
   if (!browse.items.length) {
     el("memoriesBody").innerHTML = `
       <div class="memory-empty">
@@ -6586,6 +6616,7 @@ function renderMemoryCard(memory) {
   const history = memory.has_history
     ? `<span class="memory-history-pill">${escapeHtml(memory.version_count)} versions</span>`
     : "";
+  const resident = renderMemoryResidentBadge(memory);
   const badges = [
     memory.type,
     status,
@@ -6598,6 +6629,7 @@ function renderMemoryCard(memory) {
       <div class="memory-card-head">
         <strong>#${escapeHtml(memory.id)}</strong>
         <span>${escapeHtml(memory.date_display || "unknown")} / ${escapeHtml(memory.age_label || "unknown age")}</span>
+        ${resident}
         ${history}
       </div>
       <p>${escapeHtml(memory.preview || memory.text || "")}</p>
@@ -6651,6 +6683,7 @@ function renderMemoryVersion(memory, current) {
       <div class="memory-version-head">
         <strong>#${escapeHtml(memory.id)}${current ? " / Current" : ""}</strong>
         <span>${escapeHtml(memory.date_display || "unknown")} / ${escapeHtml(memory.age_label || "unknown age")}</span>
+        ${renderMemoryResidentBadge(memory)}
       </div>
       ${sourceNote}
       <p>${escapeHtml(memory.text || "")}</p>
@@ -6676,6 +6709,7 @@ function renderMemoryEditor(memory, current, sourceNote = "", mode = "edit") {
       <div class="memory-version-head">
         <strong>${title}</strong>
         <span>${meta}</span>
+        ${mode === "add" ? "" : renderMemoryResidentBadge(memory)}
       </div>
       ${sourceNote}
       <div id="memoryEditor-${escapeHtml(editorId)}" class="memory-editor-grid" data-memory-editor="${escapeHtml(editorId)}">
@@ -6986,6 +7020,18 @@ function humanizeMemoryBadge(value) {
   return text(value)
     .replace(/_/g, " ")
     .replace(/\b\w/g, (ch) => ch.toUpperCase());
+}
+
+function memoryResidentLabel(residentId) {
+  const normalized = text(residentId).trim().toLowerCase();
+  const persona = state.personas.find((item) => text(item?.name).trim().toLowerCase() === normalized);
+  return persona?.display_name || humanizeMemoryBadge(normalized);
+}
+
+function renderMemoryResidentBadge(memory) {
+  if (!state.memoryBrowse.shared || !memory?.resident_id) return "";
+  const label = memoryResidentLabel(memory.resident_id);
+  return `<span class="memory-resident-pill" title="Attributed to ${escapeHtml(label)}">${escapeHtml(label)}</span>`;
 }
 
 function humanizeMemoryKind(kind) {

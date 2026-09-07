@@ -109,7 +109,8 @@ def embedding_to_blob(vec) -> bytes | None:
 
 
 def save_memory(db, text: str, tags: str = "", importance: int = 5,
-                memory_type: str = "fact", model=None, date: str = "") -> int:
+                memory_type: str = "fact", model=None, date: str = "",
+                resident_id: str | None = None) -> int:
     """Save a single memory to the database. Returns the memory ID."""
     tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
     embedding_vec = model.encode(text.strip()) if model else None
@@ -119,11 +120,12 @@ def save_memory(db, text: str, tags: str = "", importance: int = 5,
         text=text.strip(), tags=tag_list, type=memory_type,
         importance=importance, embedding=embedding_blob,
         date=date or None,
+        resident_id=resident_id,
     )
     return mem_id
 
 
-def interactive_mode(db, model, date: str = ""):
+def interactive_mode(db, model, date: str = "", resident_id: str | None = None):
     """Loop for entering multiple memories."""
     print("\n=== Memory Builder ===")
     print("Type a memory and press Enter to save it.")
@@ -148,7 +150,10 @@ def interactive_mode(db, model, date: str = ""):
         mem_tags = parts[1] if len(parts) > 1 else ""
         mem_date = parts[2] if len(parts) > 2 else date
 
-        mem_id = save_memory(db, text, tags=mem_tags, model=model, date=mem_date)
+        mem_id = save_memory(
+            db, text, tags=mem_tags, model=model, date=mem_date,
+            resident_id=resident_id,
+        )
         count += 1
         emb_status = "with embedding" if model else "no embedding"
         print(f"  Saved: ID {mem_id} ({emb_status})")
@@ -213,10 +218,11 @@ def main():
         print("not available (memories will save without embeddings)")
 
     if args.interactive or not args.text:
-        interactive_mode(db, model, date=args.date)
+        interactive_mode(db, model, date=args.date, resident_id=args.persona)
     else:
         mem_id = save_memory(db, args.text, tags=args.tags, importance=args.importance,
-                             memory_type=args.type, model=model, date=args.date)
+                             memory_type=args.type, model=model, date=args.date,
+                             resident_id=args.persona)
         emb_status = "with embedding" if model else "no embedding"
         print(f"Saved: ID {mem_id} ({emb_status})")
 

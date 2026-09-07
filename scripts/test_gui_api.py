@@ -1741,6 +1741,101 @@ def test_gui_api_archive_migrates_standalone_legacy_db_once():
             persona_db.close()
 
 
+def test_memory_legacy_search_merges_raw_hits_and_summary_drilldown():
+    """Raw lexical hits must survive useful-but-imprecise summary matches."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        db_path = root / "demo.db"
+
+        from core.db import PulseDatabase
+        from core.legacy_archive import ensure_legacy_archive_tables
+        from skills.memory import MemorySkill
+
+        persona_db = PulseDatabase(db_path)
+        try:
+            ensure_legacy_archive_tables(persona_db.conn)
+            session_id = "legacy-pisloth-test"
+            persona_db.conn.execute(
+                "INSERT INTO legacy_sessions "
+                "(id, source, source_conversation_id, title, created_at, "
+                "message_count) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    session_id,
+                    "test",
+                    "source-session",
+                    "PiSloth setup",
+                    datetime.now().isoformat(),
+                    100,
+                ),
+            )
+            first_id = persona_db.conn.execute(
+                "INSERT INTO legacy_messages "
+                "(session_id, position, source_message_id, role, content, timestamp) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    session_id, 0, "2500", "user",
+                    "A device credential rotation discussion without the value.",
+                    "2025-12-07 09:40",
+                ),
+            ).lastrowid
+            target_id = persona_db.conn.execute(
+                "INSERT INTO legacy_messages "
+                "(session_id, position, source_message_id, role, content, timestamp) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    session_id, 1, "2584", "user",
+                    ("Long unrelated prelude. " * 10)
+                    + "The PiSloth passphrase is test-only-value.",
+                    "2025-12-07 09:49",
+                ),
+            ).lastrowid
+            persona_db.conn.executemany(
+                "INSERT INTO legacy_summaries "
+                "(session_id, summary_text, chunk_index, first_msg_id, last_msg_id) "
+                "VALUES (?, ?, ?, ?, ?)",
+                [
+                    (
+                        session_id,
+                        "PiSloth password rotation discussion.",
+                        0,
+                        first_id,
+                        first_id,
+                    ),
+                    (
+                        session_id,
+                        "PiSloth password installation details.",
+                        1,
+                        target_id,
+                        target_id,
+                    ),
+                ],
+            )
+            persona_db.conn.commit()
+
+            memory = MemorySkill({
+                "_db": persona_db,
+                "_shared_db": persona_db,
+                "_persona_name": "demo",
+                "_user_name": "human",
+                "paths": {"memories": str(root / "memories")},
+            })
+            with patch("skills.memory._get_embedding_model", return_value=None):
+                result = memory.execute(
+                    "search_legacy",
+                    {"query": "PiSloth pass", "limit": 5},
+                )
+
+            assert "Exact or partial message matches:" in result
+            assert "Related conversation summaries:" in result
+            assert "test-only-value" in result
+            assert f"Archive ID:{target_id} | Source ID:2584" in result
+            assert result.index("Exact or partial") < result.index("Related conversation")
+            assert f"get_legacy_context(message_id={target_id})" in result
+            assert f"get_legacy_context(message_id={first_id})" not in result
+        finally:
+            persona_db.close()
+
+
 def test_gui_api_standard_provider_env_fallback():
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -2939,6 +3034,7 @@ if __name__ == "__main__":
     test_gui_api_stage_import_quarantines_and_resumes()
     test_gui_api_enrichment_plan_pause_resume_and_recovery()
     test_gui_api_archive_migrates_standalone_legacy_db_once()
+    test_memory_legacy_search_merges_raw_hits_and_summary_drilldown()
     test_gui_api_standard_provider_env_fallback()
     test_gui_api_bedrock_provider_uses_explicit_key_override()
     test_gui_api_get_lantern_read_only()

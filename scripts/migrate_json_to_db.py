@@ -178,6 +178,7 @@ def migrate_memories(db: PulseDatabase, data_dir: Path) -> int:
             embedding=embedding_blob,
             supersedes=supersedes_new,
             date=data.get("date"),
+            resident_id=data.get("resident_id"),
         )
 
         old_to_new[str(old_id)] = new_id
@@ -541,6 +542,7 @@ def migrate_memories_flat(db: PulseDatabase, data_dir: Path) -> int:
             embedding=embedding_blob,
             supersedes=supersedes_new,
             date=data.get("date"),
+            resident_id=data.get("resident_id"),
         )
 
         old_to_new[str(old_id)] = new_id

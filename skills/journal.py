@@ -745,6 +745,7 @@ class JournalSkill(BaseSkill):
                 importance=5,
                 embedding=embedding_blob,
                 date=date,
+                resident_id=self._author_name,
             )
             logger.info(f"Companion memory upserted in DB (ID: {mem_id}) -> {journal_file}")
             return
@@ -758,6 +759,7 @@ class JournalSkill(BaseSkill):
             "importance": 5, "retrieval_count": 0, "last_accessed": None,
             "date": date, "embedding": embedding,
             "journal_file": journal_file,
+            "resident_id": str(self._author_name).strip().lower() or None,
         }
         mem_file = self.memory_dir / f"memory_{mem_id}.json"
         try:
@@ -1514,6 +1516,7 @@ class JournalSkill(BaseSkill):
                 importance=5,
                 embedding=embedding_blob,
                 date=date,
+                resident_id=self._author_name,
             )
             return
 

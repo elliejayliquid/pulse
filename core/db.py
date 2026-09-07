@@ -19,6 +19,12 @@ MEMORY_CONFIDENCES = {"high", "medium", "low"}
 MEMORY_SOURCES = {"user_defined", "model_extracted", "imported", "system"}
 
 
+def normalize_resident_id(value: object) -> Optional[str]:
+    """Return the stable, case-insensitive identifier stored on memory rows."""
+    normalized = str(value or "").strip().lower()
+    return normalized or None
+
+
 class PulseDatabase:
     """SQLite database for a single Pulse persona."""
 
@@ -46,6 +52,7 @@ class PulseDatabase:
             "ALTER TABLE memories ADD COLUMN last_confirmed TEXT",
             "ALTER TABLE memories ADD COLUMN time_sensitive INTEGER",
             "ALTER TABLE memories ADD COLUMN valid_until TEXT",
+            "ALTER TABLE memories ADD COLUMN resident_id TEXT",
             "ALTER TABLE journal_entries ADD COLUMN search_summary TEXT",
             "ALTER TABLE journal_entries ADD COLUMN summary_needs_review INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE usage ADD COLUMN cache_read_input_tokens INTEGER NOT NULL DEFAULT 0",
@@ -241,31 +248,33 @@ class PulseDatabase:
                     source: Optional[str] = "model_extracted",
                     last_confirmed: Optional[str] = None,
                     time_sensitive: Optional[bool] = None,
-                    valid_until: Optional[str] = None) -> int:
+                    valid_until: Optional[str] = None,
+                    resident_id: Optional[str] = None) -> int:
         """Insert a memory and return its row id."""
         tags_json = json.dumps(tags or [])
         status, confidence, source, time_sensitive_int = self._clean_memory_metadata(
             status, confidence, source, time_sensitive
         )
+        resident_id = normalize_resident_id(resident_id)
         if date:
             cur = self.conn.execute(
                 "INSERT INTO memories (text, tags, type, importance, embedding, "
                 "supersedes, journal_file, date, status, confidence, source, "
-                "last_confirmed, time_sensitive, valid_until) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "last_confirmed, time_sensitive, valid_until, resident_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (text, tags_json, type, importance, embedding,
                  supersedes, journal_file, date, status, confidence, source,
-                 last_confirmed, time_sensitive_int, valid_until)
+                 last_confirmed, time_sensitive_int, valid_until, resident_id)
             )
         else:
             cur = self.conn.execute(
                 "INSERT INTO memories (text, tags, type, importance, embedding, "
                 "supersedes, journal_file, status, confidence, source, "
-                "last_confirmed, time_sensitive, valid_until) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "last_confirmed, time_sensitive, valid_until, resident_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (text, tags_json, type, importance, embedding,
                  supersedes, journal_file, status, confidence, source,
-                 last_confirmed, time_sensitive_int, valid_until)
+                 last_confirmed, time_sensitive_int, valid_until, resident_id)
             )
         self.conn.commit()
         return cur.lastrowid
@@ -274,9 +283,11 @@ class PulseDatabase:
                               tags: list[str] | None = None,
                               importance: int = 5,
                               embedding: Optional[bytes] = None,
-                              date: Optional[str] = None) -> int:
+                              date: Optional[str] = None,
+                              resident_id: Optional[str] = None) -> int:
         """Insert or update the searchable memory mirror for a journal entry."""
         tags_json = json.dumps(tags or [])
+        resident_id = normalize_resident_id(resident_id)
         row = self.conn.execute(
             "SELECT id FROM memories WHERE type = 'journal' AND journal_file = ? "
             "ORDER BY id ASC LIMIT 1",
@@ -287,7 +298,8 @@ class PulseDatabase:
             self.conn.execute(
                 "UPDATE memories SET text = ?, tags = ?, type = 'journal', "
                 "importance = ?, embedding = ?, journal_file = ?, date = ?, "
-                "status = ?, confidence = ?, source = ? WHERE id = ?",
+                "status = ?, confidence = ?, source = ?, "
+                "resident_id = COALESCE(resident_id, ?) WHERE id = ?",
                 (
                     text,
                     tags_json,
@@ -298,6 +310,7 @@ class PulseDatabase:
                     "current",
                     "medium",
                     "model_extracted",
+                    resident_id,
                     memory_id,
                 ),
             )
@@ -314,6 +327,7 @@ class PulseDatabase:
             status="current",
             confidence="medium",
             source="model_extracted",
+            resident_id=resident_id,
         )
 
     def get_memory(self, memory_id: int) -> Optional[dict]:
@@ -1027,6 +1041,7 @@ CREATE TABLE IF NOT EXISTS memories (
     last_confirmed  TEXT,
     time_sensitive  INTEGER,
     valid_until     TEXT,
+    resident_id     TEXT,
     embedding       BLOB
 );
 CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(type, date DESC);

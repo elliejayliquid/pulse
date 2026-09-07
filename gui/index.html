@@ -555,11 +555,17 @@
           <button type="button" data-memory-view="archived">Archived</button>
         </div>
       </div>
-      <div id="memoryTypeTabs" class="memory-type-tabs" role="tablist" aria-label="Memory type">
-        <button class="active" type="button" data-memory-kind="fact">Facts</button>
-        <button type="button" data-memory-kind="journal">Journal Index</button>
-        <button type="button" data-memory-kind="session_log">Chat Summaries</button>
-        <button type="button" data-memory-kind="all">All</button>
+      <div class="memory-filter-row">
+        <div id="memoryTypeTabs" class="memory-type-tabs" role="tablist" aria-label="Memory type">
+          <button class="active" type="button" data-memory-kind="fact">Facts</button>
+          <button type="button" data-memory-kind="journal">Journal Index</button>
+          <button type="button" data-memory-kind="session_log">Chat Summaries</button>
+          <button type="button" data-memory-kind="all">All</button>
+        </div>
+        <div id="memoryScopeTabs" class="memory-scope-tabs hidden" role="tablist" aria-label="Memory owner">
+          <button class="active" type="button" data-memory-scope="all">All residents</button>
+          <button type="button" data-memory-scope="personal">Personal</button>
+        </div>
       </div>
       <div id="memoryNotice" class="notice-pill">Select a memory to review or edit. Journal index memories are edited from Journal.</div>
       <div id="memoryDetail" class="memory-detail hidden"></div>

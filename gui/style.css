@@ -3705,11 +3705,29 @@ textarea {
   display: flex;
   gap: 6px;
   flex-wrap: wrap;
+}
+
+.memory-filter-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
   margin: 2px 0 14px;
 }
 
+.memory-scope-tabs {
+  display: inline-flex;
+  flex: 0 0 auto;
+  padding: 3px;
+  border: 1px solid rgba(var(--accent-rgb), 0.18);
+  border-radius: 9px;
+  background: rgba(var(--accent-rgb), 0.04);
+}
+
 .memory-view-tabs button,
-.memory-type-tabs button {
+.memory-type-tabs button,
+.memory-scope-tabs button {
   min-width: 82px;
   padding: 7px 10px;
   border: 1px solid transparent;
@@ -3726,15 +3744,23 @@ textarea {
   background: var(--surface-raised);
 }
 
+.memory-scope-tabs button {
+  min-width: 0;
+  padding: 6px 9px;
+  font-size: 10px;
+}
+
 .memory-view-tabs button:hover,
-.memory-type-tabs button:hover {
+.memory-type-tabs button:hover,
+.memory-scope-tabs button:hover {
   color: var(--text-primary);
   border-color: rgba(var(--accent-rgb), 0.28);
   background: #222228;
 }
 
 .memory-view-tabs button.active,
-.memory-type-tabs button.active {
+.memory-type-tabs button.active,
+.memory-scope-tabs button.active {
   background: var(--accent-dim);
   color: var(--accent-hover);
   border-color: rgba(var(--accent-rgb), 0.28);
@@ -3814,6 +3840,15 @@ textarea {
   border-radius: 999px;
   background: rgba(var(--accent-rgb), 0.07);
   color: var(--accent-hover) !important;
+  font: 700 10px/1 var(--body) !important;
+}
+
+.memory-resident-pill {
+  padding: 3px 7px;
+  border: 1px solid rgba(129, 140, 248, 0.25);
+  border-radius: 999px;
+  background: rgba(129, 140, 248, 0.08);
+  color: #c7d2fe !important;
   font: 700 10px/1 var(--body) !important;
 }
 
@@ -4528,8 +4563,14 @@ textarea {
   }
 
   .memory-view-tabs button,
-  .memory-type-tabs button {
+  .memory-type-tabs button,
+  .memory-scope-tabs button {
     flex: 1;
+  }
+
+  .memory-filter-row,
+  .memory-scope-tabs {
+    width: 100%;
   }
 
   .slider-row {

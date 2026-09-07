@@ -56,7 +56,7 @@ from gui.import_staging import (
     update_curation,
 )
 from gui.openrouter_import import parse_openrouter_chat
-from core.db import PulseDatabase
+from core.db import PulseDatabase, normalize_resident_id
 from core.scheduler import (
     ScheduleManager,
     describe_cron,
@@ -2337,7 +2337,7 @@ class PulseAPI:
 
     def list_memories(self, persona: str, view: str = "active",
                       kind: str = "fact", page: int = 1,
-                      page_size: int = 25) -> dict:
+                      page_size: int = 25, scope: str = "all") -> dict:
         if not persona or persona == "__base__":
             return {"ok": False, "error": "Choose a persona first."}
         persona_dir = self.personas_dir / persona
@@ -2351,28 +2351,33 @@ class PulseAPI:
             kind = "fact"
         if kind not in ("all", "fact", "journal", "session_log"):
             return {"ok": False, "error": "Memory type must be all, fact, journal, or session_log."}
+        if scope not in ("all", "personal"):
+            return {"ok": False, "error": "Memory owner scope must be all or personal."}
 
         db_path = self._memory_journal_db_path(persona)
         page = max(1, int(page or 1))
         page_size = max(5, min(int(page_size or 25), 100))
         if not db_path.exists():
-            return self._empty_memory_page(persona, view, kind, page, page_size, db_path)
+            return self._empty_memory_page(persona, view, kind, page, page_size, db_path, scope)
 
         try:
             with closing(_connect_sqlite(db_path)) as conn:
                 conn.row_factory = sqlite3.Row
                 columns = self._table_columns(conn, "memories")
                 if not columns:
-                    return self._empty_memory_page(persona, view, kind, page, page_size, db_path)
+                    return self._empty_memory_page(persona, view, kind, page, page_size, db_path, scope)
 
                 select_sql = self._memory_select_sql(columns)
-                where = self._memory_view_where(view, kind, columns)
-                total = conn.execute(f"SELECT COUNT(*) FROM memories {where}").fetchone()[0]
+                resident_id = normalize_resident_id(persona) if scope == "personal" else None
+                where, where_params = self._memory_view_where(view, kind, columns, resident_id)
+                total = conn.execute(
+                    f"SELECT COUNT(*) FROM memories {where}", where_params
+                ).fetchone()[0]
                 offset = (page - 1) * page_size
                 rows = conn.execute(
                     f"SELECT {select_sql} FROM memories {where} "
                     "ORDER BY date DESC, id DESC LIMIT ? OFFSET ?",
-                    (page_size, offset),
+                    (*where_params, page_size, offset),
                 ).fetchall()
                 all_rows = conn.execute(
                     f"SELECT {select_sql} FROM memories ORDER BY date DESC, id DESC"
@@ -2387,6 +2392,7 @@ class PulseAPI:
             "persona": persona,
             "view": view,
             "kind": kind,
+            "scope": scope,
             "page": page,
             "page_size": page_size,
             "total": total,
@@ -2478,8 +2484,8 @@ class PulseAPI:
                         "INSERT INTO memories "
                         "(text, tags, type, importance, embedding, supersedes, "
                         "journal_file, date, status, confidence, source, "
-                        "last_confirmed, time_sensitive, valid_until) "
-                        "VALUES (?, ?, 'fact', ?, NULL, NULL, NULL, ?, ?, ?, ?, NULL, ?, ?)",
+                        "last_confirmed, time_sensitive, valid_until, resident_id) "
+                        "VALUES (?, ?, 'fact', ?, NULL, NULL, NULL, ?, ?, ?, ?, NULL, ?, ?, ?)",
                         (
                             cleaned["text"],
                             json.dumps(cleaned["tags"], ensure_ascii=False),
@@ -2490,6 +2496,7 @@ class PulseAPI:
                             cleaned["source"],
                             cleaned["time_sensitive"],
                             cleaned["valid_until"],
+                            normalize_resident_id(persona),
                         ),
                     )
                     memory_id = int(cur.lastrowid)
@@ -2761,6 +2768,7 @@ class PulseAPI:
         try:
             with closing(_connect_sqlite(db_path)) as conn:
                 conn.row_factory = sqlite3.Row
+                self._ensure_memories_table(conn)
                 entry_row = conn.execute(
                     "SELECT * FROM journal_entries WHERE id = ?",
                     (entry_id,),
@@ -3751,6 +3759,7 @@ class PulseAPI:
             "tags": self._decode_tags(entry.get("tags")),
         })
         now = entry.get("date") or datetime.now(timezone.utc).isoformat()
+        resident_id = normalize_resident_id(entry.get("author"))
         row = conn.execute(
             "SELECT id FROM memories WHERE type = 'journal' AND journal_file = ? "
             "ORDER BY id ASC LIMIT 1",
@@ -3779,8 +3788,8 @@ class PulseAPI:
         conn.execute(
             "INSERT INTO memories "
             "(text, tags, type, importance, embedding, journal_file, date, "
-            "status, confidence, source) "
-            "VALUES (?, ?, 'journal', ?, ?, ?, ?, ?, ?, ?)",
+            "status, confidence, source, resident_id) "
+            "VALUES (?, ?, 'journal', ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 display_text,
                 json.dumps(tags, ensure_ascii=False),
@@ -3791,6 +3800,7 @@ class PulseAPI:
                 "current",
                 "medium",
                 "model_extracted",
+                resident_id,
             ),
         )
 
@@ -3864,6 +3874,7 @@ class PulseAPI:
                 last_confirmed  TEXT,
                 time_sensitive  INTEGER,
                 valid_until     TEXT,
+                resident_id     TEXT,
                 embedding       BLOB
             );
             CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(type, date DESC);
@@ -3877,6 +3888,7 @@ class PulseAPI:
             "ALTER TABLE memories ADD COLUMN last_confirmed TEXT",
             "ALTER TABLE memories ADD COLUMN time_sensitive INTEGER",
             "ALTER TABLE memories ADD COLUMN valid_until TEXT",
+            "ALTER TABLE memories ADD COLUMN resident_id TEXT",
         ]:
             try:
                 conn.execute(stmt)
@@ -4444,12 +4456,13 @@ class PulseAPI:
         return cur.rowcount
 
     def _empty_memory_page(self, persona: str, view: str, kind: str, page: int,
-                           page_size: int, db_path: Path) -> dict:
+                           page_size: int, db_path: Path, scope: str = "all") -> dict:
         return {
             "ok": True,
             "persona": persona,
             "view": view,
             "kind": kind,
+            "scope": scope,
             "page": page,
             "page_size": page_size,
             "total": 0,
@@ -4487,7 +4500,7 @@ class PulseAPI:
             "id", "text", "tags", "type", "importance", "retrieval_count",
             "last_accessed", "supersedes", "journal_file", "date",
         ]
-        optional = ["status", "confidence", "source", "last_confirmed", "time_sensitive", "valid_until"]
+        optional = ["status", "confidence", "source", "last_confirmed", "time_sensitive", "valid_until", "resident_id"]
         parts = [name if name in columns else f"NULL AS {name}" for name in required + optional]
         return ", ".join(parts)
 
@@ -4505,18 +4518,20 @@ class PulseAPI:
         parts = [name if name in columns else f"NULL AS {name}" for name in fields]
         return ", ".join(parts)
 
-    def _memory_view_where(self, view: str, kind: str, columns: set[str]) -> str:
+    def _memory_view_where(self, view: str, kind: str, columns: set[str],
+                           resident_id: str | None = None) -> tuple[str, tuple]:
         filters = []
+        params: list[Any] = []
         if view == "archived":
             if "status" not in columns:
-                return "WHERE 0"
+                return "WHERE 0", ()
             filters.append("status = 'archived'")
         elif "status" in columns:
             filters.append("(status IS NULL OR status != 'archived')")
 
         if kind != "all":
             if "type" not in columns:
-                return "WHERE 0"
+                return "WHERE 0", ()
             if kind == "fact":
                 # "Facts" = every real memory. Imported/MCP memories use richer
                 # types (personal, milestone, achievement, ...); only journal
@@ -4525,12 +4540,18 @@ class PulseAPI:
             else:
                 filters.append(f"type = '{kind}'")
 
+        if resident_id:
+            if "resident_id" not in columns:
+                return "WHERE 0", ()
+            filters.append("LOWER(TRIM(resident_id)) = ?")
+            params.append(resident_id)
+
         if "supersedes" in columns:
             filters.append(
                 "id NOT IN "
                 "(SELECT supersedes FROM memories WHERE supersedes IS NOT NULL)"
             )
-        return f"WHERE {' AND '.join(filters)}" if filters else ""
+        return (f"WHERE {' AND '.join(filters)}" if filters else ""), tuple(params)
 
     def _journal_where(self, view: str, entry_type: str,
                        columns: set[str]) -> tuple[str, tuple]:
@@ -4764,6 +4785,7 @@ class PulseAPI:
             "status": row.get("status") or "legacy",
             "confidence": row.get("confidence") or "",
             "source": row.get("source") or "",
+            "resident_id": normalize_resident_id(row.get("resident_id")),
             "journal_file": row.get("journal_file") or "",
             "detail_source": row.get("detail_source") or "",
             "retrieval_count": row.get("retrieval_count"),

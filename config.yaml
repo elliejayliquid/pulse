@@ -133,6 +133,10 @@ context:
     # Set recency_weight: 0 to restore pure cosine + importance ordering.
     recency_weight: 0.02
     recency_tau_days: 180
+    # Small additive boost for memories belonging to the active resident.
+    # The semantic threshold is checked first, so this cannot revive an
+    # unrelated memory; other residents' and unattributed memories still compete.
+    resident_affinity_weight: 0.02
   inject_skills:
     - lantern
 

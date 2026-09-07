@@ -11,6 +11,7 @@ When embeddings aren't available, search falls back to keyword matching.
 
 import json
 import logging
+import re
 import sqlite3
 from contextlib import closing
 from datetime import datetime
@@ -20,9 +21,17 @@ import numpy as np
 
 from skills.base import BaseSkill
 from core.context import _get_embedding_model
+from core.db import normalize_resident_id
 from core.journal_mirror import journal_memory_embedded_text
 
 logger = logging.getLogger(__name__)
+
+
+_LEGACY_SEARCH_STOP_WORDS = {
+    "the", "a", "an", "is", "in", "to", "of", "and", "or", "it",
+    "was", "for", "on", "with", "that", "this", "my", "we", "i",
+    "about", "how", "what", "when", "where", "do", "did", "does",
+}
 
 
 def _embedding_to_blob(vec) -> bytes | None:
@@ -53,6 +62,7 @@ class MemorySkill(BaseSkill):
         # Shared DB for memories/journals (Claude personas share); persona DB for conversations
         self._db = config.get("_shared_db") or config.get("_db")
         self._persona_db = config.get("_db")
+        self._resident_id = normalize_resident_id(config.get("_persona_name"))
         # Store config for role labels and other skill settings.
         self._config = config
         # JSON fallback path
@@ -298,7 +308,7 @@ class MemorySkill(BaseSkill):
                             "Search the companion's conversation archive for specific "
                             "topics or keywords. Use this when you need to find something from the "
                             "original chat history — things discussed before joining Pulse. "
-                            "Utilizes RAG for semantic search."
+                            "Combines exact message search with semantic conversation summaries."
                         ),
                         "parameters": {
                             "type": "object",
@@ -351,7 +361,9 @@ class MemorySkill(BaseSkill):
                             "properties": {
                                 "message_id": {
                                     "type": "integer",
-                                    "description": "The ID of the message to expand (from search results).",
+                                    "description": (
+                                        "The archive ID shown by search results, not the original source ID."
+                                    ),
                                 },
                                 "window": {
                                     "type": "integer",
@@ -434,6 +446,21 @@ class MemorySkill(BaseSkill):
         except (ValueError, AttributeError):
             return None
 
+    def _memory_is_own(self, mem: dict) -> bool:
+        return bool(
+            self._resident_id
+            and normalize_resident_id(mem.get("resident_id")) == self._resident_id
+        )
+
+    def _resident_affinity_weight(self) -> float:
+        raw = self._config.get("context", {}).get("recall", {}).get(
+            "resident_affinity_weight", 0.02
+        )
+        try:
+            return max(0.0, float(raw))
+        except (TypeError, ValueError):
+            return 0.02
+
     # ── Save ─────────────────────────────────────────────────
 
     def _save_memory(self, text: str, tags: str = "") -> str:
@@ -449,7 +476,8 @@ class MemorySkill(BaseSkill):
             embedding_blob = _embedding_to_blob(embedding_vec)
             mem_id = self._db.save_memory(
                 text=text.strip(), tags=tag_list, type="fact",
-                importance=5, embedding=embedding_blob
+                importance=5, embedding=embedding_blob,
+                resident_id=self._resident_id,
             )
             logger.info(f"Memory saved to DB (ID: {mem_id}) — {text[:50]}...")
             if model:
@@ -471,6 +499,7 @@ class MemorySkill(BaseSkill):
             "id": mem_id, "text": text.strip(),
             "tags": tag_list, "type": "fact", "importance": 5,
             "retrieval_count": 0, "last_accessed": None,
+            "resident_id": self._resident_id,
             "date": datetime.now().isoformat(), "embedding": embedding,
         }
         mem_file = self.memory_dir / f"memory_{mem_id}.json"
@@ -518,6 +547,7 @@ class MemorySkill(BaseSkill):
                 embedding=embedding_blob,
                 supersedes=parsed_id,
                 confidence=old_mem.get("confidence") or "medium",
+                resident_id=old_mem.get("resident_id"),
             )
             self._db.update_memory_metadata(parsed_id, status="superseded")
             logger.info(f"Memory updated: #{old_id} -> #{new_id} — {text[:50]}...")
@@ -556,6 +586,7 @@ class MemorySkill(BaseSkill):
             "importance": old_mem.get("importance", 5),
             "retrieval_count": 0, "last_accessed": None,
             "supersedes": old_id,
+            "resident_id": old_mem.get("resident_id"),
             "date": datetime.now().isoformat(), "embedding": embedding,
         }
         mem_file = self.memory_dir / f"memory_{new_id}.json"
@@ -905,6 +936,8 @@ class MemorySkill(BaseSkill):
             retrieval_count = mem.get("retrieval_count", 0)
             boost += min(retrieval_count * 0.01, 0.05)
             boost += mem.get("importance", 5) * 0.002
+            if self._memory_is_own(mem):
+                boost += self._resident_affinity_weight()
             tags_lower = " ".join(mem.get("tags", [])).lower()
             if any(kw in tags_lower for kw in query_lower.split()):
                 boost += 0.03
@@ -942,12 +975,13 @@ class MemorySkill(BaseSkill):
 
             hits = sum(1 for kw in keywords if kw in searchable)
             if hits > 0:
-                scored.append((hits, mem))
+                affinity = self._resident_affinity_weight() if self._memory_is_own(mem) else 0.0
+                scored.append((hits + affinity, hits, mem))
 
         scored.sort(key=lambda x: x[0], reverse=True)
 
         results = []
-        for hits, mem in scored[:5]:
+        for _score, hits, mem in scored[:5]:
             line = self._format_memory_result(mem)
             if mem.get("type") == "journal" and mem.get("journal_file"):
                 jf = mem["journal_file"]
@@ -1187,7 +1221,7 @@ class MemorySkill(BaseSkill):
             return False
 
     def _search_legacy(self, query: str, limit: int = 10) -> str:
-        """Search legacy archive — RAG summaries first, raw FTS fallback."""
+        """Search raw archive messages and semantic summaries together."""
         if not query.strip():
             return "Please provide a search query."
 
@@ -1196,20 +1230,24 @@ class MemorySkill(BaseSkill):
             return "Legacy database is not available."
 
         try:
-            # Check if legacy_summaries table exists
-            if self._legacy_has_summaries(conn):
-                results = self._search_legacy_rag(conn, query, limit)
-                if results:
-                    return results
-                # If RAG returned nothing, fall through to raw search
+            try:
+                limit = max(1, min(int(limit or 10), 50))
+            except (TypeError, ValueError):
+                limit = 10
 
-            # Fallback: existing FTS/LIKE search on legacy_messages
-            return self._search_legacy_raw(conn, query, limit)
+            raw_rows = self._search_legacy_raw_rows(conn, query, limit)
+            rag_rows = (
+                self._search_legacy_rag_rows(conn, query, limit)
+                if self._legacy_has_summaries(conn)
+                else []
+            )
+            return self._format_legacy_search(query, raw_rows, rag_rows, limit)
         finally:
             conn.close()
 
-    def _search_legacy_rag(self, conn: sqlite3.Connection, query: str, limit: int) -> str | None:
-        """Semantic + keyword search over RAG summaries."""
+    def _search_legacy_rag_rows(self, conn: sqlite3.Connection, query: str,
+                                limit: int) -> list[tuple[float, dict]]:
+        """Return ranked, session-deduplicated semantic summary matches."""
         model = _get_embedding_model()
 
         # Load all summaries with their embeddings + session metadata
@@ -1220,15 +1258,9 @@ class MemorySkill(BaseSkill):
         """).fetchall()
 
         if not rows:
-            return None
+            return []
 
-        query_lower = query.lower()
-        STOP_WORDS = {
-            "the", "a", "an", "is", "in", "to", "of", "and", "or", "it",
-            "was", "for", "on", "with", "that", "this", "my", "we", "i",
-            "about", "how", "what", "when", "where", "do", "did", "does",
-        }
-        query_keywords = [w for w in query_lower.split() if w not in STOP_WORDS]
+        query_keywords = self._legacy_query_terms(query)
 
         # Cache query vector if model is available
         query_vec = model.encode(query, normalize_embeddings=True) if model else None
@@ -1302,10 +1334,10 @@ class MemorySkill(BaseSkill):
             )
 
             if final >= 0.30:
-                scored.append((final, row))
+                scored.append((final, dict(row)))
 
         if not scored:
-            return None  # trigger fallback
+            return []
 
         # Sort descending
         scored.sort(key=lambda x: x[0], reverse=True)
@@ -1321,9 +1353,107 @@ class MemorySkill(BaseSkill):
             if len(deduped) >= limit:
                 break
 
-        # Format output
-        lines = [f"Found {len(deduped)} relevant conversation(s) in legacy archive:"]
-        for score, row in deduped:
+        return deduped
+
+    def _legacy_query_terms(self, query: str) -> list[str]:
+        """Extract safe lexical terms for FTS prefix and token-LIKE fallback."""
+        terms = [
+            term.lower() for term in re.findall(r"[^\W_]+", query, flags=re.UNICODE)
+            if term.lower() not in _LEGACY_SEARCH_STOP_WORDS
+        ]
+        return list(dict.fromkeys(terms))[:20]
+
+    def _search_legacy_raw_rows(self, conn: sqlite3.Connection, query: str,
+                                limit: int) -> list[dict]:
+        """Return raw message hits, expanding partial terms when necessary."""
+        select_sql = """
+            SELECT lm.id, lm.source_message_id, lm.session_id, lm.role,
+                   lm.content, lm.timestamp, ls.title AS session_title
+            FROM legacy_messages_fts fts
+            JOIN legacy_messages lm ON lm.id = fts.rowid
+            LEFT JOIN legacy_sessions ls ON ls.id = lm.session_id
+            WHERE legacy_messages_fts MATCH ?
+              AND lm.role IN ('user', 'assistant')
+              AND COALESCE(lm.attachment_placeholder, 0) = 0
+            ORDER BY rank
+            LIMIT ?
+        """
+        rows = []
+        try:
+            rows = conn.execute(select_sql, (query, limit)).fetchall()
+        except sqlite3.Error:
+            rows = []
+
+        terms = self._legacy_query_terms(query)
+        if not rows and terms:
+            prefix_query = " AND ".join(f"{term}*" for term in terms)
+            try:
+                rows = conn.execute(select_sql, (prefix_query, limit)).fetchall()
+            except sqlite3.Error:
+                rows = []
+
+        if not rows:
+            filters = ["lm.role IN ('user', 'assistant')"]
+            params: list = []
+            if terms:
+                filters.extend("LOWER(lm.content) LIKE ?" for _ in terms)
+                params.extend(f"%{term}%" for term in terms)
+            else:
+                filters.append("LOWER(lm.content) LIKE ?")
+                params.append(f"%{query.lower()}%")
+            filters.append("COALESCE(lm.attachment_placeholder, 0) = 0")
+            rows = conn.execute(
+                "SELECT lm.id, lm.source_message_id, lm.session_id, lm.role, "
+                "lm.content, lm.timestamp, ls.title AS session_title "
+                "FROM legacy_messages lm "
+                "LEFT JOIN legacy_sessions ls ON ls.id = lm.session_id "
+                f"WHERE {' AND '.join(filters)} "
+                "ORDER BY lm.timestamp DESC LIMIT ?",
+                (*params, limit),
+            ).fetchall()
+
+        return [dict(row) for row in rows]
+
+    def _format_legacy_search(self, query: str, raw_rows: list[dict],
+                              rag_rows: list[tuple[float, dict]],
+                              limit: int) -> str:
+        """Merge exact-message and summary results without hiding either layer."""
+        if not raw_rows and not rag_rows:
+            return f"No archived messages or conversations found matching '{query}'."
+
+        # Raw hits answer exact questions best, while reserving room for semantic
+        # discovery when both layers have useful results.
+        raw_quota = limit
+        if raw_rows and rag_rows:
+            raw_quota = max(1, (limit + 1) // 2)
+        selected_raw = raw_rows[:raw_quota]
+        selected_rag = rag_rows[:max(0, limit - len(selected_raw))]
+        if len(selected_raw) + len(selected_rag) < limit:
+            remaining = limit - len(selected_raw) - len(selected_rag)
+            selected_raw.extend(raw_rows[len(selected_raw):len(selected_raw) + remaining])
+
+        lines = [
+            f"Found {len(selected_raw)} matching archived message(s) and "
+            f"{len(selected_rag)} related conversation(s) for '{query}':"
+        ]
+        if selected_raw:
+            lines.append("\nExact or partial message matches:")
+            for row in selected_raw:
+                role = self._role_display.get(row["role"], row["role"].upper())
+                timestamp = row["timestamp"] or "unknown"
+                title = row["session_title"] or "Chat"
+                preview = self._legacy_message_preview(row["content"] or "", query)
+                id_label = f"Archive ID:{row['id']}"
+                source_id = str(row.get("source_message_id") or "").strip()
+                if source_id:
+                    id_label += f" | Source ID:{source_id}"
+                lines.append(
+                    f"[{id_label}] [{timestamp}] {role} in '{title}': {preview}"
+                )
+
+        if selected_rag:
+            lines.append("\nRelated conversation summaries:")
+        for score, row in selected_rag:
             title = row["title"] or "(untitled)"
             date = (row["created_at"] or "unknown")[:10]
             msg_count = row["message_count"] or 0
@@ -1340,10 +1470,12 @@ class MemorySkill(BaseSkill):
                 summary = summary[:297] + "..."
             lines.append(f"   {summary}")
 
-            # Provide drill-down hint using first message ID
-            if row["first_msg_id"]:
+            # Prefer an exact hit from this summary range, then from the same
+            # session, before falling back to the summary's first message.
+            drilldown_id = self._legacy_summary_drilldown_id(row, raw_rows)
+            if drilldown_id:
                 lines.append(
-                    f"   → Expand with: get_legacy_context(message_id={row['first_msg_id']})"
+                    f"   → Expand with: get_legacy_context(message_id={drilldown_id})"
                 )
 
         lines.append(
@@ -1351,65 +1483,51 @@ class MemorySkill(BaseSkill):
         )
         return "\n".join(lines)
 
+    def _legacy_message_preview(self, content: str, query: str,
+                                max_chars: int = 220) -> str:
+        """Return a compact excerpt centered on the first matching query term."""
+        flattened = content.replace("\n", " ").strip()
+        if len(flattened) <= max_chars:
+            return flattened
+
+        lowered = flattened.lower()
+        positions = [
+            lowered.find(term) for term in self._legacy_query_terms(query)
+            if lowered.find(term) >= 0
+        ]
+        anchor = min(positions) if positions else 0
+        start = max(0, anchor - max_chars // 3)
+        end = min(len(flattened), start + max_chars)
+        if end - start < max_chars:
+            start = max(0, end - max_chars)
+        excerpt = flattened[start:end]
+        if start > 0:
+            excerpt = "..." + excerpt
+        if end < len(flattened):
+            excerpt += "..."
+        return excerpt
+
+    def _legacy_summary_drilldown_id(self, summary: dict,
+                                     raw_rows: list[dict]) -> int | None:
+        """Choose the most useful archive message for a summary drill-down."""
+        same_session = [
+            row for row in raw_rows
+            if row.get("session_id") == summary.get("session_id")
+        ]
+        first_id = summary.get("first_msg_id")
+        last_id = summary.get("last_msg_id")
+        if first_id is not None and last_id is not None:
+            for row in same_session:
+                if first_id <= row["id"] <= last_id:
+                    return row["id"]
+        if same_session:
+            return same_session[0]["id"]
+        return first_id
+
     def _search_legacy_raw(self, conn: sqlite3.Connection, query: str, limit: int) -> str:
-        """Full-text search across the legacy archive (fallback)."""
-        # Try FTS5 first (faster), fall back to LIKE
-        try:
-            rows = conn.execute("""
-                SELECT lm.id, lm.session_id, lm.role, lm.content, lm.timestamp,
-                       ls.title AS session_title
-                FROM legacy_messages_fts fts
-                JOIN legacy_messages lm ON lm.id = fts.rowid
-                LEFT JOIN legacy_sessions ls ON ls.id = lm.session_id
-                WHERE legacy_messages_fts MATCH ?
-                  AND COALESCE(lm.attachment_placeholder, 0) = 0
-                ORDER BY rank
-                LIMIT ?
-            """, (query, limit)).fetchall()
-        except Exception:
-            # FTS error — use LIKE fallback
-            rows = conn.execute("""
-                SELECT lm.id, lm.session_id, lm.role, lm.content, lm.timestamp,
-                       ls.title AS session_title
-                FROM legacy_messages lm
-                LEFT JOIN legacy_sessions ls ON ls.id = lm.session_id
-                WHERE lm.content LIKE ? AND lm.role IN ('user', 'assistant')
-                  AND COALESCE(lm.attachment_placeholder, 0) = 0
-                ORDER BY lm.timestamp DESC
-                LIMIT ?
-            """, (f"%{query}%", limit)).fetchall()
-
-        # FTS returned empty results (no exception, just no matches) — retry with LIKE
-        if not rows:
-            rows = conn.execute("""
-                SELECT lm.id, lm.session_id, lm.role, lm.content, lm.timestamp,
-                       ls.title AS session_title
-                FROM legacy_messages lm
-                LEFT JOIN legacy_sessions ls ON ls.id = lm.session_id
-                WHERE lm.content LIKE ? AND lm.role IN ('user', 'assistant')
-                  AND COALESCE(lm.attachment_placeholder, 0) = 0
-                ORDER BY lm.timestamp DESC
-                LIMIT ?
-            """, (f"%{query}%", limit)).fetchall()
-
-        if not rows:
-            return f"No archived messages found matching '{query}'."
-
-        lines = [f"Found {len(rows)} archived message(s) matching '{query}':"]
-        for r in rows:
-            role = self._role_display.get(r["role"], r["role"].upper())
-            timestamp = r["timestamp"] or "unknown"
-            title = r["session_title"] or "Chat"
-            preview = (r["content"] or "").replace("\n", " ").strip()
-            if len(preview) > 150:
-                preview = preview[:147] + "..."
-            lines.append(
-                f"[ID:{r['id']}] [{timestamp}] {role} in '{title}': {preview}"
-            )
-        lines.append(
-            "\nUse get_legacy_context(message_id=ID) to expand a message with its surrounding context."
-        )
-        return "\n".join(lines)
+        """Compatibility wrapper for callers that need raw message search only."""
+        rows = self._search_legacy_raw_rows(conn, query, limit)
+        return self._format_legacy_search(query, rows, [], limit)
 
     def _list_legacy_sessions(self, limit: int = 20) -> str:
         """List all sessions in the ChatGPT legacy archive."""

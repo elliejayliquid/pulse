@@ -70,6 +70,14 @@ def make_config(db, tmpdir):
     }
 
 
+def make_shared_config(persona_db, shared_db, tmpdir, resident="sunshine"):
+    cfg = make_config(persona_db, tmpdir)
+    cfg["_shared_db"] = shared_db
+    cfg["_persona_name"] = resident
+    cfg["context"]["recall"]["resident_affinity_weight"] = 0.02
+    return cfg
+
+
 def make_config_disabled(db, tmpdir):
     cfg = make_config(db, tmpdir)
     cfg["context"]["recall"]["enabled"] = False
@@ -350,6 +358,161 @@ def test_high_importance_always_in_core():
             else:
                 fail("high-importance fact should appear in core",
                      f"Output:\n{out}")
+        finally:
+            db.close()
+
+
+def test_shared_latest_session_is_resident_local():
+    """Shared recall must never present another resident's session as the latest."""
+    print("\n--- Resident affinity: latest shared session stays resident-local ---")
+    from core.db import PulseDatabase
+    from core.context import ContextManager, _get_embedding_model
+    from core.embeddings import embedding_to_blob
+
+    model = _get_embedding_model()
+    if not model:
+        print("  SKIP: embedding model not available")
+        return
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        persona_db = PulseDatabase(Path(tmpdir) / "sunshine.db")
+        shared_db = PulseDatabase(Path(tmpdir) / "shared.db")
+        try:
+            own_text = "Sunshine's own previous session about a quiet cup of tea."
+            other_text = "Valentine's newer session about an unrelated museum visit."
+            shared_db.save_memory(
+                own_text, type="session_log", importance=10,
+                embedding=embedding_to_blob(model.encode(own_text)),
+                status="historical", date="2026-09-01T10:00:00",
+                resident_id="Sunshine",
+            )
+            shared_db.save_memory(
+                other_text, type="session_log", importance=10,
+                embedding=embedding_to_blob(model.encode(other_text)),
+                status="historical", date="2026-09-02T10:00:00",
+                resident_id="Valentine",
+            )
+
+            out = ContextManager(
+                make_shared_config(persona_db, shared_db, tmpdir)
+            )._load_memories("completely unrelated geometry question")
+            expected = "Last session (2026-09-01):\n" + own_text
+            if expected in out and "Last session (2026-09-02)" not in out:
+                ok("shared latest session belongs to the active resident")
+            else:
+                fail("another resident's session must not become Last session", out)
+        finally:
+            shared_db.close()
+            persona_db.close()
+
+
+def test_resident_affinity_breaks_passive_recall_tie():
+    """An own-memory boost breaks semantic ties without filtering shared rows."""
+    print("\n--- Resident affinity: passive recall near-tie ---")
+    from core.db import PulseDatabase
+    from core.context import ContextManager, _get_embedding_model
+    from core.embeddings import embedding_to_blob
+
+    model = _get_embedding_model()
+    if not model:
+        print("  SKIP: embedding model not available")
+        return
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        persona_db = PulseDatabase(Path(tmpdir) / "sunshine.db")
+        shared_db = PulseDatabase(Path(tmpdir) / "shared.db")
+        try:
+            shared_text = "We planned a telescope evening to look at Saturn's rings."
+            emb = embedding_to_blob(model.encode(shared_text))
+            shared_db.save_memory(
+                "other-marker " + shared_text, importance=5, embedding=emb,
+                date="2026-08-01T10:00:00", resident_id="valentine",
+            )
+            shared_db.save_memory(
+                "own-marker " + shared_text, importance=5, embedding=emb,
+                date="2026-08-01T10:00:00", resident_id="sunshine",
+            )
+
+            cfg = make_shared_config(persona_db, shared_db, tmpdir)
+            out = ContextManager(cfg)._load_memories("When were we looking at Saturn?")
+            own_pos, other_pos = out.find("own-marker"), out.find("other-marker")
+            if own_pos != -1 and other_pos != -1 and own_pos < other_pos:
+                ok("own memory leads an otherwise equal passive-recall match")
+            else:
+                fail("resident affinity should break the passive-recall tie", out)
+        finally:
+            shared_db.close()
+            persona_db.close()
+
+
+def test_resident_affinity_applies_to_explicit_search():
+    """search_memory uses the same gentle resident affinity."""
+    print("\n--- Resident affinity: explicit memory search near-tie ---")
+    from core.db import PulseDatabase
+    from core.context import _get_embedding_model
+    from core.embeddings import embedding_to_blob
+    from skills.memory import MemorySkill
+
+    model = _get_embedding_model()
+    if not model:
+        print("  SKIP: embedding model not available")
+        return
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = PulseDatabase(Path(tmpdir) / "shared.db")
+        try:
+            shared_text = "We planned a telescope evening to look at Saturn's rings."
+            emb = embedding_to_blob(model.encode(shared_text))
+            db.save_memory(
+                "other-search-marker " + shared_text, importance=5, embedding=emb,
+                date="2026-08-01T10:00:00", resident_id="valentine",
+            )
+            db.save_memory(
+                "own-search-marker " + shared_text, importance=5, embedding=emb,
+                date="2026-08-01T10:00:00", resident_id="sunshine",
+            )
+            cfg = make_config(db, tmpdir)
+            cfg["_persona_name"] = "Sunshine"
+            cfg["context"]["recall"]["resident_affinity_weight"] = 0.02
+            out = MemorySkill(cfg)._search_memory("When were we looking at Saturn?")
+            own_pos, other_pos = out.find("own-search-marker"), out.find("other-search-marker")
+            if own_pos != -1 and other_pos != -1 and own_pos < other_pos:
+                ok("own memory leads an otherwise equal explicit-search match")
+            else:
+                fail("resident affinity should break the explicit-search tie", out)
+        finally:
+            db.close()
+
+
+def test_memory_writes_stamp_and_preserve_resident():
+    """New saves are attributed; superseding an old row preserves its owner."""
+    print("\n--- Resident affinity: memory write provenance ---")
+    from core.db import PulseDatabase
+    from skills.memory import MemorySkill
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = PulseDatabase(Path(tmpdir) / "shared.db")
+        try:
+            cfg = make_config(db, tmpdir)
+            cfg["_persona_name"] = "Sunshine"
+            skill = MemorySkill(cfg)
+            skill._save_memory("A newly attributed resident memory.")
+            if db.get_memory(1).get("resident_id") == "sunshine":
+                ok("new memory is stamped with the normalized resident ID")
+            else:
+                fail("new memory should be attributed to the active resident")
+
+            skill._update_memory("1", "The resident memory after an update.")
+            if db.get_memory(2).get("resident_id") == "sunshine":
+                ok("updated memory preserves the original resident ID")
+            else:
+                fail("updated memory should preserve resident ownership")
+
+            neutral_id = db.save_memory("An unattributed legacy-style memory.")
+            if db.get_memory(neutral_id).get("resident_id") is None:
+                ok("unattributed memory remains neutral")
+            else:
+                fail("omitting resident_id should leave memory neutral")
         finally:
             db.close()
 
@@ -743,6 +906,10 @@ def main():
     test_query_chunking_surfaces_low_importance()
     test_unrelated_query_yields_empty_relevant()
     test_high_importance_always_in_core()
+    test_shared_latest_session_is_resident_local()
+    test_resident_affinity_breaks_passive_recall_tie()
+    test_resident_affinity_applies_to_explicit_search()
+    test_memory_writes_stamp_and_preserve_resident()
     test_null_embedding_no_crash()
     test_old_session_log_surfaces_truncated()
     test_chunk_embedding_surfaces_late_paragraph()

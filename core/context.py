@@ -19,6 +19,7 @@ from typing import Optional
 import yaml
 import numpy as np
 from core.embeddings import blob_to_vec, embedding_to_blob, chunk_text, max_similarity
+from core.db import normalize_resident_id
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +98,10 @@ class ContextManager:
         # Database references (set in pulse.py during startup)
         self._db = config.get("_db")           # persona DB (conversations, schedules, etc.)
         self._shared_db = config.get("_shared_db")  # shared DB (memories, journals — or same as _db)
+        self._resident_id = normalize_resident_id(config.get("_persona_name"))
+        self._memories_are_shared = bool(
+            self._shared_db is not None and self._shared_db is not self._db
+        )
         self._active_session_id = None          # cached active conversation session
 
         # Build budget: use explicit values from config if set,
@@ -268,6 +273,20 @@ class ContextManager:
             return max(0.0, (now - dt).total_seconds() / 86400.0)
         except (ValueError, TypeError):
             return None
+
+    def _memory_is_own(self, mem: dict) -> bool:
+        """Whether a memory belongs to the active resident."""
+        return bool(
+            self._resident_id
+            and normalize_resident_id(mem.get("resident_id")) == self._resident_id
+        )
+
+    def _latest_session_log(self, memories: list[dict]) -> Optional[dict]:
+        """Select the active resident's latest session in a shared memory DB."""
+        session_logs = [m for m in memories if m.get("type") == "session_log"]
+        if self._memories_are_shared and self._resident_id:
+            session_logs = [m for m in session_logs if self._memory_is_own(m)]
+        return max(session_logs, key=lambda x: x.get("date", ""), default=None)
 
     def _load_journal_context(self) -> str:
         """Load pinned identity entries + recent transient entries for context."""
@@ -636,11 +655,7 @@ You decide when to lift the timeout — not the human."""
                 if not memories:
                     return ""
 
-                session_logs = sorted(
-                    [m for m in memories if m.get("type") == "session_log"],
-                    key=lambda x: x.get("date", ""),
-                    reverse=True
-                )
+                latest_session_log = self._latest_session_log(memories)
                 facts = [m for m in memories if m.get("type") == "fact"]
                 current_facts = [
                     m for m in facts
@@ -652,8 +667,8 @@ You decide when to lift the timeout — not the human."""
                 ]
 
                 lines = ["## Recent Memories"]
-                if session_logs:
-                    latest = session_logs[0]
+                if latest_session_log:
+                    latest = latest_session_log
                     lines.append(f"\nLast session ({latest.get('date', 'unknown')[:10]}):")
                     lines.append(latest.get("text", ""))
                 if current_facts:
@@ -688,11 +703,7 @@ You decide when to lift the timeout — not the human."""
             if not memories:
                 return ""
 
-            session_logs = sorted(
-                [m for m in memories if m.get("type") == "session_log"],
-                key=lambda x: x.get("date", ""),
-                reverse=True
-            )
+            latest_session_log = self._latest_session_log(memories)
             facts = [m for m in memories if m.get("type") == "fact"]
             current_facts = [
                 m for m in facts
@@ -704,8 +715,8 @@ You decide when to lift the timeout — not the human."""
             ]
 
             lines = ["## Recent Memories"]
-            if session_logs:
-                latest = session_logs[0]
+            if latest_session_log:
+                latest = latest_session_log
                 lines.append(f"\nLast session ({latest.get('date', 'unknown')[:10]}):")
                 lines.append(latest.get("text", ""))
             if current_facts:
@@ -755,12 +766,7 @@ You decide when to lift the timeout — not the human."""
                 chunks_by_mem[mem_id].append(vec)
 
         # Partition memories into core and pool
-        session_logs = sorted(
-            [m for m in memories if m.get("type") == "session_log"],
-            key=lambda x: x.get("date", ""),
-            reverse=True
-        )
-        latest_session_log = session_logs[0] if session_logs else None
+        latest_session_log = self._latest_session_log(memories)
 
         core_importance = recall_cfg.get("core_importance", 8)
         core_facts = []
@@ -777,7 +783,8 @@ You decide when to lift the timeout — not the human."""
             if m_type == "fact":
                 is_historical = (m.get("status") == "historical") or self._memory_is_expired(m)
                 importance = m.get("importance", 5)
-                if not is_historical and importance >= core_importance:
+                can_be_core = not self._memories_are_shared or self._memory_is_own(m)
+                if not is_historical and importance >= core_importance and can_be_core:
                     core_facts.append(m)
                 else:
                     pool_memories.append(m)
@@ -793,6 +800,7 @@ You decide when to lift the timeout — not the human."""
         # old memory below min_similarity. recency_weight: 0 disables it entirely.
         recency_weight = recall_cfg.get("recency_weight", 0.02)
         recency_tau_days = recall_cfg.get("recency_tau_days", 180)
+        resident_affinity_weight = recall_cfg.get("resident_affinity_weight", 0.02)
 
         for m in pool_memories:
             m_id = m.get("id")
@@ -821,7 +829,10 @@ You decide when to lift the timeout — not the human."""
                         recency_boost = recency_weight * float(
                             np.exp(-age_days / recency_tau_days)
                         )
-                final_score = base_score + importance_boost + recency_boost
+                resident_boost = (
+                    resident_affinity_weight if self._memory_is_own(m) else 0.0
+                )
+                final_score = base_score + importance_boost + recency_boost + resident_boost
                 scored_pool.append((final_score, base_score, m))
 
         # Sort pool by final_score DESC
@@ -1119,7 +1130,8 @@ You decide when to lift the timeout — not the human."""
             mem_id = db.save_memory(
                 text=summary, tags=tag_list, type="session_log",
                 importance=10, embedding=embedding_bytes,
-                status="historical", source="system"
+                status="historical", source="system",
+                resident_id=self._resident_id,
             )
             logger.info(f"Conversation summary saved to DB memory (ID: {mem_id})")
             if model:
@@ -1166,6 +1178,7 @@ You decide when to lift the timeout — not the human."""
             "retrieval_count": 0,
             "last_accessed": None,
             "date": datetime.now().isoformat(),
+            "resident_id": self._resident_id,
             "embedding": embedding_vec or [],
         }
 
