@@ -3273,9 +3273,9 @@ class PulseAPI:
         config = self._merged_config_for(persona)
         context_budget = config.get("context_budget", {})
         try:
-            value = int(context_budget.get("enrichment_chunk_tokens") or 1600)
+            value = int(context_budget.get("enrichment_chunk_tokens") or 220)
         except (TypeError, ValueError):
-            value = 1600
+            value = 220
         return max(128, value)
 
     def _configured_legacy_database_path(self, persona: str) -> Path | None:

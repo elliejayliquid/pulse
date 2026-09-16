@@ -96,6 +96,8 @@ const state = {
   currentSkill: "",
 };
 
+let importEnrichmentPollTimer = null;
+
 const fallbackApi = {
   async list_personas() {
     return [
@@ -4163,6 +4165,7 @@ function openImportDialog(initialPath = "") {
     resetImportPreviewState();
     el("importPath").value = initialPath;
   }
+  stopImportEnrichmentPolling();
   state.importEnrichment = { job: null, loading: true, error: "" };
   el("importDialog").classList.remove("hidden");
   document.body.classList.add("modal-open");
@@ -4175,21 +4178,41 @@ function openImportDialog(initialPath = "") {
   }
 }
 
-async function refreshImportEnrichmentStatus() {
+function stopImportEnrichmentPolling() {
+  if (importEnrichmentPollTimer !== null) {
+    clearTimeout(importEnrichmentPollTimer);
+    importEnrichmentPollTimer = null;
+  }
+}
+
+function scheduleImportEnrichmentPoll() {
+  stopImportEnrichmentPolling();
+  const dialog = el("importDialog");
+  const status = String(state.importEnrichment?.job?.status || "");
+  if (!dialog || dialog.classList.contains("hidden") || !["queued", "running", "pausing"].includes(status)) return;
+  importEnrichmentPollTimer = setTimeout(() => {
+    importEnrichmentPollTimer = null;
+    void refreshImportEnrichmentStatus(true);
+  }, 5000);
+}
+
+async function refreshImportEnrichmentStatus(quiet = false) {
   const persona = state.current?.name;
   if (!persona || persona === "__base__") return;
-  state.importEnrichment.loading = true;
+  if (!quiet) state.importEnrichment.loading = true;
   state.importEnrichment.error = "";
-  renderImportEnrichmentStatus();
+  if (!quiet) renderImportEnrichmentStatus();
   const result = await api().get_import_enrichment_status(persona);
   state.importEnrichment.loading = false;
   if (!result?.ok) {
     state.importEnrichment.error = result?.error || "Could not load enrichment status.";
     renderImportEnrichmentStatus();
+    scheduleImportEnrichmentPoll();
     return;
   }
   state.importEnrichment.job = result.job || null;
   renderImportEnrichmentStatus();
+  scheduleImportEnrichmentPoll();
 }
 
 async function planImportEnrichment() {
@@ -4209,6 +4232,7 @@ async function planImportEnrichment() {
   }
   state.importEnrichment.job = result.job || null;
   renderImportEnrichmentStatus();
+  scheduleImportEnrichmentPoll();
   const job = state.importEnrichment.job || {};
   setImportNotice(
     `Enrichment plan saved: ${job.total_chunks || 0} chunks across ${job.total_sessions || 0} chats. `
@@ -4227,9 +4251,10 @@ async function pauseImportEnrichment() {
   }
   state.importEnrichment.job = result.job || null;
   renderImportEnrichmentStatus();
+  scheduleImportEnrichmentPoll();
   setImportNotice(
     result.job?.status === "pausing"
-      ? "Pause requested. A future worker will stop safely between chunks."
+      ? "Pause requested. The local worker will stop safely after its current chunk."
       : "Enrichment queue paused. Completed chunks will remain reusable."
   );
 }
@@ -4245,8 +4270,9 @@ async function resumeImportEnrichment() {
   }
   state.importEnrichment.job = result.job || null;
   renderImportEnrichmentStatus();
+  scheduleImportEnrichmentPoll();
   setImportNotice(
-    "Enrichment plan queued durably. The processing worker is not connected in this checkpoint, so no model will run yet."
+    "Enrichment queued. While Pulse is running, it will process one local embedding chunk at a time after the companion has been idle for a few minutes."
   );
 }
 
@@ -4314,6 +4340,7 @@ async function resumeStagedImport(batchId) {
 }
 
 function closeImportDialog() {
+  stopImportEnrichmentPolling();
   setImportDialogExpanded(false);
   el("importDialog").classList.add("hidden");
   document.body.classList.remove("modal-open");
@@ -4921,7 +4948,7 @@ function renderImportEnrichmentStatus() {
   if (!job) {
     progressText.textContent = "Not scheduled";
     progressFill.style.width = "0%";
-    detail.textContent = "Plan local, exchange-safe chunks now; no model or embedding worker runs in this checkpoint.";
+    detail.textContent = "Plan local, exchange-safe chunks now. Planning alone runs no model; queued work is processed privately while Pulse is running and idle.";
     planBtn.textContent = "Plan safely";
     planBtn.title = "Save a deterministic chunk plan in the companion database without running models.";
     return;
@@ -4946,7 +4973,7 @@ function renderImportEnrichmentStatus() {
     ? ` Recovered safely after ${job.recovery_count} interrupted worker${Number(job.recovery_count) === 1 ? "" : "s"}.`
     : "";
   const workerText = job.worker_available
-    ? "The worker will process one durable chunk at a time."
+    ? "While Pulse is running and idle, the local worker processes one durable chunk at a time."
     : "The processing worker comes next; this checkpoint cannot run models yet.";
   const changedText = job.archive_changed
     ? " Searchable history changed; refresh the plan before queueing it."

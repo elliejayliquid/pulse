@@ -25,6 +25,7 @@ except ImportError:
 from core.llm_openai import OpenAIResponsesClient
 from core.context import ContextManager
 from core.scheduler import ScheduleManager
+from core.archive_enrichment import run_one_idle_enrichment
 
 logger = logging.getLogger(__name__)
 
@@ -180,6 +181,13 @@ class PulseEngine:
         self._tts_ready = True
         self._manual_quiet = False  # /quiet sticky toggle — only /quiet clears it
 
+        enrichment_config = config.get("enrichment", {})
+        self._enrichment_idle_seconds = max(
+            0,
+            int(enrichment_config.get("idle_after_seconds", 300) or 300),
+        )
+        self._last_enrichment_status = None
+
 
         # Action log — tracks what the companion does each heartbeat
         self._action_log_path = Path(
@@ -269,7 +277,59 @@ class PulseEngine:
                 else None
             ),
             "scheduled_tasks": scheduled_tasks,
+            "enrichment": self._last_enrichment_status,
         }
+
+    async def _run_idle_enrichment_once(self, silence_seconds: float) -> dict | None:
+        """Process at most one local archive chunk during genuine idle time."""
+        if not self.db or silence_seconds < self._enrichment_idle_seconds:
+            return None
+        # A companion heartbeat takes priority when it is already due.
+        if silence_seconds >= self.interval:
+            return None
+        try:
+            result = await asyncio.to_thread(
+                run_one_idle_enrichment,
+                self.db.db_path,
+            )
+        except Exception as exc:
+            logger.warning(f"Idle archive enrichment check failed: {exc}")
+            self._last_enrichment_status = {
+                "status": "error",
+                "error": str(exc)[:200],
+            }
+            return None
+
+        job = result.get("job") or {}
+        if result.get("claimed"):
+            self._last_enrichment_status = {
+                "job_id": job.get("id"),
+                "status": job.get("status"),
+                "completed_chunks": job.get("completed_chunks", 0),
+                "total_chunks": job.get("total_chunks", 0),
+                "updated_at": job.get("updated_at"),
+            }
+            chunk = result.get("chunk") or {}
+            if result.get("completed"):
+                logger.info(
+                    "Idle archive enrichment completed chunk %s (%s/%s)",
+                    chunk.get("chunk_id", ""),
+                    job.get("completed_chunks", 0),
+                    job.get("total_chunks", 0),
+                )
+            else:
+                logger.warning(
+                    "Idle archive enrichment failed chunk %s: %s",
+                    chunk.get("chunk_id", ""),
+                    result.get("error", "unknown error"),
+                )
+        elif result.get("reason") == "archive_changed":
+            self._last_enrichment_status = {
+                "job_id": job.get("id"),
+                "status": "outdated",
+                "updated_at": job.get("updated_at"),
+            }
+        return result
 
     def _write_runtime_status(self, phase: str = "running", running: bool = True, **extra):
         if not self.runtime_status:
@@ -1462,6 +1522,8 @@ class PulseEngine:
                 await self._check_due_tasks()
 
                 # Heartbeat fires only after enough silence since last activity
+                silence = time.time() - self._last_activity
+                await self._run_idle_enrichment_once(silence)
                 silence = time.time() - self._last_activity
                 if silence >= self.interval:
                     self._mark_activity()  # reset so we don't fire every 60s

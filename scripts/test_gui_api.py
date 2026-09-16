@@ -1504,7 +1504,7 @@ def test_gui_api_enrichment_plan_pause_resume_and_recovery():
         assert job["total_messages"] == 4
         assert job["chunk_counts"] == {"pending": 2}
         assert job["archive_changed"] is False
-        assert job["worker_available"] is False
+        assert job["worker_available"] is True
 
         planned_again = api.plan_import_enrichment("demo", "paused")
         assert planned_again["ok"] is True

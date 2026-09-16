@@ -1,8 +1,8 @@
-"""Durable planning state for background enrichment of imported history.
+"""Durable planning and one-chunk execution for imported-history enrichment.
 
-This module deliberately does not run embedding or summary models.  It creates
-deterministic, exchange-preserving chunk plans and persists the job lifecycle
-that later workers will claim one chunk at a time.
+The planner creates deterministic, exchange-preserving chunks.  The Tier 1
+runner claims exactly one durable chunk, embeds it locally, and records the
+artifact.  Scheduling and Tier 2 summary generation remain separate concerns.
 """
 
 from __future__ import annotations
@@ -10,13 +10,21 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from pathlib import Path
+from typing import Any, Callable
+
+from core.embeddings import chunk_text, embedding_to_blob
 
 
-ENRICHMENT_SCHEMA_VERSION = 1
-PLANNER_VERSION = "exchange-chunks-v1"
-DEFAULT_CHUNK_TOKEN_BUDGET = 1600
+ENRICHMENT_SCHEMA_VERSION = 2
+PLANNER_VERSION = "exchange-chunks-v4-token-safe-segments"
+DEFAULT_CHUNK_TOKEN_BUDGET = 220
+MAX_TIER1_CHUNK_TOKEN_BUDGET = 220
 RECOVERY_STALE_SECONDS = 300
+TIER1_ARTIFACT_TYPE = "raw_chunk_embedding"
+TIER1_SERIALIZATION_VERSION = "dialogue-segments-v4-token-safe"
+DEFAULT_TIER1_MODEL = "all-MiniLM-L6-v2"
+TIER1_MODEL_TOKEN_LIMIT = 240
 
 _ENRICHMENT_SCHEMA = """
 CREATE TABLE IF NOT EXISTS legacy_enrichment_jobs (
@@ -90,6 +98,8 @@ CREATE TABLE IF NOT EXISTS legacy_enrichment_artifacts (
     chunk_id TEXT NOT NULL DEFAULT '',
     artifact_type TEXT NOT NULL,
     hierarchy_level INTEGER NOT NULL DEFAULT 0,
+    segment_index INTEGER NOT NULL DEFAULT 0,
+    segment_count INTEGER NOT NULL DEFAULT 1,
     first_message_id INTEGER,
     last_message_id INTEGER,
     content_fingerprint TEXT NOT NULL,
@@ -116,6 +126,20 @@ CREATE TABLE IF NOT EXISTS legacy_enrichment_meta (
 def ensure_enrichment_tables(conn: sqlite3.Connection) -> None:
     """Create the durable enrichment planner/job schema."""
     conn.executescript(_ENRICHMENT_SCHEMA)
+    artifact_columns = {
+        str(row[1])
+        for row in conn.execute("PRAGMA table_info(legacy_enrichment_artifacts)").fetchall()
+    }
+    if "segment_index" not in artifact_columns:
+        conn.execute(
+            "ALTER TABLE legacy_enrichment_artifacts "
+            "ADD COLUMN segment_index INTEGER NOT NULL DEFAULT 0"
+        )
+    if "segment_count" not in artifact_columns:
+        conn.execute(
+            "ALTER TABLE legacy_enrichment_artifacts "
+            "ADD COLUMN segment_count INTEGER NOT NULL DEFAULT 1"
+        )
     conn.execute(
         "INSERT INTO legacy_enrichment_meta(key, value) VALUES ('schema_version', ?) "
         "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -135,7 +159,10 @@ def plan_archive_enrichment(
     schedule_mode = str(schedule_mode or "paused").strip().lower()
     if schedule_mode not in {"paused", "idle"}:
         raise ValueError("Enrichment schedule must be 'paused' or 'idle'.")
-    chunk_token_budget = max(128, int(chunk_token_budget or DEFAULT_CHUNK_TOKEN_BUDGET))
+    chunk_token_budget = max(
+        128,
+        min(MAX_TIER1_CHUNK_TOKEN_BUDGET, int(chunk_token_budget or DEFAULT_CHUNK_TOKEN_BUDGET)),
+    )
     session_id = str(session_id or "")
 
     where = "WHERE id = ?" if session_id else ""
@@ -332,8 +359,376 @@ def enrichment_job_status(conn: sqlite3.Connection, job_id: str) -> dict[str, An
         "completed_chunks": completed,
         "progress_percent": round((completed / total_chunks) * 100, 1) if total_chunks else 0.0,
         "archive_changed": archive_changed,
-        "worker_available": False,
+        "worker_available": True,
     }
+
+
+def claim_next_enrichment_chunk(
+    conn: sqlite3.Connection,
+    job_id: str,
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any] | None:
+    """Atomically claim the next pending chunk from one queued Tier 1 job.
+
+    The caller must commit the claim before doing model work so another process
+    can observe the heartbeat and recover it after an interruption.
+    """
+    ensure_enrichment_tables(conn)
+    job_id = str(job_id or "")
+    claimed_at = (now or datetime.now(timezone.utc)).isoformat()
+    candidate = conn.execute(
+        "SELECT jc.chunk_id FROM legacy_enrichment_job_chunks jc "
+        "JOIN legacy_enrichment_jobs j ON j.id = jc.job_id "
+        "WHERE jc.job_id = ? AND jc.status = 'pending' "
+        "AND j.tier = 1 AND j.status = 'queued' AND j.pause_requested = 0 "
+        "AND j.current_chunk_id = '' ORDER BY jc.ordinal LIMIT 1",
+        (job_id,),
+    ).fetchone()
+    if not candidate:
+        return None
+
+    chunk_id = str(candidate[0])
+    claimed = conn.execute(
+        "UPDATE legacy_enrichment_job_chunks SET status = 'running', "
+        "attempts = attempts + 1, claimed_at = ?, completed_at = '', last_error = '' "
+        "WHERE job_id = ? AND chunk_id = ? AND status = 'pending' "
+        "AND EXISTS (SELECT 1 FROM legacy_enrichment_jobs j WHERE j.id = ? "
+        "AND j.tier = 1 AND j.status = 'queued' AND j.pause_requested = 0 "
+        "AND j.current_chunk_id = '')",
+        (claimed_at, job_id, chunk_id, job_id),
+    ).rowcount
+    if not claimed:
+        return None
+
+    started = conn.execute(
+        "UPDATE legacy_enrichment_jobs SET status = 'running', current_chunk_id = ?, "
+        "heartbeat_at = ?, started_at = CASE WHEN started_at = '' THEN ? ELSE started_at END, "
+        "updated_at = ?, last_error = '' WHERE id = ? AND status = 'queued' "
+        "AND pause_requested = 0 AND current_chunk_id = ''",
+        (chunk_id, claimed_at, claimed_at, claimed_at, job_id),
+    ).rowcount
+    if not started:
+        conn.execute(
+            "UPDATE legacy_enrichment_job_chunks SET status = 'pending', claimed_at = '' "
+            "WHERE job_id = ? AND chunk_id = ? AND status = 'running'",
+            (job_id, chunk_id),
+        )
+        return None
+
+    row = conn.execute(
+        "SELECT c.id, c.session_id, c.chunk_index, c.first_message_id, "
+        "c.last_message_id, c.first_position, c.last_position, c.message_count, "
+        "c.exchange_count, c.estimated_tokens, c.content_fingerprint, jc.attempts "
+        "FROM legacy_enrichment_chunks c "
+        "JOIN legacy_enrichment_job_chunks jc ON jc.chunk_id = c.id "
+        "WHERE jc.job_id = ? AND c.id = ?",
+        (job_id, chunk_id),
+    ).fetchone()
+    if not row:
+        raise RuntimeError("Claimed enrichment chunk disappeared before it could be loaded.")
+    return {
+        "job_id": job_id,
+        "chunk_id": str(row[0]),
+        "session_id": str(row[1]),
+        "chunk_index": int(row[2]),
+        "first_message_id": int(row[3]),
+        "last_message_id": int(row[4]),
+        "first_position": int(row[5]),
+        "last_position": int(row[6]),
+        "message_count": int(row[7]),
+        "exchange_count": int(row[8]),
+        "estimated_tokens": int(row[9]),
+        "content_fingerprint": str(row[10]),
+        "attempts": int(row[11]),
+        "embedding_text": _chunk_embedding_text(conn, str(row[1]), int(row[5]), int(row[6])),
+    }
+
+
+def heartbeat_enrichment_chunk(
+    conn: sqlite3.Connection,
+    job_id: str,
+    chunk_id: str,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Refresh the heartbeat for the currently claimed chunk."""
+    heartbeat_at = (now or datetime.now(timezone.utc)).isoformat()
+    updated = conn.execute(
+        "UPDATE legacy_enrichment_jobs SET heartbeat_at = ?, updated_at = ? "
+        "WHERE id = ? AND current_chunk_id = ? AND status IN ('running', 'pausing') "
+        "AND EXISTS (SELECT 1 FROM legacy_enrichment_job_chunks jc "
+        "WHERE jc.job_id = ? AND jc.chunk_id = ? AND jc.status = 'running')",
+        (heartbeat_at, heartbeat_at, str(job_id or ""), str(chunk_id or ""),
+         str(job_id or ""), str(chunk_id or "")),
+    ).rowcount
+    return bool(updated)
+
+
+def complete_enrichment_chunk(
+    conn: sqlite3.Connection,
+    job_id: str,
+    chunk_id: str,
+    embedding: bytes,
+    *,
+    model_name: str = DEFAULT_TIER1_MODEL,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Compatibility wrapper for callers that produced one chunk embedding."""
+    return complete_enrichment_chunk_segments(
+        conn,
+        job_id,
+        chunk_id,
+        [("", embedding)],
+        model_name=model_name,
+        now=now,
+    )
+
+
+def complete_enrichment_chunk_segments(
+    conn: sqlite3.Connection,
+    job_id: str,
+    chunk_id: str,
+    segments: list[tuple[str, bytes]],
+    *,
+    model_name: str = DEFAULT_TIER1_MODEL,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Persist every embedding segment and advance one parent chunk."""
+    job_id = str(job_id or "")
+    chunk_id = str(chunk_id or "")
+    if not segments or any(not embedding for _, embedding in segments):
+        raise ValueError("Tier 1 enrichment produced an empty embedding segment.")
+    finished_at = (now or datetime.now(timezone.utc)).isoformat()
+    row = conn.execute(
+        "SELECT c.session_id, c.first_message_id, c.last_message_id, "
+        "c.content_fingerprint, jc.status FROM legacy_enrichment_chunks c "
+        "JOIN legacy_enrichment_job_chunks jc ON jc.chunk_id = c.id "
+        "WHERE jc.job_id = ? AND c.id = ?",
+        (job_id, chunk_id),
+    ).fetchone()
+    if not row:
+        raise ValueError("Enrichment chunk not found.")
+    if str(row[4]) == "completed":
+        return enrichment_job_status(conn, job_id)
+    if str(row[4]) != "running":
+        raise ValueError("Enrichment chunk is not currently claimed.")
+
+    parent_fingerprint = str(row[3])
+    generation_fingerprint = _digest(
+        TIER1_ARTIFACT_TYPE,
+        TIER1_SERIALIZATION_VERSION,
+        str(model_name or DEFAULT_TIER1_MODEL),
+    )
+    conn.execute(
+        "DELETE FROM legacy_enrichment_artifacts WHERE session_id = ? "
+        "AND artifact_type = ? AND first_message_id = ? AND last_message_id = ?",
+        (str(row[0]), TIER1_ARTIFACT_TYPE, int(row[1]), int(row[2])),
+    )
+    segment_count = len(segments)
+    for segment_index, (segment_text, embedding) in enumerate(segments):
+        content_fingerprint = _digest(
+            parent_fingerprint,
+            TIER1_SERIALIZATION_VERSION,
+            str(segment_index),
+            segment_text,
+        )
+        artifact_id = (
+            f"artifact_{_digest(TIER1_ARTIFACT_TYPE, content_fingerprint, generation_fingerprint)[:28]}"
+        )
+        conn.execute(
+            "INSERT INTO legacy_enrichment_artifacts("
+            "id, session_id, chunk_id, artifact_type, hierarchy_level, segment_index, "
+            "segment_count, first_message_id, last_message_id, content_fingerprint, "
+            "generation_fingerprint, provider, model, status, artifact_text, "
+            "artifact_embedding, created_at, updated_at"
+            ") VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, 'local', ?, 'completed', '', ?, ?, ?) "
+            "ON CONFLICT(artifact_type, content_fingerprint, generation_fingerprint) "
+            "DO UPDATE SET chunk_id = excluded.chunk_id, segment_index = excluded.segment_index, "
+            "segment_count = excluded.segment_count, status = 'completed', "
+            "artifact_embedding = excluded.artifact_embedding, updated_at = excluded.updated_at",
+            (
+                artifact_id,
+                str(row[0]),
+                chunk_id,
+                TIER1_ARTIFACT_TYPE,
+                segment_index,
+                segment_count,
+                int(row[1]),
+                int(row[2]),
+                content_fingerprint,
+                generation_fingerprint,
+                str(model_name or DEFAULT_TIER1_MODEL),
+                embedding,
+                finished_at,
+                finished_at,
+            ),
+        )
+    conn.execute(
+        "UPDATE legacy_enrichment_job_chunks SET status = 'completed', "
+        "completed_at = ?, last_error = '' WHERE job_id = ? AND chunk_id = ? "
+        "AND status = 'running'",
+        (finished_at, job_id, chunk_id),
+    )
+    pending = int(conn.execute(
+        "SELECT COUNT(*) FROM legacy_enrichment_job_chunks "
+        "WHERE job_id = ? AND status = 'pending'",
+        (job_id,),
+    ).fetchone()[0])
+    job_row = conn.execute(
+        "SELECT status, pause_requested FROM legacy_enrichment_jobs WHERE id = ?",
+        (job_id,),
+    ).fetchone()
+    if not job_row:
+        raise ValueError("Enrichment job not found.")
+    pause_requested = bool(job_row[1]) or str(job_row[0]) == "pausing"
+    next_status = "paused" if pause_requested else ("queued" if pending else "completed")
+    schedule_mode = "paused" if pause_requested else "idle"
+    completed_at = finished_at if next_status == "completed" else ""
+    conn.execute(
+        "UPDATE legacy_enrichment_jobs SET status = ?, schedule_mode = ?, "
+        "current_chunk_id = '', pause_requested = 0, heartbeat_at = '', "
+        "completed_at = ?, updated_at = ?, last_error = '' WHERE id = ?",
+        (next_status, schedule_mode, completed_at, finished_at, job_id),
+    )
+    return enrichment_job_status(conn, job_id)
+
+
+def fail_enrichment_chunk(
+    conn: sqlite3.Connection,
+    job_id: str,
+    chunk_id: str,
+    error: str,
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Record one failed attempt without discarding its retry history."""
+    failed_at = (now or datetime.now(timezone.utc)).isoformat()
+    message = str(error or "Tier 1 enrichment failed.")[:2000]
+    conn.execute(
+        "UPDATE legacy_enrichment_job_chunks SET status = 'failed', last_error = ? "
+        "WHERE job_id = ? AND chunk_id = ? AND status = 'running'",
+        (message, str(job_id or ""), str(chunk_id or "")),
+    )
+    conn.execute(
+        "UPDATE legacy_enrichment_jobs SET status = 'failed', current_chunk_id = '', "
+        "heartbeat_at = '', pause_requested = 0, updated_at = ?, last_error = ? "
+        "WHERE id = ?",
+        (failed_at, message, str(job_id or "")),
+    )
+    return enrichment_job_status(conn, str(job_id or ""))
+
+
+def run_one_tier1_enrichment_chunk(
+    conn: sqlite3.Connection,
+    job_id: str,
+    *,
+    encoder: Callable[[str], Any] | None = None,
+    model_name: str = DEFAULT_TIER1_MODEL,
+) -> dict[str, Any]:
+    """Claim and locally embed at most one chunk.
+
+    ``encoder`` is injectable for focused tests.  The default reuses Pulse's
+    process-wide MiniLM instance and performs no network or LLM request.
+    """
+    claim = claim_next_enrichment_chunk(conn, job_id)
+    if not claim:
+        conn.commit()
+        return {
+            "claimed": False,
+            "completed": False,
+            "job": enrichment_job_status(conn, job_id),
+        }
+    conn.commit()
+    try:
+        if encoder is None:
+            from core.context import _get_embedding_model
+
+            model = _get_embedding_model()
+            if model is None:
+                raise RuntimeError("Local embedding model is not loaded.")
+            segment_texts = _tier1_embedding_segments(
+                claim["embedding_text"],
+                model=model,
+            )
+            vectors = model.encode(segment_texts, normalize_embeddings=True)
+        else:
+            segment_texts = _tier1_embedding_segments(claim["embedding_text"])
+            vectors = [encoder(segment_text) for segment_text in segment_texts]
+        segment_embeddings = [
+            (segment_text, embedding_to_blob(vector))
+            for segment_text, vector in zip(segment_texts, vectors)
+        ]
+        if len(segment_embeddings) != len(segment_texts) or any(
+            not embedding for _, embedding in segment_embeddings
+        ):
+            raise RuntimeError("Local embedding model returned an incomplete segment vector set.")
+        job = complete_enrichment_chunk_segments(
+            conn,
+            job_id,
+            claim["chunk_id"],
+            segment_embeddings,
+            model_name=model_name,
+        )
+        conn.commit()
+        return {
+            "claimed": True,
+            "completed": True,
+            "chunk": claim,
+            "segment_count": len(segment_embeddings),
+            "job": job,
+        }
+    except Exception as exc:
+        conn.rollback()
+        job = fail_enrichment_chunk(conn, job_id, claim["chunk_id"], str(exc))
+        conn.commit()
+        return {
+            "claimed": True,
+            "completed": False,
+            "chunk": claim,
+            "job": job,
+            "error": str(exc),
+        }
+
+
+def run_one_idle_enrichment(
+    db_path: str | Path,
+    *,
+    encoder: Callable[[str], Any] | None = None,
+    model_name: str = DEFAULT_TIER1_MODEL,
+) -> dict[str, Any]:
+    """Recover stale state and consume at most one eligible idle chunk.
+
+    A dedicated connection keeps background work off the engine's conversation
+    connection and gives each scheduler tick a bounded database lifetime.
+    """
+    conn = sqlite3.connect(str(Path(db_path)), timeout=10)
+    try:
+        conn.execute("PRAGMA foreign_keys = ON")
+        ensure_enrichment_tables(conn)
+        recovered = recover_interrupted_enrichment_jobs(conn)
+        job = latest_enrichment_job(conn)
+        conn.commit()
+        if not job:
+            return {"claimed": False, "reason": "no_job", "job": None,
+                    "recovered_jobs": recovered}
+        if job["archive_changed"]:
+            return {"claimed": False, "reason": "archive_changed", "job": job,
+                    "recovered_jobs": recovered}
+        if job["status"] != "queued" or job["schedule_mode"] != "idle":
+            return {"claimed": False, "reason": "not_eligible", "job": job,
+                    "recovered_jobs": recovered}
+        result = run_one_tier1_enrichment_chunk(
+            conn,
+            job["id"],
+            encoder=encoder,
+            model_name=model_name,
+        )
+        result["reason"] = "processed" if result["claimed"] else "not_eligible"
+        result["recovered_jobs"] = recovered
+        return result
+    finally:
+        conn.close()
 
 
 def pause_enrichment_job(conn: sqlite3.Connection, job_id: str) -> dict[str, Any]:
@@ -368,6 +763,12 @@ def resume_enrichment_job(conn: sqlite3.Connection, job_id: str) -> dict[str, An
         if status == "queued":
             return current
         raise ValueError(f"Cannot resume an enrichment job in '{status}' state.")
+    if status == "failed":
+        conn.execute(
+            "UPDATE legacy_enrichment_job_chunks SET status = 'pending', claimed_at = '' "
+            "WHERE job_id = ? AND status = 'failed'",
+            (job_id,),
+        )
     conn.execute(
         "UPDATE legacy_enrichment_jobs SET status = 'queued', schedule_mode = 'idle', "
         "pause_requested = 0, completed_at = '', last_error = '', updated_at = ? "
@@ -477,6 +878,101 @@ def _plan_session_chunks(
             "created_at": created_at,
         })
     return chunks
+
+
+def _chunk_embedding_text(
+    conn: sqlite3.Connection,
+    session_id: str,
+    first_position: int,
+    last_position: int,
+) -> str:
+    rows = conn.execute(
+        "SELECT role, content FROM legacy_messages WHERE session_id = ? "
+        "AND position BETWEEN ? AND ? AND role IN ('user', 'assistant') "
+        "ORDER BY position, id",
+        (session_id, first_position, last_position),
+    ).fetchall()
+    parts = [
+        f"[{str(role)}]\n{str(content).strip()}"
+        for role, content in rows
+        if str(content or "").strip()
+    ]
+    if not parts:
+        raise ValueError("Enrichment chunk has no usable dialogue.")
+    return "\n\n".join(parts)
+
+
+def _tier1_embedding_segments(text: str, *, model: Any | None = None) -> list[str]:
+    """Split serialized dialogue without omitting text or exceeding MiniLM.
+
+    Tests and injected encoders use the same complete character segmentation as
+    passive recall, but without its recall-time count/minimum filters.  The real
+    model path additionally measures every candidate with MiniLM's own tokenizer
+    so dense Unicode cannot invalidate the character heuristic.
+    """
+    text = str(text or "")
+    if not text:
+        return []
+    if model is None:
+        return chunk_text(text, max_chars=600, max_chunks=0, min_chars=1) or [text]
+
+    tokenizer = getattr(model, "tokenizer", None)
+    if tokenizer is None or not callable(getattr(tokenizer, "encode", None)):
+        raise RuntimeError("Local embedding model does not expose its tokenizer.")
+    configured_limit = int(getattr(model, "max_seq_length", 256) or 256)
+    token_limit = max(16, min(TIER1_MODEL_TOKEN_LIMIT, configured_limit))
+
+    def token_count(candidate: str) -> int:
+        try:
+            token_ids = tokenizer.encode(
+                candidate,
+                add_special_tokens=True,
+                truncation=False,
+                verbose=False,
+            )
+        except TypeError:
+            # Small tokenizer doubles used by tests may not expose the
+            # Hugging Face ``verbose`` switch.
+            token_ids = tokenizer.encode(
+                candidate,
+                add_special_tokens=True,
+                truncation=False,
+            )
+        return len(token_ids)
+
+    segments: list[str] = []
+    cursor = 0
+    while cursor < len(text):
+        remaining = text[cursor:]
+        if token_count(remaining) <= token_limit:
+            segments.append(remaining)
+            break
+
+        low, high, best = 1, len(remaining), 0
+        while low <= high:
+            midpoint = (low + high) // 2
+            if token_count(remaining[:midpoint]) <= token_limit:
+                best = midpoint
+                low = midpoint + 1
+            else:
+                high = midpoint - 1
+        if best <= 0:
+            raise RuntimeError("MiniLM tokenizer could not fit one source character safely.")
+
+        # Prefer a nearby dialogue/word boundary, without sacrificing more than
+        # half the measured capacity. Whitespace stays in exactly one segment.
+        prefix = remaining[:best]
+        boundary = max(prefix.rfind("\n\n"), prefix.rfind("\n"), prefix.rfind(" "))
+        if boundary >= best // 2:
+            best = boundary + 1
+        segments.append(remaining[:best])
+        cursor += best
+
+    if "".join(segments) != text:
+        raise RuntimeError("Tier 1 segmentation did not preserve the complete source text.")
+    if any(token_count(segment) > token_limit for segment in segments):
+        raise RuntimeError("Tier 1 segmentation exceeded the embedding model token limit.")
+    return segments
 
 
 def _rows_token_estimate(rows: list[sqlite3.Row | tuple]) -> int:

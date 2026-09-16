@@ -32,14 +32,20 @@ def embedding_to_blob(vec) -> bytes | None:
     except Exception:
         return None
 
-def chunk_text(text: str, max_chars: int = 600, max_chunks: int = 8) -> list[str]:
+def chunk_text(
+    text: str,
+    max_chars: int = 600,
+    max_chunks: int | None = 8,
+    min_chars: int = 20,
+) -> list[str]:
     """Split text into chunks suitable for the embedding model's cap.
     
     1. Splits on blank lines into paragraphs.
     2. Paragraphs longer than max_chars are split into sentence groups.
     3. Blocks of text with no punctuation breaks are hard-split at max_chars.
-    4. Drops chunks under 20 characters.
-    5. Caps at max_chunks, keeping the first and last chunks if capped.
+    4. Drops chunks under min_chars characters (20 by default).
+    5. Caps at max_chunks, keeping the first and last chunks if capped. Pass
+       0 or None when complete coverage matters more than a recall-time cap.
     """
     if not text or not text.strip():
         return []
@@ -81,11 +87,13 @@ def chunk_text(text: str, max_chars: int = 600, max_chunks: int = 8) -> list[str
             if current_chunk:
                 raw_chunks.append(" ".join(current_chunk).strip())
 
-    # Drop chunks under 20 chars
-    filtered_chunks = [c for c in raw_chunks if len(c) >= 20]
+    # Drop tiny chunks for ordinary memory recall; callers that require full
+    # archival coverage can set min_chars=1.
+    min_chars = max(1, int(min_chars or 1))
+    filtered_chunks = [c for c in raw_chunks if len(c) >= min_chars]
 
     # Cap at max_chunks, keeping the first and last chunks if capping
-    if len(filtered_chunks) > max_chunks:
+    if max_chunks and len(filtered_chunks) > max_chunks:
         half = max_chunks // 2
         filtered_chunks = filtered_chunks[:half] + filtered_chunks[-(max_chunks - half):]
 
