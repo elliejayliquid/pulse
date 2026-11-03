@@ -46,7 +46,8 @@ UNIT_WRAPPER = "/usr/local/sbin/pulse-unit"
 
 EDITABLE_FILES = ("persona.yaml", "config.yaml")
 SNAPSHOT_KEEP = 14
-SNAPSHOT_SKIP_NAMES = {".env", "shutdown_requested", "__pycache__"}
+# status.json is live runtime state; a copy would make the PC backup look "running"
+SNAPSHOT_SKIP_NAMES = {".env", "status.json", "shutdown_requested", "__pycache__"}
 SNAPSHOT_SKIP_SUFFIXES = (".db-wal", ".db-shm", ".db-journal", ".tmp")
 HEALTH_TIMEOUT_SECONDS = 90
 

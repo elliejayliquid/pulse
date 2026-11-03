@@ -85,6 +85,7 @@ PROVIDER_KEY_ENV = {
 
 # Silence noisy HTTP request logs (httpx logs every Telegram poll)
 logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpx2").setLevel(logging.WARNING)  # huggingface_hub's client (model downloads)
 
 
 def load_config(path: str) -> dict:

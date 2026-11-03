@@ -30,7 +30,8 @@ fi
 
 echo "== Packages"
 apt-get update -qq
-apt-get install -y -qq git python3-venv ffmpeg sqlite3
+# --no-install-recommends: ffmpeg otherwise pulls in GTK, mesa and friends on a headless box
+apt-get install -y -qq --no-install-recommends git python3-venv ffmpeg sqlite3
 
 echo "== Users"
 if ! id pulse >/dev/null 2>&1; then

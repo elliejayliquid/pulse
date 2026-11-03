@@ -60,6 +60,7 @@ def test_snapshot_is_consistent_and_skips_secrets():
             assert (ctl.SNAPSHOTS_DIR / "demo" / "LATEST").read_text() == snap["snapshot"]
             assert (snap_dir / "persona.yaml").exists()
             assert not (snap_dir / ".env").exists()
+            assert not (snap_dir / "data" / "status.json").exists()
             assert not list(snap_dir.rglob("*.db-wal"))
 
             copy = sqlite3.connect(str(snap_dir / "data" / "demo.db"))
