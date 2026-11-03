@@ -17,7 +17,7 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Optional
 
-from openai import OpenAI, APIConnectionError
+from openai import OpenAI, APIConnectionError, BadRequestError
 
 logger = logging.getLogger(__name__)
 
@@ -445,6 +445,40 @@ class LLMClient:
         merged.extend(messages[rest_start:])
         return merged
 
+    def _create_completion(self, **kwargs):
+        """chat.completions.create with our extra_body, tolerating models that
+        can't turn reasoning off.
+
+        Always-reasoning models (e.g. Mistral Large 4 on OpenRouter) answer
+        reasoning effort "none" with a 400. Drop the switch and retry once; from
+        then on this client sends no reasoning setting, so the model reasons at
+        its default, the closest to "off" it allows.
+        """
+        if self._extra_body:
+            kwargs["extra_body"] = self._extra_body
+        try:
+            return self.client.chat.completions.create(**kwargs)
+        except BadRequestError as e:
+            if not self._reasoning_off_rejected(e):
+                raise
+            logger.warning(
+                f"{self.model_name} can't turn reasoning off — retrying without the "
+                "reasoning setting (set model.reasoning: true to choose an effort)."
+            )
+            self._extra_body.pop("reasoning", None)
+            if self._extra_body:
+                kwargs["extra_body"] = self._extra_body
+            else:
+                kwargs.pop("extra_body", None)
+            return self.client.chat.completions.create(**kwargs)
+
+    def _reasoning_off_rejected(self, error: BadRequestError) -> bool:
+        if self._extra_body.get("reasoning") != {"effort": "none"}:
+            return False
+        # OpenRouter wraps the provider's message in error.metadata.raw
+        detail = f"{error} {getattr(error, 'body', '')}".lower()
+        return "reasoning" in detail
+
     def chat(self, messages: list[dict]) -> Optional[PulseResponse]:
         """Send messages to the LLM and get a parsed response.
 
@@ -461,7 +495,7 @@ class LLMClient:
         self.last_reasoning = ""
         self.last_error = ""
         try:
-            response = self.client.chat.completions.create(
+            response = self._create_completion(
                 model=self.model_name,
                 messages=self._merge_leading_system_messages(messages),
                 temperature=self.temperature,
@@ -469,7 +503,6 @@ class LLMClient:
                 frequency_penalty=self.frequency_penalty,
                 presence_penalty=self.presence_penalty,
                 max_tokens=self.max_tokens,
-                **({"extra_body": self._extra_body} if self._extra_body else {}),
             )
 
             self._track(response)
@@ -534,7 +567,7 @@ class LLMClient:
 
         for round_num in range(effective_max):
             try:
-                response = self.client.chat.completions.create(
+                response = self._create_completion(
                     model=self.model_name,
                     messages=msgs,
                     tools=tools if tools else None,
@@ -543,7 +576,6 @@ class LLMClient:
                     frequency_penalty=self.frequency_penalty,
                     presence_penalty=self.presence_penalty,
                     max_tokens=self.max_tokens,
-                    **({"extra_body": self._extra_body} if self._extra_body else {}),
                 )
 
                 self._track(response)
@@ -665,13 +697,12 @@ class LLMClient:
         logger.warning(f"Tool loop ended after {round_num + 1} rounds (mode={loop_mode})")
 
         try:
-            response = self.client.chat.completions.create(
+            response = self._create_completion(
                 model=self.model_name,
                 messages=msgs,
                 temperature=self.temperature,
                 top_p=self.top_p,
                 max_tokens=self.max_tokens,
-                **({"extra_body": self._extra_body} if self._extra_body else {}),
             )
             self._track(response)
             text = response.choices[0].message.content or ""

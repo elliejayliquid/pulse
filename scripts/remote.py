@@ -10,6 +10,8 @@ same functions.
     python scripts/remote.py rollback
     python scripts/remote.py version
     python scripts/remote.py list | status <p> | start <p> | stop <p> | restart <p> | log <p> [n]
+    python scripts/remote.py get <p> persona.yaml|config.yaml --out <file>
+    python scripts/remote.py put <p> persona.yaml|config.yaml <file> --base <sha256 from get>
     python scripts/remote.py snapshot [<p>]
     python scripts/remote.py pull [<p>]           # newest snapshot -> personas/<p>/ (remote personas only)
     python scripts/remote.py mark-remote <p>      # PC copy becomes a backup of a box persona
@@ -205,6 +207,16 @@ def pull(settings: dict, persona: str) -> dict:
     return {"ok": True, "persona": persona, "snapshot": name}
 
 
+def get_file(settings: dict, persona: str, filename: str) -> dict:
+    """persona.yaml / config.yaml from the box, with the sha256 a later put must match."""
+    return ctl(settings, "get", persona, filename)
+
+
+def put_file(settings: dict, persona: str, filename: str, content: str, base_sha256: str) -> dict:
+    """Write back an edited file. Refused (conflict) if it changed on the box since get."""
+    return ctl(settings, "put", persona, filename, base_sha256, stdin=content.encode("utf-8"))
+
+
 def remote_personas_here() -> list[str]:
     if not PERSONAS_DIR.is_dir():
         return []
@@ -299,6 +311,15 @@ def main(argv: list[str]) -> int:
     p = sub.add_parser("log")
     p.add_argument("persona")
     p.add_argument("lines", nargs="?", default="80")
+    p = sub.add_parser("get", help="download persona.yaml/config.yaml; prints its sha256")
+    p.add_argument("persona")
+    p.add_argument("file", choices=["persona.yaml", "config.yaml"])
+    p.add_argument("--out", required=True, help="local file to write")
+    p = sub.add_parser("put", help="upload an edited file; --base is the sha256 from get")
+    p.add_argument("persona")
+    p.add_argument("file", choices=["persona.yaml", "config.yaml"])
+    p.add_argument("source", help="local file to upload")
+    p.add_argument("--base", required=True)
     sub.add_parser("snapshot").add_argument("persona", nargs="?")
     sub.add_parser("pull").add_argument("persona", nargs="?")
 
@@ -325,6 +346,14 @@ def main(argv: list[str]) -> int:
                 result = ctl(settings, args.command, args.persona)
             elif args.command == "log":
                 result = ctl(settings, "log", args.persona, args.lines)
+            elif args.command == "get":
+                result = get_file(settings, args.persona, args.file)
+                if result.get("ok"):
+                    Path(args.out).write_bytes(result.pop("content").encode("utf-8"))
+                    result["out"] = args.out
+            elif args.command == "put":
+                content = Path(args.source).read_bytes().decode("utf-8")
+                result = put_file(settings, args.persona, args.file, content, args.base)
             elif args.command == "snapshot":
                 result = ctl(settings, "snapshot", *([args.persona] if args.persona else []), timeout=600)
             elif args.command == "pull":
