@@ -366,8 +366,18 @@ def _switch_to(sha: str, previous: str, running: list[str]) -> dict:
     return {"deps_changed": deps_changed, "failures": failures}
 
 
-def _log_tail(persona: str, lines: int = 20) -> str:
-    return cmd_log([persona, str(lines)])["log"]
+def _failure_log(persona: str, lines: int = 20) -> str:
+    """Why a persona didn't come up: systemd journal first, then its Pulse log.
+
+    A crash before Pulse switches to logs/<persona>.log only reaches the
+    journal (stdout), so the Pulse log alone would show the previous run.
+    """
+    journal = _run(
+        ["journalctl", "-u", _unit(persona), "-n", str(lines), "--no-pager", "-o", "cat"],
+        check=False,
+    ).stdout.strip() if shutil.which("journalctl") else ""
+    pulse_log = cmd_log([persona, str(lines)])["log"]
+    return f"--- journal ---\n{journal or '(empty)'}\n--- logs/{persona}.log ---\n{pulse_log}"
 
 
 def cmd_deploy(args: list[str]) -> dict:
@@ -406,7 +416,7 @@ def cmd_deploy(args: list[str]) -> dict:
         rolled_back = False
         logs = {}
         if result["failures"]:
-            logs = {p: _log_tail(p) for p in result["failures"]}
+            logs = {p: _failure_log(p) for p in result["failures"]}
             rollback = _switch_to(previous, sha, running)
             rolled_back = True
             result["rollback_failures"] = rollback["failures"]
