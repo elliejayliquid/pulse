@@ -1,0 +1,16 @@
+# Optional machine-level overlay. Copy to host.yaml (git-ignored) on a machine
+# that can't do something regardless of persona. Merged after the persona's
+# config.yaml: base config -> persona config -> host.yaml.
+# No host.yaml = no change. Keep it to capability switches.
+#
+# Example: a headless Linux home server with no GPU and no desktop.
+
+channels:
+  toast:
+    enabled: false        # no desktop to show notifications on
+
+skills:
+  tts:
+    enabled: false        # no GPU
+  dev:
+    enabled: false        # deploy-only code checkout; companions don't branch here

@@ -52,8 +52,14 @@ class Transcriber:
 
     @property
     def whisper_exe(self) -> Path:
-        suffix = ".exe" if platform.system() == "Windows" else ""
-        return self.data_dir / f"whisper-cli{suffix}"
+        if platform.system() == "Windows":
+            return self.data_dir / "whisper-cli.exe"
+        # No prebuilt Linux/macOS release — use a whisper-cli built or installed
+        # on PATH, else one dropped into data/whisper/ by hand
+        system_whisper = shutil.which("whisper-cli")
+        if system_whisper:
+            return Path(system_whisper)
+        return self.data_dir / "whisper-cli"
 
     @property
     def model_path(self) -> Path:
@@ -80,10 +86,20 @@ class Transcriber:
 
         tasks = []
         if not self.whisper_exe.exists():
+            if platform.system() != "Windows":
+                # The release zip is Windows-only; fail loudly instead of
+                # downloading .exe files that can't run here
+                raise RuntimeError(
+                    "whisper-cli not found. Build whisper.cpp "
+                    "(https://github.com/ggml-org/whisper.cpp) and put whisper-cli "
+                    f"on PATH or in {self.data_dir}/"
+                )
             tasks.append(self._download_whisper())
         if not self.model_path.exists():
             tasks.append(self._download_model())
         if not self.ffmpeg_exe.exists():
+            if platform.system() != "Windows":
+                raise RuntimeError("ffmpeg not found on PATH. Install it (e.g. apt install ffmpeg).")
             tasks.append(self._download_ffmpeg())
 
         if tasks:

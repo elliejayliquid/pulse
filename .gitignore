@@ -3,6 +3,7 @@ __pycache__/
 *.pyo
 .env
 .venv/
+host.yaml
 *data/
 *design/
 *scratch/

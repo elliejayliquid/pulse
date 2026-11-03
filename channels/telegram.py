@@ -137,6 +137,11 @@ class TelegramChannel(Channel):
         self._pending_update = None
         self._accumulate_task: asyncio.Task | None = None
         self._accumulate_delay = 1.5  # seconds to wait for more parts
+        # On shutdown, how long a reply that's already underway may keep going
+        # (stay under systemd's TimeoutStopSec on a server)
+        self._shutdown_drain_seconds = float(
+            config.get("channels", {}).get("telegram", {}).get("shutdown_drain_seconds", 240)
+        )
         # Voice review: pending transcriptions awaiting Send/Cancel.
         # Maps bot_message_id -> {"text": str, "user_msg": Message}
         self._pending_transcriptions: dict[int, dict] = {}
@@ -229,7 +234,7 @@ class TelegramChannel(Channel):
                 self._on_voice
             ))
             # Pre-download whisper components so first voice message is fast
-            asyncio.create_task(self._transcriber.ensure_ready())
+            asyncio.create_task(self._prepare_transcriber())
             logger.info("Voice transcription enabled")
 
         # Error handler — catch network blips gracefully
@@ -697,11 +702,35 @@ class TelegramChannel(Channel):
 
         return voice_sent
 
+    async def _prepare_transcriber(self):
+        """Pre-download/check whisper components without an unretrieved-task error."""
+        try:
+            await self._transcriber.ensure_ready()
+        except Exception as e:
+            logger.warning(f"Voice transcription not ready: {e}")
+
+    async def _drain_accumulated_reply(self):
+        """Let a reply that's already underway finish before shutting down.
+
+        The accumulate task is a plain asyncio task, so PTB's stop() doesn't
+        know about it — without this, a reply mid-tool-loop gets cut off.
+        """
+        task = self._accumulate_task
+        if not task or task.done():
+            return
+        timeout = self._shutdown_drain_seconds
+        logger.info(f"Waiting up to {timeout:.0f}s for the in-flight reply to finish...")
+        done, _ = await asyncio.wait({task}, timeout=timeout)
+        if not done:
+            logger.warning("In-flight reply did not finish in time; cancelling it.")
+            task.cancel()
+
     async def shutdown(self):
         """Stop the Telegram bot gracefully."""
         if self.app:
-            await self.app.updater.stop()
-            await self.app.stop()
+            await self.app.updater.stop()  # no new updates from here on
+            await self._drain_accumulated_reply()
+            await self.app.stop()  # PTB waits for its own in-flight handler tasks
             await self.app.shutdown()
         logger.info("Telegram bot stopped.")
 

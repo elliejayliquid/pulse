@@ -1,0 +1,20 @@
+# Nightly consistent snapshot of every persona (SQLite online backup, no .env).
+# Triggered by pulse-snapshot.timer. The PC pulls them with scripts/remote.py pull.
+
+[Unit]
+Description=Pulse persona snapshots
+
+[Service]
+Type=oneshot
+User=pulse
+Group=pulse
+WorkingDirectory=/opt/pulse/app
+ExecStart=/opt/pulse/venv/bin/python scripts/pulse_ctl.py snapshot
+Environment=PYTHONDONTWRITEBYTECODE=1
+UMask=0002
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+# personas/ must be writable too: reading a live WAL database touches its -shm file
+ReadWritePaths=/opt/pulse/snapshots /opt/pulse/app/personas

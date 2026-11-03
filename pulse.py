@@ -19,6 +19,7 @@ import asyncio
 import argparse
 import logging
 import os
+import re
 import signal
 import sqlite3
 import sys
@@ -202,6 +203,44 @@ def resolve_persona(config: dict, persona_name: str | None, pulse_root: Path) ->
     return config
 
 
+def apply_host_overlay(config: dict, pulse_root: Path) -> dict:
+    """Merge the optional machine-level host.yaml over the resolved config.
+
+    host.yaml (git-ignored, next to pulse.py) says what *this machine* can't do,
+    regardless of persona — e.g. a headless server disabling toast and TTS.
+    No file → config unchanged.
+    """
+    host_path = pulse_root / "host.yaml"
+    if not host_path.exists():
+        return config
+    host_config = load_config(str(host_path)) or {}
+    logger.info(f"Merged host overlay: {host_path}")
+    return deep_merge(config, host_config)
+
+
+_WINDOWS_DRIVE_PATH = re.compile(r"^[A-Za-z]:[\\/]")
+
+
+def check_paths_portable(config: dict) -> None:
+    """Refuse to start on Linux/macOS when configured paths are Windows drive paths.
+
+    Catches persona configs copied from a Windows PC without their paths
+    rewritten — otherwise Pulse would quietly create a fresh empty
+    "D:/Claude/memories" folder relative to the working directory.
+    """
+    if os.name == "nt":
+        return
+    bad = {
+        key: value for key, value in (config.get("paths") or {}).items()
+        if isinstance(value, str) and _WINDOWS_DRIVE_PATH.match(value)
+    }
+    if bad:
+        for key, value in bad.items():
+            logger.error(f"  paths.{key} is a Windows path on this machine: {value}")
+        logger.error("Rewrite these paths in the persona's config.yaml, then start again.")
+        sys.exit(1)
+
+
 async def main(config_path: str, persona_name: str | None = None):
     """Initialize and run the Pulse daemon."""
     logger.info("=" * 50)
@@ -219,6 +258,8 @@ async def main(config_path: str, persona_name: str | None = None):
 
     # Resolve persona overlay (merges persona config over base)
     config = resolve_persona(config, persona_name, pulse_root)
+    config = apply_host_overlay(config, pulse_root)
+    check_paths_portable(config)
 
     from core.runtime_status import RuntimeStatus
     runtime_status = RuntimeStatus(config)

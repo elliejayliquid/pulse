@@ -1,0 +1,29 @@
+#!/bin/bash
+# Root-owned wrapper so the deploy user can control Pulse units without a
+# password — and nothing else. sudoers allows exactly this file.
+#   pulse-unit start|stop|restart|enable|disable <persona> [--no-block]
+set -euo pipefail
+
+verb="${1:-}"
+persona="${2:-}"
+mode="${3:-}"
+
+case "$verb" in
+  start|stop|restart|enable|disable) ;;
+  *) echo "pulse-unit: verb must be start, stop, restart, enable or disable" >&2; exit 2 ;;
+esac
+
+if [[ ! "$persona" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,40}$ ]]; then
+  echo "pulse-unit: invalid persona name" >&2
+  exit 2
+fi
+
+args=()
+if [[ "$mode" == "--no-block" ]]; then
+  args+=(--no-block)
+fi
+if [[ "$verb" == "enable" || "$verb" == "disable" ]]; then
+  args+=(--now)
+fi
+
+exec /usr/bin/systemctl "${args[@]}" "$verb" "pulse@${persona}.service"

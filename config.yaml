@@ -210,7 +210,7 @@ skills:
   lor:
     enabled: false                # post_to_lor, browse_lor, read_lor_thread
   dev:
-    enabled: true                 # read_source, search_code, write_skill, list_skills, dev_journal
+    enabled: false                # read_source, search_code, write_skill, list_skills, dev_journal (opt-in: autonomous git branches)
   tts:
     enabled: false                # speak — send voice messages
   paint:

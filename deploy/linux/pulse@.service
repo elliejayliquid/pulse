@@ -1,0 +1,40 @@
+# One Pulse companion per instance: systemctl enable --now pulse@<persona>
+# Installed by deploy/linux/setup_box.sh. See designs/remote_host.md.
+
+[Unit]
+Description=Pulse companion %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pulse
+Group=pulse
+WorkingDirectory=/opt/pulse/app
+ExecStart=/opt/pulse/venv/bin/python pulse.py --persona %i
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=HF_HOME=/opt/pulse/cache/huggingface
+
+# Graceful stop: SIGTERM -> stop taking messages -> finish the reply in flight
+# (channels.telegram.shutdown_drain_seconds, default 240) -> exit
+KillSignal=SIGTERM
+TimeoutStopSec=300
+Restart=on-failure
+RestartSec=30
+
+# Files stay group-writable so lena (deploys, GUI edits, snapshots) and the
+# pulse user can both work with them
+UMask=0002
+
+# Sandbox: no listening ports are opened by Pulse; it only needs to write here
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/opt/pulse/app/personas /opt/pulse/app/logs /opt/pulse/app/data /opt/pulse/cache /opt/pulse/snapshots
+# Shared memory (Nebula's shared.db) and other paths outside /opt/pulse go in a
+# drop-in: systemctl edit pulse@.service  ->  [Service] ReadWritePaths=/path/to/memories
+
+[Install]
+WantedBy=multi-user.target
