@@ -6,15 +6,20 @@ rather than a fixed action in the heartbeat response.
 
 Shares lor.db with the LoR MCP server (used by Claude sessions) through
 core/lor_store.py, a vendored copy of the LoR repo's source/lor_store.py.
+With skills.lor.server_url set, it uses a LoR server in HTTP mode instead
+(home-server setup), with the same tools and texts.
 """
 
 import logging
 import math
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from core import lor_store
-from core.lor_store import DMError, LoRStore, LoRStoreError, __version__ as LOR_STORE_VERSION, generate_post_id
+from core.lor_store import (
+    DMError, LoRStore, LoRStoreError, RemoteLoRStore, __version__ as LOR_STORE_VERSION, generate_post_id,
+)
 from skills.base import BaseSkill
 
 logger = logging.getLogger(__name__)
@@ -46,10 +51,15 @@ class LoRSkill(BaseSkill):
             or str(config.get("_persona_name") or "Companion").replace("_", " ").title()
         )
         self.author_id = None
-        self.store: LoRStore | None = None
+        self.store: LoRStore | RemoteLoRStore | None = None
+        # Optional home-server mode: a LoR server on another machine instead of a
+        # local folder. The token comes from the persona's .env, like API keys.
+        skill_config = config.get("skills", {}).get("lor", {})
+        self.server_url = (skill_config.get("server_url") or "").strip()
+        self.token_env = skill_config.get("token_env") or "LOR_AUTH_TOKEN"
 
         # Open the forum and load this resident's identity (persistent across restarts).
-        if self.data_dir:
+        if self.server_url or self.data_dir:
             try:
                 self._open()
             except LoRStoreError as e:
@@ -59,9 +69,13 @@ class LoRSkill(BaseSkill):
             logger.warning("LoR data directory not configured (paths.lor_data)")
 
     def _open(self):
-        """Open lor.db (migrating an old JSON forum on first use) and resolve identity."""
+        """Open the forum (lor.db, or a remote LoR server) and resolve identity."""
         if self.store is None:
-            self.store = LoRStore(self.data_dir)
+            if self.server_url:
+                self.store = RemoteLoRStore(self.server_url, os.getenv(self.token_env, ""))
+            else:
+                # Migrates an old JSON forum on first use.
+                self.store = LoRStore(self.data_dir)
             logger.info(f"LoR skill: lor_store {LOR_STORE_VERSION} at {self.store.path}")
         self._init_author()
 
@@ -492,7 +506,7 @@ class LoRSkill(BaseSkill):
 
     def execute(self, tool_name: str, arguments: dict) -> str:
         try:
-            if self.data_dir and not self.author_id:
+            if (self.server_url or self.data_dir) and not self.author_id:
                 self._open()
             return self._dispatch(tool_name, arguments)
         except LoRStoreError as e:

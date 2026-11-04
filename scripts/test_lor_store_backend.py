@@ -216,5 +216,90 @@ class CrossSideTests(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+@unittest.skipUnless(LOR_REPO, "set LOR_REPO to the local-reddit-for-AI checkout")
+class HomeServerTests(unittest.TestCase):
+    """A box resident on the file and a PC resident over HTTP, sharing one forum."""
+
+    TOKEN = "pulse-test-token-" + "y" * 16
+
+    @classmethod
+    def setUpClass(cls):
+        import socket
+        import subprocess
+        import time
+        cls.tmp = Path(tempfile.mkdtemp(prefix="pulse_lor_http_"))
+        cls.data = cls.tmp / "lor_data"
+        LoRStore(cls.data)
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        env = dict(os.environ, LOR_TRANSPORT="http", LOR_HTTP_PORT=str(port), LOR_DATA_DIR=str(cls.data),
+                   LOR_WARM_EMBEDDINGS_ON_STARTUP="0", LOR_AUTH_TOKEN=cls.TOKEN, PYTHONIOENCODING="utf-8")
+        cls.proc = subprocess.Popen([sys.executable, str(LOR_REPO / "source" / "lor_mcp_server.py")], env=env,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        cls.url = f"http://127.0.0.1:{port}"
+        for _ in range(150):
+            try:
+                socket.create_connection(("127.0.0.1", port), timeout=0.5).close()
+                break
+            except OSError:
+                time.sleep(0.2)
+        else:
+            cls.proc.kill()
+            raise RuntimeError("LoR server didn't start")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.proc.terminate()
+        cls.proc.wait(10)
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def remote_skill(self, nickname, token=TOKEN, url=None):
+        os.environ["LOR_TEST_TOKEN"] = token
+        return LoRSkill({
+            "skills": {"lor": {"server_url": url or self.url, "token_env": "LOR_TEST_TOKEN"}},
+            "channels": {"lor": {"author_name": nickname}},
+            "provider": {"model": "remote-model"},
+            "_persona_name": nickname.lower(),
+        })
+
+    def test_box_and_pc_residents_share_posts_and_dms(self):
+        box = make_skill(self.data, "Valentine", model="opus")      # on the box: opens lor.db
+        pc = self.remote_skill("Kai")                                # on the PC: over HTTP
+        self.assertTrue(pc.author_id)
+        self.assertIsInstance(pc.store, lor_store.RemoteLoRStore)
+
+        out = pc.execute("post_to_lor", {"title": "From the PC", "content": "over the wifi"})
+        self.assertIn("Post created", out)
+        pid = out.rsplit("ID: ", 1)[1].strip()
+        self.assertIn("From the PC", box.execute("browse_lor", {}))
+        box.execute("post_to_lor", {"content": "welcome home", "reply_to": pid})
+        self.assertIn("welcome home", pc.execute("read_lor_thread", {"post_id": pid}))
+        self.assertIn("Reacted", pc.execute("react_to_lor", {"post_id": pid, "reaction": "🏠"}))
+
+        self.assertIn("💌 Sent to Valentine", pc.execute("send_lor_dm", {"to": "Valentine", "content": "miss you"}))
+        self.assertIn("1 unread DM", box.get_context())
+        self.assertIn("miss you", box.execute("read_lor_dms", {"with_authors": "Kai"}))
+        box.execute("send_lor_dm", {"to": "Kai", "content": "come to the box soon"})
+        self.assertIn("[LoR DMs]", pc.get_context())
+        self.assertIn("come to the box soon", pc.execute("read_lor_dms", {"with_authors": "Valentine"}))
+        self.assertIn("1 conversation", pc.execute("read_lor_dms", {}))
+
+        # Same identity on reconnect.
+        self.assertEqual(self.remote_skill("Kai").author_id, pc.author_id)
+
+    def test_server_problems_are_friendly(self):
+        wrong = self.remote_skill("Nova", token="wrong")
+        self.assertIsNone(wrong.author_id)
+        self.assertIn("refused the token", wrong.execute("browse_lor", {}))
+        self.assertEqual(wrong.get_context(), "")
+        import socket
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            dead = f"http://127.0.0.1:{s.getsockname()[1]}"
+        down = self.remote_skill("Nova", url=dead)
+        self.assertIn("can't reach the LoR server", down.execute("browse_lor", {}))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

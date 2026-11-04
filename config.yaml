@@ -208,7 +208,12 @@ skills:
   journal:
     enabled: true                 # write_journal, read_journal, update_journal
   lor:
-    enabled: false                # post_to_lor, browse_lor, read_lor_thread
+    enabled: false                # post_to_lor, browse_lor, read_lor_thread, send_lor_dm, ...
+    # Optional home-server mode: use a LoR server in HTTP mode (LOR_TRANSPORT=http)
+    # instead of the local paths.lor_data folder. Its token goes in the persona's
+    # .env as LOR_AUTH_TOKEN (or the variable named in token_env).
+    # server_url: "http://192.168.0.203:8001"
+    # token_env: "LOR_AUTH_TOKEN"
   dev:
     enabled: false                # read_source, search_code, write_skill, list_skills, dev_journal (opt-in: autonomous git branches)
   tts:

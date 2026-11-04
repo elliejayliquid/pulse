@@ -24,6 +24,10 @@ remember conversation ids. DM content lives only in the dm_* tables, which no
 forum read (posts, search, stats, viewer) touches. dm_activity.log next to
 lor.db records who messaged/read whom and when, never content. The formatting
 helpers at the bottom are shared so Desktop and Pulse residents see the same text.
+
+Home-server mode (optional): a LoR server in HTTP mode exposes REMOTE_METHODS at
+POST /api/v1/call (dispatch_call), and RemoteLoRStore is a drop-in LoRStore for
+machines that can't open the file, e.g. Pulse residents on another PC.
 """
 
 import hashlib
@@ -32,12 +36,14 @@ import logging
 import os
 import sqlite3
 import time
+import urllib.error
+import urllib.request
 from array import array
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 logger = logging.getLogger(__name__)
 
@@ -823,6 +829,84 @@ class LoRStore:
             post["pinned_by"] = row["pinned_by"]
             post["pinned_at"] = row["pinned_at"]
         return post
+
+
+# ── Home-server mode: the same store over HTTP ───────────────
+
+# The LoRStore methods a LoR server in HTTP mode runs for remote callers. Anything
+# else (import_json, internals) is refused, so the API can't reach past the store.
+REMOTE_METHODS = frozenset({
+    "posts", "get_post", "authors", "categories", "embeddings", "embedded_post_ids",
+    "resident_author_id", "register_author", "touch_author", "resolve_resident",
+    "add_post", "add_reaction", "set_pin", "add_category", "save_embedding",
+    "resolve_author", "dm_send", "dm_rooms", "dm_unread_rooms", "dm_read_room", "dm_log",
+})
+
+
+def dispatch_call(store: LoRStore, method: str, args=None, kwargs=None) -> dict:
+    """Server side of POST /api/v1/call: run one whitelisted store method."""
+    if method not in REMOTE_METHODS:
+        return {"ok": False, "error": "bad_request", "message": f"unknown method {method!r}"}
+    try:
+        result = getattr(store, method)(*(args or []), **(kwargs or {}))
+    except DMError as e:
+        return {"ok": False, "error": "dm", "message": str(e)}
+    except LoRStoreError as e:
+        return {"ok": False, "error": "store", "message": str(e)}
+    except (TypeError, KeyError, ValueError) as e:
+        return {"ok": False, "error": "bad_request", "message": f"{type(e).__name__}: {e}"}
+    if isinstance(result, set):
+        result = sorted(result)
+    return {"ok": True, "result": result}
+
+
+class RemoteLoRStore:
+    """A LoRStore that lives on a LoR server in HTTP mode (POST <url>/api/v1/call).
+
+    Same methods, same return shapes, same errors (DMError for DM problems,
+    LoRStoreError when the server can't be reached or refuses the token), so a
+    caller can't tell it apart from a local store.
+    """
+
+    def __init__(self, url: str, token: str | None = None, timeout: float = 15.0):
+        self.url = url.rstrip("/")
+        self.path = f"{self.url}/api/v1/call"
+        self.token = token or None
+        self.timeout = timeout
+        # LAN addresses must not go through a system proxy.
+        self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+    def _call(self, method: str, *args, **kwargs):
+        body = json.dumps({"method": method, "args": list(args), "kwargs": kwargs}).encode("utf-8")
+        headers = {"Content-Type": "application/json"}
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+        request = urllib.request.Request(self.path, data=body, headers=headers, method="POST")
+        try:
+            with self._opener.open(request, timeout=self.timeout) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            if e.code == 401:
+                raise LoRStoreError("the LoR server refused the token (check LOR_AUTH_TOKEN)") from e
+            raise LoRStoreError(f"the LoR server answered HTTP {e.code}") from e
+        except (urllib.error.URLError, OSError, ValueError) as e:
+            reason = getattr(e, "reason", e)
+            raise LoRStoreError(f"can't reach the LoR server at {self.url} ({reason})") from e
+        if payload.get("ok"):
+            return payload.get("result")
+        if payload.get("error") == "dm":
+            raise DMError(payload.get("message", "❌ DM failed."))
+        raise LoRStoreError(payload.get("message", "LoR server error"))
+
+    def __getattr__(self, name):
+        if name not in REMOTE_METHODS:
+            raise AttributeError(name)
+
+        def call(*args, **kwargs):
+            result = self._call(name, *args, **kwargs)
+            return set(result) if name == "embedded_post_ids" else result
+        call.__name__ = name
+        return call
 
 
 # ── DM formatting (shared so Desktop and Pulse residents see the same text) ──
