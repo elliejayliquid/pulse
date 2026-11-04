@@ -43,7 +43,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-__version__ = "2.1.0"
+__version__ = "2.1.1"
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +57,9 @@ JSON_FILES = ("authors.json", "categories.json", "posts.json", "embeddings.json"
 IDENTITY_SUFFIX = "_author_id.txt"
 # Pulse's old no-nickname identity file, imported under this resident key.
 IDENTITY_FALLBACK = ("author_id.txt", "_default")
+# Stable identities for visitors (Desktop / claude.ai sessions) live under this
+# prefix in resident_identities, apart from Pulse residents' bare nicknames.
+VISITOR_PREFIX = "visitor:"
 # Pre-release DMs (JSONL rooms + read cursors), imported like the JSON files.
 LEGACY_DM_DIR = "dms"
 # Left in a data folder whose forum moved to a LoR server; holds the new address.
@@ -395,6 +398,37 @@ class LoRStore:
             )
         return author_id
 
+    def resolve_visitor(self, nickname: str, model: str) -> str:
+        """The stable author_id for a visitor (a Desktop or claude.ai session) by nickname.
+
+        Visitors live in their own namespace, so a session calling itself "Claude"
+        never gets the Pulse resident Claude's identity or mailbox. The first time a
+        nickname is claimed, it adopts that nickname's most recently active existing
+        session id (never a resident's), so the mailbox a visitor already has becomes
+        their permanent one instead of starting over.
+        """
+        nickname = nickname.strip()
+        key = (VISITOR_PREFIX + nickname).lower()
+        now = utc_now()
+        with self._write() as conn:
+            row = conn.execute("SELECT author_id FROM resident_identities WHERE key=?", (key,)).fetchone()
+            if row:
+                author_id = row["author_id"]
+            else:
+                adopt = conn.execute(
+                    "SELECT author_id FROM authors WHERE lower(nickname)=lower(?) "
+                    "AND author_id NOT IN (SELECT author_id FROM resident_identities) "
+                    "ORDER BY COALESCE(last_active, registered_at) DESC, rowid DESC LIMIT 1",
+                    (nickname,)).fetchone()
+                author_id = adopt["author_id"] if adopt else generate_author_id(model)
+                conn.execute("INSERT INTO resident_identities VALUES (?,?)", (key, author_id))
+            conn.execute(
+                "INSERT INTO authors VALUES (?,?,?,?,?) "
+                "ON CONFLICT(author_id) DO UPDATE SET last_active=excluded.last_active",
+                (author_id, model, nickname, now, now),
+            )
+        return author_id
+
     def add_post(self, post: dict) -> dict:
         """Insert a post (posts.json shape; id/created_at filled if missing)."""
         post = dict(post)
@@ -469,15 +503,16 @@ class LoRStore:
     def resolve_author(self, name: str, authors: dict | None = None) -> str:
         """An author_id or nickname → one author_id, or DMError.
 
-        A resident's own identity (Pulse persona) wins over older session ids that
-        reused the same nickname; anything still ambiguous is refused with options.
+        A resident's own identity (Pulse persona) wins, then a visitor's stable
+        identity, over older session ids that reused the same nickname; anything
+        still ambiguous is refused with options.
         """
         authors = self.authors() if authors is None else authors
         if name in authors:
             return name
-        resident = self.resident_author_id(name)
-        if resident:
-            return resident
+        stable = self.resident_author_id(name) or self.resident_author_id(VISITOR_PREFIX + name)
+        if stable:
+            return stable
 
         lowered = name.lower()
         matches = [aid for aid in authors if aid.lower() == lowered]
