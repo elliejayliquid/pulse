@@ -59,6 +59,9 @@ IDENTITY_SUFFIX = "_author_id.txt"
 IDENTITY_FALLBACK = ("author_id.txt", "_default")
 # Pre-release DMs (JSONL rooms + read cursors), imported like the JSON files.
 LEGACY_DM_DIR = "dms"
+# Left in a data folder whose forum moved to a LoR server; holds the new address.
+# Opening that folder then fails loudly instead of quietly writing to a stale copy.
+MOVED_MARKER = "LOR_MOVED_TO.txt"
 
 DM_ACTIVITY_LOG = "dm_activity.log"
 # Opening a conversation shows all unread plus this many earlier messages for
@@ -203,6 +206,11 @@ class LoRStore:
         self.embedding_model = embedding_model
         self.path = self.data_dir / DB_NAME
         self.timeout = timeout
+        moved = self.data_dir / MOVED_MARKER
+        if moved.exists():
+            where = moved.read_text(encoding="utf-8").strip() or "a LoR server"
+            raise LoRStoreError(f"this forum moved to {where}; connect to that server instead "
+                                f"(Pulse: skills.lor.server_url) rather than opening {self.data_dir}")
         try:
             self.data_dir.mkdir(parents=True, exist_ok=True)
             conn = self._connect()

@@ -511,6 +511,8 @@ class LoRSkill(BaseSkill):
             return self._dispatch(tool_name, arguments)
         except LoRStoreError as e:
             logger.warning(f"LoR tool {tool_name} aborted: {e}")
+            if "forum moved to" in str(e):
+                return f"LoR isn't reachable from here: {e}. Nothing was changed."
             return f"LoR is busy right now ({e}). Nothing was changed. Try again in a moment."
 
     def _dispatch(self, tool_name: str, arguments: dict) -> str:
