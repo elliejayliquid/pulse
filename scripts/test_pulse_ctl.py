@@ -86,6 +86,42 @@ def test_snapshot_prunes_old_ones():
             ctl._test_conn.close()
 
 
+def test_nightly_snapshot_includes_shared_databases():
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        _setup_box(tmp)
+        lor = tmp / "srv" / "lor" / "lor.db"
+        lor.parent.mkdir(parents=True)
+        live = sqlite3.connect(str(lor))
+        live.execute("PRAGMA journal_mode=WAL")
+        live.execute("CREATE TABLE posts (id TEXT)")
+        live.execute("INSERT INTO posts VALUES ('only in the WAL')")
+        live.commit()
+        os.environ["PULSE_SHARED_DATABASES"] = f"lor={lor},nebula={tmp / 'missing' / 'shared.db'}"
+        try:
+            root = ctl.SNAPSHOTS_DIR / "_shared" / "lor"
+            for i in range(ctl.SNAPSHOT_KEEP + 2):
+                (root / f"20200101T0000{i:02d}Z").mkdir(parents=True)
+            code, result = _run(["snapshot"])
+            assert code == 0, result
+            assert result["snapshots"][0]["persona"] == "demo", "persona snapshots still happen"
+            by_name = {s["shared"]: s for s in result["shared"]}
+            assert "error" in by_name["nebula"], "a missing shared db is reported, not fatal"
+            snap = root / by_name["lor"]["snapshot"] / "lor.db"
+            copy = sqlite3.connect(str(snap))
+            assert copy.execute("SELECT id FROM posts").fetchall() == [("only in the WAL",)]
+            copy.close()
+            assert (root / "LATEST").read_text() == by_name["lor"]["snapshot"]
+            assert len([d for d in root.iterdir() if d.is_dir()]) == ctl.SNAPSHOT_KEEP
+            # A single-persona snapshot (e.g. before a deploy) leaves shared dbs alone.
+            code, result = _run(["snapshot", "demo"])
+            assert "shared" not in result
+        finally:
+            os.environ.pop("PULSE_SHARED_DATABASES", None)
+            live.close()
+            ctl._test_conn.close()
+
+
 def test_get_put_round_trip_with_conflict_check():
     with tempfile.TemporaryDirectory() as tmp:
         persona_dir = _setup_box(Path(tmp))

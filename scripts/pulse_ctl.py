@@ -281,13 +281,7 @@ def _snapshot_one(persona: str) -> dict:
             continue
         target.parent.mkdir(parents=True, exist_ok=True)
         if path.suffix in (".db", ".sqlite"):
-            src = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True, timeout=30)
-            dst = sqlite3.connect(str(target))
-            try:
-                src.backup(dst)
-            finally:
-                dst.close()
-                src.close()
+            _backup_sqlite(path, target)
             databases += 1
         else:
             shutil.copy2(path, target)
@@ -300,6 +294,17 @@ def _snapshot_one(persona: str) -> dict:
     return {"persona": persona, "snapshot": dest.name, "files": files, "databases": databases}
 
 
+def _backup_sqlite(path: Path, target: Path) -> None:
+    """Consistent copy of a live SQLite db (WAL included) via the online backup API."""
+    src = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True, timeout=30)
+    dst = sqlite3.connect(str(target))
+    try:
+        src.backup(dst)
+    finally:
+        dst.close()
+        src.close()
+
+
 def _prune_snapshots(persona_root: Path) -> None:
     snapshots = sorted(
         (d for d in persona_root.iterdir() if d.is_dir() and not d.name.endswith(".partial")),
@@ -310,9 +315,54 @@ def _prune_snapshots(persona_root: Path) -> None:
         shutil.rmtree(old)
 
 
+def _shared_databases() -> dict[str, Path]:
+    """Databases shared by several residents (LoR, Nebula), from PULSE_SHARED_DATABASES.
+
+    Format: "name=/path/to.db,other=/path/other.db". Set on the nightly
+    pulse-snapshot.service (a drop-in that also grants it access to those folders).
+    """
+    shared = {}
+    for item in os.environ.get("PULSE_SHARED_DATABASES", "").split(","):
+        name, sep, path = item.strip().partition("=")
+        if sep and name.strip() and path.strip():
+            shared[name.strip()] = Path(path.strip())
+    return shared
+
+
+def _snapshot_shared(name: str, path: Path) -> dict:
+    """snapshots/_shared/<name>/<UTC stamp>/<file>, kept like persona snapshots."""
+    if not path.is_file():
+        raise CtlError(f"shared database {name} not found at {path}")
+    root = SNAPSHOTS_DIR / "_shared" / name
+    stamp = _now().strftime("%Y%m%dT%H%M%SZ")
+    dest = root / stamp
+    suffix = 1
+    while dest.exists():
+        dest = root / f"{stamp}_{suffix:02d}"
+        suffix += 1
+    partial = dest.with_name(dest.name + ".partial")
+    partial.mkdir(parents=True)
+    _backup_sqlite(path, partial / path.name)
+    partial.rename(dest)
+    (root / "LATEST").write_text(dest.name, encoding="utf-8")
+    _prune_snapshots(root)
+    return {"shared": name, "snapshot": dest.name, "source": str(path)}
+
+
 def cmd_snapshot(args: list[str]) -> dict:
-    personas = args[:1] or _persona_names()
-    return {"snapshots": [_snapshot_one(p) for p in personas]}
+    if args:
+        return {"snapshots": [_snapshot_one(args[0])]}
+    result = {"snapshots": [_snapshot_one(p) for p in _persona_names()]}
+    shared = []
+    for name, path in _shared_databases().items():
+        # One unreachable shared db must not cost the persona snapshots.
+        try:
+            shared.append(_snapshot_shared(name, path))
+        except (CtlError, OSError, sqlite3.Error) as e:
+            shared.append({"shared": name, "error": str(e)})
+    if shared:
+        result["shared"] = shared
+    return result
 
 
 def cmd_version(_args: list[str]) -> dict:
