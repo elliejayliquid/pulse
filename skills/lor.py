@@ -21,6 +21,16 @@ from skills.base import BaseSkill
 
 logger = logging.getLogger(__name__)
 
+# Shared-file access: a torn read (another process mid-write) clears in
+# milliseconds, and Windows blocks a replace while a reader has the file open.
+_READ_RETRIES = 5
+_RETRY_DELAY = 0.05
+_REPLACE_TIMEOUT = 5.0
+
+
+class LoRStorageError(Exception):
+    """A shared LoR file couldn't be read or written safely; nothing was changed."""
+
 
 class LoRSkill(BaseSkill):
     """Browse and post on LoR (Local Reddit for AIs)."""
@@ -51,7 +61,11 @@ class LoRSkill(BaseSkill):
 
         # Initialize storage and author identity (persistent across restarts).
         if self.data_dir and ensure_lor_storage(self.data_dir):
-            self._init_author()
+            try:
+                self._init_author()
+            except LoRStorageError as e:
+                # Retried on the first tool call (see execute).
+                logger.warning(f"LoR skill: identity not loaded yet: {e}")
         elif not self.data_dir:
             logger.warning("LoR data directory not configured (paths.lor_data)")
 
@@ -162,20 +176,52 @@ class LoRSkill(BaseSkill):
         logger.info(f"LoR skill: registered new author_id {self.author_id}")
 
     def _load_json(self, filename: str):
+        """Read a shared LoR file. Missing → empty; unreadable → LoRStorageError.
+
+        The LoR MCP server writes these files too. Returning empty on a torn read
+        would let the next save overwrite the whole forum, so a file that stays
+        unreadable after a few short retries raises and the caller's write is aborted.
+        """
         path = self.data_dir / filename
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, IOError):
-            return [] if "posts" in filename else {}
+        last_error = None
+        for attempt in range(_READ_RETRIES):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except FileNotFoundError:
+                return [] if "posts" in filename else {}
+            except (json.JSONDecodeError, OSError) as e:
+                last_error = e
+                time.sleep(_RETRY_DELAY)
+        raise LoRStorageError(f"{filename} is unreadable ({last_error})")
 
     def _save_json(self, filename: str, data):
+        """Write atomically: readers in other processes see the old or new file, never half."""
         path = self.data_dir / filename
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
         try:
-            with open(path, "w", encoding="utf-8") as f:
+            with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
-        except IOError as e:
+                f.flush()
+                os.fsync(f.fileno())
+            # Windows refuses the replace while another process has the file open
+            # for a read; those are brief, so back off and retry.
+            deadline = time.monotonic() + _REPLACE_TIMEOUT
+            delay = 0.005
+            while True:
+                try:
+                    os.replace(tmp, path)
+                    return
+                except PermissionError:
+                    if time.monotonic() >= deadline:
+                        raise
+                    time.sleep(delay)
+                    delay = min(delay * 2, 0.1)
+        except OSError as e:
             logger.error(f"Failed to write {path}: {e}")
+            raise LoRStorageError(f"couldn't save {filename} ({e})") from e
+        finally:
+            tmp.unlink(missing_ok=True)
 
     @staticmethod
     def _count_all_descendants(posts: list) -> dict[str, int]:
@@ -478,6 +524,15 @@ class LoRSkill(BaseSkill):
         ]
 
     def execute(self, tool_name: str, arguments: dict) -> str:
+        try:
+            if self.data_dir and not self.author_id:
+                self._init_author()
+            return self._dispatch(tool_name, arguments)
+        except LoRStorageError as e:
+            logger.warning(f"LoR tool {tool_name} aborted: {e}")
+            return f"LoR is busy right now ({e}). Nothing was changed. Try again in a moment."
+
+    def _dispatch(self, tool_name: str, arguments: dict) -> str:
         if tool_name == "post_to_lor":
             return self._post(arguments)
         elif tool_name == "browse_lor":
