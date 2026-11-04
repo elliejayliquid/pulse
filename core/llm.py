@@ -110,6 +110,39 @@ def strip_think_tags(text: str) -> str:
     return cleaned.strip()
 
 
+def empty_reply_nudge(autonomous: bool = False, truncated: bool = False) -> str:
+    """Build the one-shot nudge sent when a tool-calling turn ends with no text.
+
+    ``autonomous`` turns (heartbeats, scheduled tasks) have no user message to
+    answer, so they're asked for their usual JSON decision instead — telling a
+    heartbeat to "reply to the user" pushes it into notifying as plain text.
+    ``truncated`` means the output budget ran out (usually all spent thinking),
+    so the model is told to think briefly rather than retry the same plan.
+    """
+    parts = ["[SYSTEM:"]
+    if truncated:
+        parts.append(
+            "Your last turn ran out of output space before you wrote anything — "
+            "it was all spent thinking. Keep your thinking short this time."
+        )
+    elif autonomous:
+        parts.append("You used tools but ended your turn without a decision.")
+    else:
+        parts.append("You performed a tool action but ended your turn without replying to the user.")
+    if autonomous:
+        parts.append(
+            "This is your own time, not a reply to a message. Finish now with your "
+            "usual JSON decision (notify, schedule or silent — silent is fine). "
+            "Anything unfinished can be done in one short step or left for later.]"
+        )
+    else:
+        parts.append(
+            "Do not be silent. Respond now in text, in character, directly to the "
+            "user's latest message.]"
+        )
+    return " ".join(parts)
+
+
 def detect_tool_loop(recent_calls: list[tuple[str, str]]) -> Optional[str]:
     """Check recent tool calls for stuck patterns.
     
@@ -530,7 +563,8 @@ class LLMClient:
             return None
 
     def chat_with_tools(self, messages: list[dict], tools: list[dict],
-                        skill_registry, max_rounds: int = 5, loop_mode: str = "capped") -> tuple[Optional[str], list[str]]:
+                        skill_registry, max_rounds: int = 5, loop_mode: str = "capped",
+                        autonomous: bool = False) -> tuple[Optional[str], list[str]]:
         """Chat with tool-calling support for Telegram conversations.
 
         Implements an agentic loop:
@@ -595,23 +629,24 @@ class LLMClient:
                     self.last_reasoning = self._collect_reasoning(message, text)
                     cleaned = strip_think_tags(text).strip()
                     # A turn that used tools but ended with no reply means housekeeping
-                    # silently replaced responding to the user (common on cold wake-ups).
+                    # silently replaced responding to the user (common on cold wake-ups),
+                    # and a truncated one means the budget went to thinking.
                     # Nudge once to actually reply instead of dropping the message.
+                    truncated = finish == "length"
                     if (
                         not cleaned
-                        and tools_used
+                        and (tools_used or truncated)
                         and not empty_nudged
                         and round_num + 1 < effective_max
                     ):
                         empty_nudged = True
-                        logger.info("Empty final response after tool work — nudging model to reply.")
+                        logger.info(
+                            f"Empty final response ({'truncated' if truncated else 'after tool work'})"
+                            " — nudging model to reply."
+                        )
                         msgs.append({
                             "role": "user",
-                            "content": (
-                                "[SYSTEM: You performed a tool action but ended your turn "
-                                "without replying to the user. Do not be silent. Respond now "
-                                "in text, in character, directly to the user's latest message.]"
-                            ),
+                            "content": empty_reply_nudge(autonomous, truncated),
                         })
                         continue
                     return (cleaned if cleaned else None), tools_used

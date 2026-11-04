@@ -1085,7 +1085,7 @@ class PulseEngine:
                 tool_mode, tool_budget = self._resolve_tool_loop_params()
                 text, tools_used = await asyncio.to_thread(
                     self.llm.chat_with_tools, messages, tools, self.skill_registry,
-                    max_rounds=tool_budget, loop_mode=tool_mode
+                    max_rounds=tool_budget, loop_mode=tool_mode, autonomous=True
                 )
                 if tools_used:
                     logger.info(f"Task tools used: {', '.join(tools_used)}")
@@ -1190,7 +1190,7 @@ class PulseEngine:
             tool_mode, tool_budget = self._resolve_tool_loop_params()
             text, tools_used = await asyncio.to_thread(
                 self.llm.chat_with_tools, messages, tools, self.skill_registry,
-                max_rounds=tool_budget, loop_mode=tool_mode
+                max_rounds=tool_budget, loop_mode=tool_mode, autonomous=True
             )
             elapsed = time.time() - t0
             if tools_used:

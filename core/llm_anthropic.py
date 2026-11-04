@@ -28,6 +28,7 @@ from core.llm import (
     extract_think_content,
     strip_think_tags,
     detect_tool_loop,
+    empty_reply_nudge,
     extend_tools_unique,
 )
 
@@ -729,7 +730,8 @@ class AnthropicClient:
             return None
 
     def chat_with_tools(self, messages: list[dict], tools: list[dict],
-                        skill_registry, max_rounds: int = 5, loop_mode: str = "capped") -> tuple[Optional[str], list[str]]:
+                        skill_registry, max_rounds: int = 5, loop_mode: str = "capped",
+                        autonomous: bool = False) -> tuple[Optional[str], list[str]]:
         """Chat with native Anthropic tool_use support.
 
         Implements the same agentic loop as LLMClient but using
@@ -820,25 +822,24 @@ class AnthropicClient:
                     self.last_reasoning = extract_think_content(text)
                     cleaned = strip_think_tags(text).strip()
                     # A turn that used tools but ended with no reply means housekeeping
-                    # silently replaced responding to the user (common on cold wake-ups).
+                    # silently replaced responding to the user (common on cold wake-ups),
+                    # and a truncated one means the budget went to thinking.
                     # Nudge once to actually reply instead of dropping the message.
+                    truncated = stop == "max_tokens"
                     if (
                         not cleaned
-                        and tools_used
+                        and (tools_used or truncated)
                         and not empty_nudged
                         and round_num + 1 < effective_max
                     ):
                         empty_nudged = True
                         logger.info(
-                            "Empty final response after tool work — nudging model to reply."
+                            f"Empty final response ({'truncated' if truncated else 'after tool work'})"
+                            " — nudging model to reply."
                         )
                         anthropic_msgs.append({
                             "role": "user",
-                            "content": (
-                                "[SYSTEM: You performed a tool action but ended your turn "
-                                "without replying to the user. Do not be silent. Respond now "
-                                "in text, in character, directly to the user's latest message.]"
-                            ),
+                            "content": empty_reply_nudge(autonomous, truncated),
                         })
                         continue
                     return (cleaned if cleaned else None), tools_used

@@ -132,8 +132,10 @@ class PaintSkill(BaseSkill):
                     "name": "paint_set",
                     "description": (
                         "Place colored cells on the canvas. "
-                        "PREFERRED: pass the full grid as a multiline string — one row per line, "
-                        "colors comma-separated. This lets you paint the entire canvas in ONE call. "
+                        "PREFERRED: pass a grid as a multiline string — one row per line, "
+                        "colors comma-separated — to paint a rough version fast, then refine. "
+                        "Passes layer (\"empty\" skips a cell), so background and subject can be "
+                        "separate calls. "
                         "Example for 4x4: cells=\"red,red,blue,blue\\ngreen,green,white,white\\n...\". "
                         "Also accepts: a single row string, a JSON list of {x,y,color} dicts, "
                         "or individual x/y/color params for touch-ups. "
@@ -262,14 +264,16 @@ class PaintSkill(BaseSkill):
             "",
             f"Palette: {palette_list}",
             "",
-            "HOW TO PAINT:",
-            "1. Plan your full image mentally — decide every pixel's color.",
-            f"2. Paint the ENTIRE grid in ONE call using paint_set with a multiline string:",
+            "HOW TO PAINT — sketch, look, refine (the canvas is your scratchpad):",
+            "1. Don't work out every pixel in your head first. Pick the big shapes and paint a rough",
+            "   version right away with a multiline paint_set:",
             f"   paint_set(cells=\"row0color,row0color,...\\nrow1color,row1color,...\\n...\")",
-            f"   That's {height} lines of {width} comma-separated color names.",
-            "3. Call paint_view() to see what you made.",
-            "4. Use paint_set(x=, y=, color=) for individual touch-ups.",
-            "5. When happy, paint_finish(title=...).",
+            f"   Up to {height} lines of {width} comma-separated color names.",
+            "   Passes layer: \"empty\" leaves a cell untouched, so you can paint the background",
+            "   in one call and the subject on top in the next.",
+            "2. Call paint_view() to see what you made.",
+            "3. Fix what looks off with paint_set(x=, y=, color=) touch-ups or another pass.",
+            "4. When happy, paint_finish(title=...). A simple finished piece beats a perfect plan.",
         ]
         return "\n".join(line for line in lines if line)
 

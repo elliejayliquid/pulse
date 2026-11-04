@@ -16,7 +16,9 @@ from typing import Optional
 
 from openai import OpenAI, APIError, APIConnectionError
 
-from core.llm import PulseResponse, strip_think_tags, detect_tool_loop, extend_tools_unique
+from core.llm import (
+    PulseResponse, strip_think_tags, detect_tool_loop, empty_reply_nudge, extend_tools_unique,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -186,7 +188,8 @@ class OpenAIResponsesClient:
             return None
 
     def chat_with_tools(self, messages: list[dict], tools: list[dict],
-                        skill_registry, max_rounds: int = 5, loop_mode: str = "capped") -> tuple[Optional[str], list[str]]:
+                        skill_registry, max_rounds: int = 5, loop_mode: str = "capped",
+                        autonomous: bool = False) -> tuple[Optional[str], list[str]]:
         """Conversation call with tool-calling loop."""
         input_items = _convert_messages_for_responses(messages)
         tools_used = []
@@ -258,23 +261,25 @@ class OpenAIResponsesClient:
                     self.last_reasoning = self._collect_reasoning(response)
                     cleaned = strip_think_tags(text).strip()
                     # A turn that used tools but ended with no reply means housekeeping
-                    # silently replaced responding to the user (common on cold wake-ups).
+                    # silently replaced responding to the user (common on cold wake-ups),
+                    # and a truncated one means the budget went to thinking.
                     # Nudge once to actually reply instead of dropping the message.
+                    incomplete = getattr(response, "incomplete_details", None)
+                    truncated = getattr(incomplete, "reason", "") == "max_output_tokens"
                     if (
                         not cleaned
-                        and tools_used
+                        and (tools_used or truncated)
                         and not empty_nudged
                         and round_num + 1 < effective_max
                     ):
                         empty_nudged = True
-                        logger.info("Empty final response after tool work — nudging model to reply.")
+                        logger.info(
+                            f"Empty final response ({'truncated' if truncated else 'after tool work'})"
+                            " — nudging model to reply."
+                        )
                         input_items.append({
                             "role": "user",
-                            "content": (
-                                "[SYSTEM: You performed a tool action but ended your turn "
-                                "without replying to the user. Do not be silent. Respond now "
-                                "in text, in character, directly to the user's latest message.]"
-                            ),
+                            "content": empty_reply_nudge(autonomous, truncated),
                         })
                         continue
                     return (cleaned or None), tools_used
