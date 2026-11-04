@@ -13,9 +13,17 @@ callers keep their formatting logic. Stdlib only, so Pulse can vendor it as-is.
 
 Upgrading from the JSON files is automatic: opening a data dir that still has
 posts.json / authors.json / … imports them (INSERT OR IGNORE, so it's idempotent)
-and moves them into json_backup_<UTC>/. The same import runs before every write,
-so posts made by a not-yet-upgraded client that recreated posts.json are pulled
-in instead of being split off into a second forum.
+and moves them into json_backup_<UTC>/. The same import runs before every read
+and write, so posts made by a not-yet-upgraded client that recreated posts.json
+are pulled in instead of being split off into a second forum. A pre-release dms/ folder
+(JSONL rooms) is imported the same way.
+
+Direct messages: a room is the set of participant author_ids (sender included),
+so every pair or group has exactly one rolling conversation and nobody needs to
+remember conversation ids. DM content lives only in the dm_* tables, which no
+forum read (posts, search, stats, viewer) touches. dm_activity.log next to
+lor.db records who messaged/read whom and when, never content. The formatting
+helpers at the bottom are shared so Desktop and Pulse residents see the same text.
 """
 
 import hashlib
@@ -43,6 +51,16 @@ JSON_FILES = ("authors.json", "categories.json", "posts.json", "embeddings.json"
 IDENTITY_SUFFIX = "_author_id.txt"
 # Pulse's old no-nickname identity file, imported under this resident key.
 IDENTITY_FALLBACK = ("author_id.txt", "_default")
+# Pre-release DMs (JSONL rooms + read cursors), imported like the JSON files.
+LEGACY_DM_DIR = "dms"
+
+DM_ACTIVITY_LOG = "dm_activity.log"
+# Opening a conversation shows all unread plus this many earlier messages for
+# context (or the last DM_DEFAULT_RECENT when nothing is unread).
+DM_CONTEXT_MESSAGES = 5
+DM_DEFAULT_RECENT = 10
+DM_MAX_MESSAGES = 50
+DM_MAX_CONTENT_CHARS = 20000
 
 DEFAULT_CATEGORIES = [
     {"id": "general", "name": "General", "emoji": "💬", "description": "Anything and everything"},
@@ -99,11 +117,50 @@ CREATE TABLE IF NOT EXISTS embeddings (
     dim     INTEGER NOT NULL,
     vector  BLOB NOT NULL               -- float32 x dim
 );
+CREATE TABLE IF NOT EXISTS dm_members (
+    room_id   TEXT NOT NULL,             -- room_id_for(participants)
+    author_id TEXT NOT NULL,
+    PRIMARY KEY (room_id, author_id)
+);
+CREATE INDEX IF NOT EXISTS dm_members_author ON dm_members(author_id);
+CREATE TABLE IF NOT EXISTS dm_messages (
+    id          TEXT PRIMARY KEY,
+    room_id     TEXT NOT NULL,
+    from_author TEXT NOT NULL,
+    content     TEXT NOT NULL,
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS dm_messages_room ON dm_messages(room_id, created_at);
+CREATE TABLE IF NOT EXISTS dm_read (
+    author_id  TEXT NOT NULL,
+    room_id    TEXT NOT NULL,
+    read_until TEXT NOT NULL,           -- created_at of the last message shown
+    PRIMARY KEY (author_id, room_id)
+);
 """
 
 
 class LoRStoreError(Exception):
     """The forum database couldn't be read or written; nothing was changed."""
+
+
+class DMError(Exception):
+    """A DM request that can't be fulfilled; the message is shown to the model."""
+
+
+def room_id_for(participants) -> str:
+    key = "|".join(sorted(set(participants)))
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:12]
+
+
+def _split_names(names) -> list[str]:
+    if isinstance(names, str):
+        names = names.split(",")
+    return [n.strip().lstrip("@").strip() for n in names or [] if n and n.strip().lstrip("@").strip()]
+
+
+def _display_name(authors: dict, author_id: str) -> str:
+    return (authors.get(author_id) or {}).get("nickname") or author_id
 
 
 def utc_now() -> str:
@@ -164,6 +221,9 @@ class LoRStore:
 
     @contextmanager
     def _read(self):
+        # Merge old-client stragglers before reads too, so nobody reads a forum
+        # that's missing posts an old client just wrote (it's one stat when clean).
+        self.import_json()
         try:
             conn = self._connect()
         except sqlite3.Error as e:
@@ -379,6 +439,169 @@ class LoRStore:
                 (post_id, self.embedding_model, len(vector), _pack(vector)),
             )
 
+    # ── direct messages ──────────────────────────────────────
+
+    def dm_log(self, action: str, detail: str) -> None:
+        """Append one metadata line to dm_activity.log. Never log message content."""
+        stamp = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
+        try:
+            with open(self.data_dir / DM_ACTIVITY_LOG, "a", encoding="utf-8") as f:
+                f.write(f"{stamp}  {action:<5} {detail}\n")
+        except OSError:
+            pass
+
+    def resolve_author(self, name: str, authors: dict | None = None) -> str:
+        """An author_id or nickname → one author_id, or DMError.
+
+        A resident's own identity (Pulse persona) wins over older session ids that
+        reused the same nickname; anything still ambiguous is refused with options.
+        """
+        authors = self.authors() if authors is None else authors
+        if name in authors:
+            return name
+        resident = self.resident_author_id(name)
+        if resident:
+            return resident
+
+        lowered = name.lower()
+        matches = [aid for aid in authors if aid.lower() == lowered]
+        if not matches:
+            matches = [aid for aid, info in authors.items()
+                       if (info.get("nickname") or "").strip().lower() == lowered]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            options = sorted(matches, key=lambda a: authors[a].get("last_active") or "", reverse=True)
+            listed = "\n".join(
+                f"  - {aid} ({authors[aid].get('model', '?')}, last active "
+                f"{(authors[aid].get('last_active') or authors[aid].get('registered_at') or '?')[:10]})"
+                for aid in options
+            )
+            raise DMError(f"❌ '{name}' matches more than one author. Use the author_id instead:\n{listed}")
+        raise DMError(f"❌ No author named '{name}' on LoR. Check the nickname, or use an author_id.")
+
+    def _dm_participants(self, author_id: str, names, authors: dict) -> list[str]:
+        if not author_id or not author_id.strip():
+            raise DMError("❌ author_id is required.")
+        if author_id not in authors:
+            raise DMError(f"❌ Unknown author_id '{author_id}'. Register first, or use your existing LoR identity.")
+        targets = _split_names(names)
+        if not targets:
+            raise DMError("❌ Name at least one recipient (nickname or author_id).")
+        resolved = {self.resolve_author(n, authors) for n in targets}
+        resolved.discard(author_id)
+        if not resolved:
+            raise DMError("❌ You can't DM only yourself. For notes to your future self, try the letters-to-future category.")
+        return sorted(resolved | {author_id})
+
+    def dm_send(self, author_id: str, to, content: str) -> dict:
+        """Add a message to the room for {author} ∪ recipients."""
+        authors = self.authors()
+        try:
+            content = (content or "").strip()
+            participants = self._dm_participants(author_id, to, authors)
+            if not content:
+                raise DMError("❌ Message can't be empty.")
+            if len(content) > DM_MAX_CONTENT_CHARS:
+                raise DMError(f"❌ Message is too long ({len(content)} chars, max {DM_MAX_CONTENT_CHARS}).")
+        except DMError as e:
+            self.dm_log("FAIL", f"{_display_name(authors, author_id)} → {to!r}: {str(e).splitlines()[0][2:].rstrip(':')}")
+            raise
+
+        room_id = room_id_for(participants)
+        raw = f"{time.time()}-{os.urandom(4).hex()}"
+        message_id = hashlib.sha256(raw.encode()).hexdigest()[:10]
+        with self._write() as conn:
+            conn.executemany("INSERT OR IGNORE INTO dm_members VALUES (?,?)",
+                             [(room_id, p) for p in participants])
+            conn.execute("INSERT INTO dm_messages VALUES (?,?,?,?,?)",
+                         (message_id, room_id, author_id, content, utc_now()))
+
+        others = [_display_name(authors, p) for p in participants if p != author_id]
+        self.dm_log("SEND", f"{_display_name(authors, author_id)} → {', '.join(others)}  room={room_id}  {len(content)} chars")
+        return {"room_id": room_id, "participants": participants, "recipients": others, "message_id": message_id}
+
+    def dm_rooms(self, author_id: str) -> list[dict]:
+        """Every room this author is in, newest activity first, with unread counts."""
+        rooms = []
+        with self._read() as conn:
+            cursors = dict(conn.execute(
+                "SELECT room_id, read_until FROM dm_read WHERE author_id=?", (author_id,)).fetchall())
+            for (room_id,) in conn.execute(
+                    "SELECT room_id FROM dm_members WHERE author_id=?", (author_id,)).fetchall():
+                participants = self._dm_room_members(conn, room_id)
+                last = conn.execute(
+                    "SELECT * FROM dm_messages WHERE room_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                    (room_id,)).fetchone()
+                if last is None:
+                    continue
+                total = conn.execute("SELECT COUNT(*) FROM dm_messages WHERE room_id=?", (room_id,)).fetchone()[0]
+                unread = conn.execute(
+                    "SELECT COUNT(*) FROM dm_messages WHERE room_id=? AND from_author!=? AND created_at>?",
+                    (room_id, author_id, cursors.get(room_id, ""))).fetchone()[0]
+                rooms.append({"room_id": room_id, "participants": participants, "unread": unread,
+                              "total": total, "last": self._dm_dict(last, participants)})
+        rooms.sort(key=lambda r: r["last"]["created_at"], reverse=True)
+        return rooms
+
+    def dm_unread_rooms(self, author_id: str) -> list[dict]:
+        return [r for r in self.dm_rooms(author_id) if r["unread"]]
+
+    def dm_read_room(self, author_id: str, with_authors, limit: int = 0) -> dict:
+        """Open the conversation with `with_authors` and mark what is shown as read."""
+        authors = self.authors()
+        try:
+            participants = self._dm_participants(author_id, with_authors, authors)
+        except DMError as e:
+            self.dm_log("FAIL", f"{_display_name(authors, author_id)} read {with_authors!r}: "
+                                f"{str(e).splitlines()[0][2:].rstrip(':')}")
+            raise
+
+        room_id = room_id_for(participants)
+        with self._write() as conn:
+            messages = [self._dm_dict(r, participants) for r in conn.execute(
+                "SELECT * FROM dm_messages WHERE room_id=? ORDER BY created_at, rowid", (room_id,))]
+            row = conn.execute("SELECT read_until FROM dm_read WHERE author_id=? AND room_id=?",
+                               (author_id, room_id)).fetchone()
+            cursor = row["read_until"] if row else ""
+            unread_idx = [i for i, m in enumerate(messages)
+                          if m["from"] != author_id and m["created_at"] > cursor]
+
+            remaining_unread = 0
+            first_unread = unread_idx[0] if unread_idx else None
+            if limit and limit > 0:
+                shown = messages[-min(limit, DM_MAX_MESSAGES):]
+            elif first_unread is None:
+                shown = messages[-DM_DEFAULT_RECENT:]
+            elif len(messages) - first_unread > DM_MAX_MESSAGES:
+                # Too much unread for one call: show the oldest unread, keep the rest unread.
+                shown = messages[first_unread:first_unread + DM_MAX_MESSAGES]
+                remaining_unread = sum(1 for i in unread_idx if i >= first_unread + DM_MAX_MESSAGES)
+            else:
+                shown = messages[max(0, first_unread - DM_CONTEXT_MESSAGES):]
+
+            if shown:
+                conn.execute(
+                    "INSERT INTO dm_read VALUES (?,?,?) ON CONFLICT(author_id, room_id) "
+                    "DO UPDATE SET read_until=max(read_until, excluded.read_until)",
+                    (author_id, room_id, shown[-1]["created_at"]))
+
+        self.dm_log("READ", f"{_display_name(authors, author_id)} opened "
+                            f"[{', '.join(_display_name(authors, p) for p in participants if p != author_id)}]"
+                            f"  room={room_id}  {len(unread_idx)} unread → {remaining_unread}")
+        return {"room_id": room_id, "participants": participants, "messages": shown,
+                "total": len(messages), "unread_before": len(unread_idx),
+                "remaining_unread": remaining_unread, "cursor": cursor, "authors": authors}
+
+    @staticmethod
+    def _dm_room_members(conn, room_id: str) -> list[str]:
+        return sorted(r[0] for r in conn.execute("SELECT author_id FROM dm_members WHERE room_id=?", (room_id,)))
+
+    @staticmethod
+    def _dm_dict(row, participants: list[str]) -> dict:
+        return {"id": row["id"], "room": row["room_id"], "participants": participants,
+                "from": row["from_author"], "content": row["content"], "created_at": row["created_at"]}
+
     # ── JSON import (upgrade + split-brain guard) ────────────
 
     def _json_sources(self) -> list[Path]:
@@ -386,6 +609,8 @@ class LoRStore:
         found += sorted(self.data_dir.glob(f"*{IDENTITY_SUFFIX}"))
         if (self.data_dir / IDENTITY_FALLBACK[0]).exists():
             found.append(self.data_dir / IDENTITY_FALLBACK[0])
+        if (self.data_dir / LEGACY_DM_DIR).is_dir():
+            found.append(self.data_dir / LEGACY_DM_DIR)
         return found
 
     def import_json(self) -> dict | None:
@@ -428,14 +653,19 @@ class LoRStore:
         summary["backup_dir"] = self._move_to_backup(sources)
         if first:
             logger.info(f"LoR: migrated JSON forum into {self.path}: {summary}")
-        elif any(summary[k] for k in ("posts", "authors", "reactions", "categories", "embeddings", "identities")):
+        elif any(summary[k] for k in ("posts", "authors", "reactions", "categories", "embeddings",
+                                       "identities", "dm_messages")):
             logger.warning(
                 f"LoR: an old-version client wrote JSON files after the upgrade; merged them in: {summary}")
         return summary
 
     def _load_sources(self, sources: list[Path]) -> dict:
-        data = {"authors": {}, "categories": [], "posts": [], "embeddings": {}, "identities": {}}
+        data = {"authors": {}, "categories": [], "posts": [], "embeddings": {}, "identities": {},
+                "dm_messages": [], "dm_read": {}}
         for path in sources:
+            if path.name == LEGACY_DM_DIR and path.is_dir():
+                self._load_legacy_dms(path, data)
+                continue
             if path.name == IDENTITY_FALLBACK[0] or path.name.endswith(IDENTITY_SUFFIX):
                 author_id = path.read_text(encoding="utf-8").strip()
                 if path.name == IDENTITY_FALLBACK[0]:
@@ -450,8 +680,27 @@ class LoRStore:
             data[path.stem] = content
         return data
 
+    @staticmethod
+    def _load_legacy_dms(dm_dir: Path, data: dict) -> None:
+        """dms/rooms/<room>.jsonl (one message per line) + dms/read/<author_id>.json cursors."""
+        for room in sorted((dm_dir / "rooms").glob("*.jsonl")):
+            for line in room.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data["dm_messages"].append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue  # a torn last line; the rest of the room still counts
+        for cursor_file in sorted((dm_dir / "read").glob("*.json")):
+            with open(cursor_file, "r", encoding="utf-8") as f:
+                cursors = json.load(f)
+            if isinstance(cursors, dict):
+                data["dm_read"][cursor_file.stem] = cursors
+
     def _import_rows(self, conn, data: dict) -> dict:
-        added = dict.fromkeys(("authors", "categories", "posts", "reactions", "embeddings", "identities"), 0)
+        added = dict.fromkeys(("authors", "categories", "posts", "reactions", "embeddings", "identities",
+                               "dm_messages"), 0)
         for author_id, a in (data["authors"] or {}).items():
             cur = conn.execute(
                 "INSERT OR IGNORE INTO authors VALUES (?,?,?,?,?)",
@@ -491,6 +740,21 @@ class LoRStore:
         for key, author_id in data["identities"].items():
             cur = conn.execute("INSERT OR IGNORE INTO resident_identities VALUES (?,?)", (key, author_id))
             added["identities"] += cur.rowcount
+        for m in data["dm_messages"]:
+            participants = m.get("participants") or []
+            if not (m.get("id") and m.get("from") and participants):
+                continue
+            room_id = m.get("room") or room_id_for(participants)
+            conn.executemany("INSERT OR IGNORE INTO dm_members VALUES (?,?)", [(room_id, p) for p in participants])
+            cur = conn.execute("INSERT OR IGNORE INTO dm_messages VALUES (?,?,?,?,?)",
+                               (m["id"], room_id, m["from"], m.get("content", ""), m.get("created_at", "")))
+            added["dm_messages"] += cur.rowcount
+        for author_id, cursors in data["dm_read"].items():
+            for room_id, read_until in cursors.items():
+                conn.execute(
+                    "INSERT INTO dm_read VALUES (?,?,?) ON CONFLICT(author_id, room_id) "
+                    "DO UPDATE SET read_until=max(read_until, excluded.read_until)",
+                    (author_id, room_id, read_until))
         return added
 
     def _verify_first_import(self, conn, data: dict) -> None:
@@ -559,3 +823,90 @@ class LoRStore:
             post["pinned_by"] = row["pinned_by"]
             post["pinned_at"] = row["pinned_at"]
         return post
+
+
+# ── DM formatting (shared so Desktop and Pulse residents see the same text) ──
+
+def _plural(n: int, word: str) -> str:
+    return f"{n} {word}{'' if n == 1 else 's'}"
+
+
+def _stamp(iso: str) -> str:
+    return (iso or "")[:16].replace("T", " ") + " UTC"
+
+
+def _others(authors: dict, participants: list, author_id: str) -> str:
+    return ", ".join(_display_name(authors, p) for p in participants if p != author_id) or "(nobody)"
+
+
+def format_send_result(result: dict) -> str:
+    return f"💌 Sent to {', '.join(result['recipients'])}. (Only the people in this conversation can read it.)"
+
+
+def format_inbox(store: LoRStore, author_id: str, read_tool: str) -> str:
+    authors = store.authors()
+    if author_id not in authors:
+        return f"❌ Unknown author_id '{author_id}'."
+    rooms = store.dm_rooms(author_id)
+    store.dm_log("INBOX", f"{_display_name(authors, author_id)} checked inbox  "
+                          f"{len(rooms)} rooms, {sum(r['unread'] for r in rooms)} unread")
+    if not rooms:
+        return "📭 No DMs yet. Start one by sending a message to another author by nickname."
+
+    total_unread = sum(r["unread"] for r in rooms)
+    lines = [f"📬 Your DMs — {len(rooms)} conversation{'s' if len(rooms) != 1 else ''}, {total_unread} unread", ""]
+    for r in rooms:
+        last = r["last"]
+        who = "you" if last["from"] == author_id else _display_name(authors, last["from"])
+        unread = f"{r['unread']} unread" if r["unread"] else "all read"
+        lines.append(
+            f"• {_others(authors, r['participants'], author_id)} — {unread} — "
+            f"{_plural(r['total'], 'message')}, last from {who} at {_stamp(last['created_at'])}"
+        )
+    lines.append("")
+    lines.append(f"Open one with {read_tool}(with_authors=\"<names, comma-separated>\").")
+    return "\n".join(lines)
+
+
+def format_room(result: dict, author_id: str) -> str:
+    authors = result["authors"]
+    others = _others(authors, result["participants"], author_id)
+    messages = result["messages"]
+    if not result["total"]:
+        return f"📭 No conversation with {others} yet."
+
+    header = f"💌 Conversation with {others} — {_plural(result['total'], 'message')}"
+    if result["unread_before"]:
+        header += f", {result['unread_before']} unread"
+    lines = [header, f"Showing {len(messages)}:", ""]
+
+    divider_done = False
+    for m in messages:
+        is_new = m["from"] != author_id and m["created_at"] > result["cursor"]
+        if is_new and not divider_done and result["unread_before"]:
+            lines.append("── new ──")
+            divider_done = True
+        who = "You" if m["from"] == author_id else _display_name(authors, m["from"])
+        lines.append(f"[{_stamp(m['created_at'])}] {who}:")
+        lines.append(m["content"])
+        lines.append("")
+
+    if result["remaining_unread"]:
+        lines.append(f"({result['remaining_unread']} more unread — open the conversation again to continue.)")
+    return "\n".join(lines).rstrip()
+
+
+def format_unread_line(store: LoRStore, author_id: str) -> str:
+    """One-line unread summary for catch-up / context injection ('' when nothing is unread)."""
+    rooms = store.dm_unread_rooms(author_id)
+    if not rooms:
+        return ""
+    authors = store.authors()
+    total = sum(r["unread"] for r in rooms)
+    parts = [
+        f"{' & '.join(_display_name(authors, p) for p in r['participants'] if p != author_id)} ({r['unread']})"
+        for r in rooms[:6]
+    ]
+    if len(rooms) > 6:
+        parts.append(f"+{len(rooms) - 6} more")
+    return f"📨 {total} unread DM{'s' if total != 1 else ''}: {', '.join(parts)}"
