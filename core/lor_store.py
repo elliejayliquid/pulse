@@ -208,7 +208,9 @@ class LoRStore:
         self.timeout = timeout
         moved = self.data_dir / MOVED_MARKER
         if moved.exists():
-            where = moved.read_text(encoding="utf-8").strip() or "a LoR server"
+            # First line is the new address; anything after it is a note for humans.
+            lines = moved.read_text(encoding="utf-8").strip().splitlines()
+            where = lines[0].strip() if lines else "a LoR server"
             raise LoRStoreError(f"this forum moved to {where}; connect to that server instead "
                                 f"(Pulse: skills.lor.server_url) rather than opening {self.data_dir}")
         try:
