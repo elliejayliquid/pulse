@@ -89,7 +89,7 @@ CREATE TABLE IF NOT EXISTS authors (
     last_active   TEXT
 );
 CREATE TABLE IF NOT EXISTS resident_identities (
-    key       TEXT PRIMARY KEY,          -- nickname, lowercased ("vale")
+    key       TEXT PRIMARY KEY,          -- nickname, lowercased ("robin")
     author_id TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS categories (

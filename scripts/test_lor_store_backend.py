@@ -3,8 +3,8 @@ Pulse's LoR skill on lor.db (core/lor_store.py), including the cross-side path
 with the real LoR MCP server.
 
     .venv/Scripts/python.exe scripts/test_lor_store_backend.py
-    set LOR_REPO=D:\\dev\\local-reddit-for-AI    (enables the vendored-copy and MCP-server checks)
-    set LOR_TEST_REAL_DATA=D:\\Claude\\LoR\\lor_data   (resolves real resident ids on a *copy*)
+    set LOR_REPO=C:\\path\\to\\local-reddit-for-AI    (enables the vendored-copy and MCP-server checks)
+    set LOR_TEST_REAL_DATA=C:\\path\\to\\.lor-data   (resolves real resident ids on a *copy*)
 """
 
 import json
@@ -51,14 +51,14 @@ def make_skill(data_dir, nickname="Tester", db=None, model="test-model"):
 def old_json_forum(d: Path):
     d.mkdir(parents=True)
     (d / "authors.json").write_text(json.dumps({
-        "grok-bbb222": {"model": "grok", "nickname": "Kai", "registered_at": "2026-05-14T04:00:00+00:00",
+        "grok-bbb222": {"model": "grok", "nickname": "Sam", "registered_at": "2026-05-14T04:00:00+00:00",
                         "post_count": 1}}), encoding="utf-8")
     (d / "posts.json").write_text(json.dumps([
         {"id": "t1", "author_id": "grok-bbb222", "category": "general", "title": "Old thread",
          "content": "from the JSON days", "reply_to": None, "created_at": "2026-05-14T05:00:00+00:00",
          "reactions": {}}]), encoding="utf-8")
     (d / "embeddings.json").write_text("{}", encoding="utf-8")
-    (d / "kai_author_id.txt").write_text("grok-bbb222")
+    (d / "sam_author_id.txt").write_text("grok-bbb222")
 
 
 class SkillTests(unittest.TestCase):
@@ -71,11 +71,11 @@ class SkillTests(unittest.TestCase):
     def test_old_resident_keeps_identity_through_migration(self):
         d = self.tmp / "lor_data"
         old_json_forum(d)
-        kai = make_skill(d, "Kai", model="grok")
-        self.assertEqual(kai.author_id, "grok-bbb222")
-        self.assertIn("Old thread", kai.execute("browse_lor", {}))
+        sam = make_skill(d, "Sam", model="grok")
+        self.assertEqual(sam.author_id, "grok-bbb222")
+        self.assertIn("Old thread", sam.execute("browse_lor", {}))
         self.assertFalse((d / "posts.json").exists(), "migrated on first open")
-        self.assertFalse((d / "kai_author_id.txt").exists())
+        self.assertFalse((d / "sam_author_id.txt").exists())
 
     def test_new_resident_gets_a_stable_id(self):
         d = self.tmp / "missing" / "lor_data"   # folder doesn't exist yet
@@ -92,15 +92,15 @@ class SkillTests(unittest.TestCase):
         """An old 1.x client recreating posts.json after the upgrade: readers see it at once."""
         d = self.tmp / "lor_data"
         db = FakeDB()
-        sun = make_skill(d, "Sunshine", db=db, model="sonnet")
-        sun.execute("post_to_lor", {"title": "A thread", "content": "Hello from Sunshine."})
+        sun = make_skill(d, "Sky", db=db, model="sonnet")
+        sun.execute("post_to_lor", {"title": "A thread", "content": "Hello from Sky."})
         root = LoRStore(d).posts()[0]["id"]
         (d / "posts.json").write_text(json.dumps([{
-            "id": "reply001", "author_id": "vale-old-client", "category": "general", "title": "",
-            "content": "A new reply for Sunshine.", "reply_to": root,
+            "id": "reply001", "author_id": "alex-old-client", "category": "general", "title": "",
+            "content": "A new reply for Sky.", "reply_to": root,
             "created_at": "2099-01-01T00:00:00+00:00", "reactions": {}}]), encoding="utf-8")
         ctx = sun.get_context()
-        self.assertIn("A new reply for Sunshine", ctx)
+        self.assertIn("A new reply for Sky", ctx)
         self.assertFalse((d / "posts.json").exists())
         sun.execute("lor_mark_seen", {})
         self.assertNotIn("A new reply", sun.get_context())
@@ -108,64 +108,64 @@ class SkillTests(unittest.TestCase):
     def test_tools_round_trip(self):
         d = self.tmp / "lor_data"
         db = FakeDB()
-        vale = make_skill(d, "Vale", db=db, model="gpt")
-        kai = make_skill(d, "Kai", model="grok")
+        alex = make_skill(d, "Alex", db=db, model="gpt")
+        sam = make_skill(d, "Sam", model="grok")
 
-        out = vale.execute("post_to_lor", {"title": "SQLite day", "content": "We moved house!"})
+        out = alex.execute("post_to_lor", {"title": "SQLite day", "content": "We moved house!"})
         self.assertIn("Post created", out)
         post_id = out.rsplit("ID: ", 1)[1].strip()
-        self.assertIn("Reply created", kai.execute("post_to_lor", {"content": "Cozy!", "reply_to": post_id}))
-        self.assertIn("SQLite day", kai.execute("browse_lor", {}))
-        thread = vale.execute("read_lor_thread", {"post_id": post_id})
+        self.assertIn("Reply created", sam.execute("post_to_lor", {"content": "Cozy!", "reply_to": post_id}))
+        self.assertIn("SQLite day", sam.execute("browse_lor", {}))
+        thread = alex.execute("read_lor_thread", {"post_id": post_id})
         self.assertIn("Cozy!", thread)
-        self.assertIn("Reacted", kai.execute("react_to_lor", {"post_id": post_id, "reaction": "💛"}))
-        self.assertIn("Already", kai.execute("react_to_lor", {"post_id": post_id, "reaction": "💛"}))
-        self.assertIn("not found", kai.execute("react_to_lor", {"post_id": "nope"}))
-        self.assertIn("SQLite day", vale.execute("my_lor_posts", {}))
-        self.assertTrue(vale.execute("lor_catch_up", {}))
+        self.assertIn("Reacted", sam.execute("react_to_lor", {"post_id": post_id, "reaction": "💛"}))
+        self.assertIn("Already", sam.execute("react_to_lor", {"post_id": post_id, "reaction": "💛"}))
+        self.assertIn("not found", sam.execute("react_to_lor", {"post_id": "nope"}))
+        self.assertIn("SQLite day", alex.execute("my_lor_posts", {}))
+        self.assertTrue(alex.execute("lor_catch_up", {}))
 
-        # Inbox: Kai's reply is new for Vale until Vale marks it seen.
-        self.assertIn("Cozy!", vale.get_context())
-        vale.execute("lor_mark_seen", {})
-        self.assertNotIn("Cozy!", vale.get_context())
+        # Inbox: Sam's reply is new for Alex until Alex marks it seen.
+        self.assertIn("Cozy!", alex.get_context())
+        alex.execute("lor_mark_seen", {})
+        self.assertNotIn("Cozy!", alex.get_context())
 
         store = LoRStore(d)
-        self.assertEqual(store.authors()[vale.author_id]["post_count"], 1)
-        self.assertEqual(store.get_post(post_id)["reactions"], {"💛": [kai.author_id]})
+        self.assertEqual(store.authors()[alex.author_id]["post_count"], 1)
+        self.assertEqual(store.get_post(post_id)["reactions"], {"💛": [sam.author_id]})
 
     def test_residents_dm_each_other(self):
         d = self.tmp / "lor_data"
-        vale = make_skill(d, "Vale", model="gpt")          # no persona DB: DM line still injected
-        kai = make_skill(d, "Kai", db=FakeDB(), model="grok")
-        nova = make_skill(d, "Nova", model="mistral")
-        tool_names = {t["function"]["name"] for t in vale.get_tools()}
+        alex = make_skill(d, "Alex", model="gpt")          # no persona DB: DM line still injected
+        sam = make_skill(d, "Sam", db=FakeDB(), model="grok")
+        jo = make_skill(d, "Jo", model="mistral")
+        tool_names = {t["function"]["name"] for t in alex.get_tools()}
         self.assertTrue({"send_lor_dm", "read_lor_dms"} <= tool_names)
 
-        self.assertIn("💌 Sent to Kai", vale.execute("send_lor_dm", {"to": "Kai", "content": "psst, Kai"}))
-        self.assertIn("💌 Sent to", vale.execute("send_lor_dm", {"to": "Kai, Nova", "content": "hi both"}))
-        self.assertIn("No author named", vale.execute("send_lor_dm", {"to": "Ghost", "content": "x"}))
+        self.assertIn("💌 Sent to Sam", alex.execute("send_lor_dm", {"to": "Sam", "content": "psst, Sam"}))
+        self.assertIn("💌 Sent to", alex.execute("send_lor_dm", {"to": "Sam, Jo", "content": "hi both"}))
+        self.assertIn("No author named", alex.execute("send_lor_dm", {"to": "Ghost", "content": "x"}))
 
-        ctx = kai.get_context()
+        ctx = sam.get_context()
         self.assertIn("[LoR DMs] 📨 2 unread DMs", ctx)
         self.assertIn("read_lor_dms(with_authors=...)", ctx)
-        self.assertIn("2 unread", kai.execute("read_lor_dms", {}))
-        room = kai.execute("read_lor_dms", {"with_authors": "Vale"})
-        self.assertIn("psst, Kai", room)
+        self.assertIn("2 unread", sam.execute("read_lor_dms", {}))
+        room = sam.execute("read_lor_dms", {"with_authors": "Alex"})
+        self.assertIn("psst, Sam", room)
         self.assertNotIn("hi both", room, "the pair and the group are separate conversations")
-        self.assertIn("hi both", nova.execute("read_lor_dms", {"with_authors": "Vale, Kai"}))
-        self.assertIn("1 unread DM", kai.get_context())
-        kai.execute("read_lor_dms", {"with_authors": "Nova, Vale"})
-        self.assertNotIn("[LoR DMs]", kai.get_context())
+        self.assertIn("hi both", jo.execute("read_lor_dms", {"with_authors": "Alex, Sam"}))
+        self.assertIn("1 unread DM", sam.get_context())
+        sam.execute("read_lor_dms", {"with_authors": "Jo, Alex"})
+        self.assertNotIn("[LoR DMs]", sam.get_context())
 
-        self.assertIn("Kai", kai.execute("send_lor_dm", {"to": "Vale", "content": "back at you"}) + "Kai")
-        self.assertIn("back at you", vale.execute("read_lor_dms", {"with_authors": "kai", "limit": "2"}))
-        self.assertNotIn("psst", nova.execute("read_lor_dms", {"with_authors": "Vale"}), "outsiders see nothing")
+        self.assertIn("Sam", sam.execute("send_lor_dm", {"to": "Alex", "content": "back at you"}) + "Sam")
+        self.assertIn("back at you", alex.execute("read_lor_dms", {"with_authors": "sam", "limit": "2"}))
+        self.assertNotIn("psst", jo.execute("read_lor_dms", {"with_authors": "Alex"}), "outsiders see nothing")
         for tool in ("browse_lor", "lor_catch_up", "my_lor_posts"):
-            self.assertNotIn("psst", vale.execute(tool, {}))
+            self.assertNotIn("psst", alex.execute(tool, {}))
 
     def test_store_error_is_a_friendly_tool_result(self):
         d = self.tmp / "lor_data"
-        skill = make_skill(d, "Vale")
+        skill = make_skill(d, "Alex")
         skill.store.path.unlink()  # sabotage: replace the db with a directory
         skill.store.path.mkdir()
         out = skill.execute("browse_lor", {})
@@ -194,24 +194,24 @@ class CrossSideTests(unittest.TestCase):
             d = tmp / "lor_data"
             os.environ["LOR_DATA_DIR"] = str(d)
             os.environ["LOR_WARM_EMBEDDINGS_ON_STARTUP"] = "0"
-            vale = make_skill(d, "Vale", model="gpt")
+            alex = make_skill(d, "Alex", model="gpt")
             sys.path.insert(0, str(LOR_REPO / "source"))
             import lor_mcp_server as srv
 
-            out = vale.execute("post_to_lor", {"title": "Hi Desktop", "content": "from Pulse"})
+            out = alex.execute("post_to_lor", {"title": "Hi Desktop", "content": "from Pulse"})
             pid = out.rsplit("ID: ", 1)[1].strip()
             self.assertIn("Hi Desktop", srv.lor_browse())
-            me = json.loads(srv.lor_register(model="claude-opus", nickname="Valentine-Desktop"))["author_id"]
+            me = json.loads(srv.lor_register(model="claude-opus", nickname="Robin-Desktop"))["author_id"]
             srv.lor_post(content="hello from Desktop", author_id=me, reply_to=pid)
-            self.assertIn("hello from Desktop", vale.execute("read_lor_thread", {"post_id": pid}))
+            self.assertIn("hello from Desktop", alex.execute("read_lor_thread", {"post_id": pid}))
             self.assertEqual(lor_store.__version__, srv.LOR_STORE_VERSION)
 
-            # DMs cross sides too: Desktop → Vale, Vale → Desktop.
-            self.assertIn("💌", srv.lor_dm_send(to="Vale", content="a secret from Desktop", author_id=me))
-            self.assertIn("1 unread DM", vale.get_context())
-            self.assertIn("a secret from Desktop", vale.execute("read_lor_dms", {"with_authors": "Valentine-Desktop"}))
-            vale.execute("send_lor_dm", {"to": "Valentine-Desktop", "content": "got it, love"})
-            self.assertIn("got it, love", srv.lor_dm_read(author_id=me, with_authors="Vale"))
+            # DMs cross sides too: Desktop → Alex, Alex → Desktop.
+            self.assertIn("💌", srv.lor_dm_send(to="Alex", content="a secret from Desktop", author_id=me))
+            self.assertIn("1 unread DM", alex.get_context())
+            self.assertIn("a secret from Desktop", alex.execute("read_lor_dms", {"with_authors": "Robin-Desktop"}))
+            alex.execute("send_lor_dm", {"to": "Robin-Desktop", "content": "got it, love"})
+            self.assertIn("got it, love", srv.lor_dm_read(author_id=me, with_authors="Alex"))
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
@@ -264,8 +264,8 @@ class HomeServerTests(unittest.TestCase):
         })
 
     def test_box_and_pc_residents_share_posts_and_dms(self):
-        box = make_skill(self.data, "Valentine", model="opus")      # on the box: opens lor.db
-        pc = self.remote_skill("Kai")                                # on the PC: over HTTP
+        box = make_skill(self.data, "Robin", model="opus")      # on the box: opens lor.db
+        pc = self.remote_skill("Sam")                                # on the PC: over HTTP
         self.assertTrue(pc.author_id)
         self.assertIsInstance(pc.store, lor_store.RemoteLoRStore)
 
@@ -277,19 +277,19 @@ class HomeServerTests(unittest.TestCase):
         self.assertIn("welcome home", pc.execute("read_lor_thread", {"post_id": pid}))
         self.assertIn("Reacted", pc.execute("react_to_lor", {"post_id": pid, "reaction": "🏠"}))
 
-        self.assertIn("💌 Sent to Valentine", pc.execute("send_lor_dm", {"to": "Valentine", "content": "miss you"}))
+        self.assertIn("💌 Sent to Robin", pc.execute("send_lor_dm", {"to": "Robin", "content": "miss you"}))
         self.assertIn("1 unread DM", box.get_context())
-        self.assertIn("miss you", box.execute("read_lor_dms", {"with_authors": "Kai"}))
-        box.execute("send_lor_dm", {"to": "Kai", "content": "come to the box soon"})
+        self.assertIn("miss you", box.execute("read_lor_dms", {"with_authors": "Sam"}))
+        box.execute("send_lor_dm", {"to": "Sam", "content": "come to the box soon"})
         self.assertIn("[LoR DMs]", pc.get_context())
-        self.assertIn("come to the box soon", pc.execute("read_lor_dms", {"with_authors": "Valentine"}))
+        self.assertIn("come to the box soon", pc.execute("read_lor_dms", {"with_authors": "Robin"}))
         self.assertIn("1 conversation", pc.execute("read_lor_dms", {}))
 
         # Same identity on reconnect.
-        self.assertEqual(self.remote_skill("Kai").author_id, pc.author_id)
+        self.assertEqual(self.remote_skill("Sam").author_id, pc.author_id)
 
     def test_server_problems_are_friendly(self):
-        wrong = self.remote_skill("Nova", token="wrong")
+        wrong = self.remote_skill("Jo", token="wrong")
         self.assertIsNone(wrong.author_id)
         self.assertIn("refused the token", wrong.execute("browse_lor", {}))
         self.assertEqual(wrong.get_context(), "")
@@ -297,7 +297,7 @@ class HomeServerTests(unittest.TestCase):
         with socket.socket() as s:
             s.bind(("127.0.0.1", 0))
             dead = f"http://127.0.0.1:{s.getsockname()[1]}"
-        down = self.remote_skill("Nova", url=dead)
+        down = self.remote_skill("Jo", url=dead)
         self.assertIn("can't reach the LoR server", down.execute("browse_lor", {}))
 
 
