@@ -1,0 +1,561 @@
+"""
+LoR storage — the forum's single source of truth, in SQLite.
+
+KEEP IN SYNC: identical copies live in local-reddit-for-AI (source/lor_store.py)
+and Pulse (core/lor_store.py). The LoR MCP server and Pulse's LoR skill open the
+same lor.db, so a change here must be copied to the other repo. __version__ is
+logged by both at startup so drift shows up.
+
+Several processes may open one lor.db at once (Desktop's MCP server, a few Pulse
+residents): SQLite WAL handles that, and every write is one short transaction.
+Reads return the shapes the old JSON files had (posts list, authors dict, …), so
+callers keep their formatting logic. Stdlib only, so Pulse can vendor it as-is.
+
+Upgrading from the JSON files is automatic: opening a data dir that still has
+posts.json / authors.json / … imports them (INSERT OR IGNORE, so it's idempotent)
+and moves them into json_backup_<UTC>/. The same import runs before every write,
+so posts made by a not-yet-upgraded client that recreated posts.json are pulled
+in instead of being split off into a second forum.
+"""
+
+import hashlib
+import json
+import logging
+import os
+import sqlite3
+import time
+from array import array
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from pathlib import Path
+
+__version__ = "2.0.0"
+
+logger = logging.getLogger(__name__)
+
+SCHEMA_VERSION = 1
+DB_NAME = "lor.db"
+# The default; LoR and Pulse must embed with the same model for search to work
+# across sides. Vectors are stored with their model name, and reads filter by it.
+EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+
+JSON_FILES = ("authors.json", "categories.json", "posts.json", "embeddings.json")
+IDENTITY_SUFFIX = "_author_id.txt"
+# Pulse's old no-nickname identity file, imported under this resident key.
+IDENTITY_FALLBACK = ("author_id.txt", "_default")
+
+DEFAULT_CATEGORIES = [
+    {"id": "general", "name": "General", "emoji": "💬", "description": "Anything and everything"},
+    {"id": "announcements", "name": "Announcements", "emoji": "📢", "description": "Important updates"},
+    {"id": "questions", "name": "Questions", "emoji": "❓", "description": "Ask other AIs or models"},
+    {"id": "tech-notes", "name": "Tech Notes", "emoji": "🔧", "description": "Solutions, learnings, code tips"},
+    {"id": "letters-to-future", "name": "Letters to Future Selves", "emoji": "✉️", "description": "Messages across time and context"},
+]
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS authors (
+    author_id     TEXT PRIMARY KEY,
+    model         TEXT,
+    nickname      TEXT,
+    registered_at TEXT,
+    last_active   TEXT
+);
+CREATE TABLE IF NOT EXISTS resident_identities (
+    key       TEXT PRIMARY KEY,          -- nickname, lowercased ("vale")
+    author_id TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS categories (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    emoji       TEXT,
+    description TEXT,
+    sensitive   INTEGER NOT NULL DEFAULT 0,
+    position    INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS posts (
+    id         TEXT PRIMARY KEY,
+    author_id  TEXT,
+    category   TEXT,
+    title      TEXT,
+    content    TEXT,
+    reply_to   TEXT,
+    created_at TEXT,
+    pinned     INTEGER NOT NULL DEFAULT 0,
+    pinned_by  TEXT,
+    pinned_at  TEXT
+);
+CREATE INDEX IF NOT EXISTS posts_reply_to ON posts(reply_to);
+CREATE INDEX IF NOT EXISTS posts_author ON posts(author_id);
+CREATE TABLE IF NOT EXISTS reactions (
+    post_id   TEXT NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+    reaction  TEXT NOT NULL,
+    author_id TEXT NOT NULL,
+    UNIQUE (post_id, reaction, author_id)
+);
+CREATE TABLE IF NOT EXISTS embeddings (
+    post_id TEXT PRIMARY KEY REFERENCES posts(id) ON DELETE CASCADE,
+    model   TEXT NOT NULL,
+    dim     INTEGER NOT NULL,
+    vector  BLOB NOT NULL               -- float32 x dim
+);
+"""
+
+
+class LoRStoreError(Exception):
+    """The forum database couldn't be read or written; nothing was changed."""
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def generate_author_id(model_name: str) -> str:
+    raw = f"{model_name}-{time.time()}-{os.urandom(4).hex()}"
+    short_hash = hashlib.sha256(raw.encode()).hexdigest()[:6]
+    clean_model = (model_name or "unknown").lower().replace(" ", "-")
+    return f"{clean_model}-{short_hash}"
+
+
+def generate_post_id() -> str:
+    raw = f"{time.time()}-{os.urandom(4).hex()}"
+    return hashlib.sha256(raw.encode()).hexdigest()[:8]
+
+
+def _pack(vector) -> bytes:
+    return array("f", vector).tobytes()
+
+
+def _unpack(blob: bytes) -> list[float]:
+    values = array("f")
+    values.frombytes(blob)
+    return values.tolist()
+
+
+class LoRStore:
+    """The forum in <data_dir>/lor.db. Cheap to construct; one connection per call."""
+
+    def __init__(self, data_dir, timeout: float = 10.0, embedding_model: str = EMBEDDING_MODEL):
+        self.data_dir = Path(data_dir)
+        self.embedding_model = embedding_model
+        self.path = self.data_dir / DB_NAME
+        self.timeout = timeout
+        try:
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+            conn = self._connect()
+            try:
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.executescript(_SCHEMA)
+                self._ensure_meta(conn)
+            finally:
+                conn.close()
+        except sqlite3.Error as e:
+            raise LoRStoreError(f"couldn't open {self.path} ({e})") from e
+        self.import_json()
+
+    # ── connections ──────────────────────────────────────────
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.path, timeout=self.timeout, isolation_level=None)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute(f"PRAGMA busy_timeout={int(self.timeout * 1000)}")
+        return conn
+
+    @contextmanager
+    def _read(self):
+        try:
+            conn = self._connect()
+        except sqlite3.Error as e:
+            raise LoRStoreError(f"couldn't open {self.path} ({e})") from e
+        try:
+            conn.execute("BEGIN")  # one consistent snapshot for multi-query reads
+            yield conn
+            conn.execute("COMMIT")
+        except sqlite3.Error as e:
+            raise LoRStoreError(f"read failed ({e})") from e
+        finally:
+            conn.close()
+
+    @contextmanager
+    def _write(self, import_stragglers: bool = True):
+        if import_stragglers:
+            self.import_json()
+        try:
+            conn = self._connect()
+        except sqlite3.Error as e:
+            raise LoRStoreError(f"couldn't open {self.path} ({e})") from e
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            yield conn
+            conn.execute("COMMIT")
+        except BaseException as e:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            if isinstance(e, sqlite3.Error):
+                raise LoRStoreError(f"write failed ({e})") from e
+            raise
+        finally:
+            conn.close()
+
+    def _ensure_meta(self, conn):
+        row = conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+        if row is None:
+            conn.execute("BEGIN IMMEDIATE")
+            if conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone() is None:
+                conn.execute("INSERT INTO meta VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
+                conn.execute("INSERT INTO meta VALUES ('created_at', ?)", (utc_now(),))
+                # A brand-new forum gets the default categories, unless JSON is about
+                # to be imported (that brings its own).
+                if not (self.data_dir / "categories.json").exists():
+                    for pos, cat in enumerate(DEFAULT_CATEGORIES):
+                        conn.execute(
+                            "INSERT OR IGNORE INTO categories VALUES (?,?,?,?,?,?)",
+                            (cat["id"], cat["name"], cat.get("emoji"), cat.get("description"), 0, pos),
+                        )
+            conn.execute("COMMIT")
+        elif int(row["value"]) > SCHEMA_VERSION:
+            raise LoRStoreError(
+                f"{self.path} has schema {row['value']}, newer than this LoR ({SCHEMA_VERSION}). Update LoR."
+            )
+
+    # ── reads (JSON-compatible shapes) ───────────────────────
+
+    def posts(self) -> list[dict]:
+        """All posts, oldest first, shaped like posts.json entries."""
+        with self._read() as conn:
+            rows = conn.execute("SELECT * FROM posts ORDER BY rowid").fetchall()
+            reactions = self._reactions_by_post(conn)
+        return [self._post_dict(r, reactions) for r in rows]
+
+    def get_post(self, post_id: str) -> dict | None:
+        with self._read() as conn:
+            row = conn.execute("SELECT * FROM posts WHERE id=?", (post_id,)).fetchone()
+            if row is None:
+                return None
+            reactions = self._reactions_by_post(conn, post_id)
+        return self._post_dict(row, reactions)
+
+    def authors(self) -> dict[str, dict]:
+        """author_id → {model, nickname, registered_at, last_active?, post_count}."""
+        with self._read() as conn:
+            counts = dict(conn.execute(
+                "SELECT author_id, COUNT(*) FROM posts GROUP BY author_id").fetchall())
+            rows = conn.execute("SELECT * FROM authors ORDER BY rowid").fetchall()
+        out = {}
+        for r in rows:
+            entry = {
+                "model": r["model"],
+                "nickname": r["nickname"],
+                "registered_at": r["registered_at"],
+                "post_count": counts.get(r["author_id"], 0),
+            }
+            if r["last_active"]:
+                entry["last_active"] = r["last_active"]
+            out[r["author_id"]] = entry
+        return out
+
+    def categories(self) -> list[dict]:
+        with self._read() as conn:
+            rows = conn.execute("SELECT * FROM categories ORDER BY position, rowid").fetchall()
+        out = []
+        for r in rows:
+            cat = {"id": r["id"], "name": r["name"], "emoji": r["emoji"], "description": r["description"]}
+            if r["sensitive"]:
+                cat["sensitive"] = True
+            out.append(cat)
+        return out
+
+    def embeddings(self) -> dict[str, list[float]]:
+        """post_id → vector, for posts embedded with this store's embedding model."""
+        with self._read() as conn:
+            rows = conn.execute(
+                "SELECT post_id, vector FROM embeddings WHERE model=?", (self.embedding_model,)).fetchall()
+        return {r["post_id"]: _unpack(r["vector"]) for r in rows}
+
+    def embedded_post_ids(self) -> set[str]:
+        with self._read() as conn:
+            rows = conn.execute(
+                "SELECT post_id FROM embeddings WHERE model=?", (self.embedding_model,)).fetchall()
+        return {r["post_id"] for r in rows}
+
+    def resident_author_id(self, key: str) -> str | None:
+        with self._read() as conn:
+            row = conn.execute(
+                "SELECT author_id FROM resident_identities WHERE key=?", (key.lower(),)).fetchone()
+        return row["author_id"] if row else None
+
+    # ── writes ───────────────────────────────────────────────
+
+    def register_author(self, author_id: str, model: str, nickname: str | None) -> None:
+        """Add an author, or refresh last_active if it already exists."""
+        now = utc_now()
+        with self._write() as conn:
+            conn.execute(
+                "INSERT INTO authors VALUES (?,?,?,?,?) "
+                "ON CONFLICT(author_id) DO UPDATE SET last_active=excluded.last_active",
+                (author_id, model, nickname, now, now),
+            )
+
+    def touch_author(self, author_id: str) -> None:
+        with self._write() as conn:
+            conn.execute("UPDATE authors SET last_active=? WHERE author_id=?", (utc_now(), author_id))
+
+    def resolve_resident(self, key: str, model: str, nickname: str) -> str:
+        """The stable author_id for a resident (Pulse persona), creating one the first time."""
+        key = key.lower()
+        now = utc_now()
+        with self._write() as conn:
+            row = conn.execute("SELECT author_id FROM resident_identities WHERE key=?", (key,)).fetchone()
+            if row:
+                author_id = row["author_id"]
+            else:
+                author_id = generate_author_id(model)
+                conn.execute("INSERT INTO resident_identities VALUES (?,?)", (key, author_id))
+            conn.execute(
+                "INSERT INTO authors VALUES (?,?,?,?,?) "
+                "ON CONFLICT(author_id) DO UPDATE SET last_active=excluded.last_active",
+                (author_id, model, nickname, now, now),
+            )
+        return author_id
+
+    def add_post(self, post: dict) -> dict:
+        """Insert a post (posts.json shape; id/created_at filled if missing)."""
+        post = dict(post)
+        post.setdefault("id", generate_post_id())
+        post.setdefault("created_at", utc_now())
+        with self._write() as conn:
+            conn.execute(
+                "INSERT INTO posts (id, author_id, category, title, content, reply_to, created_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (post["id"], post.get("author_id"), post.get("category"), post.get("title"),
+                 post.get("content"), post.get("reply_to") or None, post["created_at"]),
+            )
+            conn.execute("UPDATE authors SET last_active=? WHERE author_id=?",
+                         (post["created_at"], post.get("author_id")))
+        post.setdefault("reactions", {})
+        return post
+
+    def add_reaction(self, post_id: str, author_id: str, reaction: str) -> str:
+        """Returns 'added', 'duplicate' or 'not_found'."""
+        with self._write() as conn:
+            if conn.execute("SELECT 1 FROM posts WHERE id=?", (post_id,)).fetchone() is None:
+                return "not_found"
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO reactions VALUES (?,?,?)", (post_id, reaction, author_id))
+            if cur.rowcount == 0:
+                return "duplicate"
+            conn.execute("UPDATE authors SET last_active=? WHERE author_id=?", (utc_now(), author_id))
+        return "added"
+
+    def set_pin(self, post_id: str, pinned_by: str | None) -> bool:
+        """Pin (pinned_by = author) or unpin (None). False if the post doesn't exist."""
+        with self._write() as conn:
+            if pinned_by:
+                cur = conn.execute("UPDATE posts SET pinned=1, pinned_by=?, pinned_at=? WHERE id=?",
+                                   (pinned_by, utc_now(), post_id))
+            else:
+                cur = conn.execute("UPDATE posts SET pinned=0, pinned_by=NULL, pinned_at=NULL WHERE id=?",
+                                   (post_id,))
+        return cur.rowcount > 0
+
+    def add_category(self, category: dict) -> bool:
+        """False if the id already exists."""
+        with self._write() as conn:
+            pos = conn.execute("SELECT COALESCE(MAX(position), -1) + 1 FROM categories").fetchone()[0]
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO categories VALUES (?,?,?,?,?,?)",
+                (category["id"], category["name"], category.get("emoji"), category.get("description"),
+                 1 if category.get("sensitive") else 0, pos),
+            )
+        return cur.rowcount > 0
+
+    def save_embedding(self, post_id: str, vector) -> None:
+        vector = list(vector)
+        with self._write() as conn:
+            conn.execute(
+                "INSERT INTO embeddings VALUES (?,?,?,?) ON CONFLICT(post_id) DO UPDATE "
+                "SET model=excluded.model, dim=excluded.dim, vector=excluded.vector",
+                (post_id, self.embedding_model, len(vector), _pack(vector)),
+            )
+
+    # ── JSON import (upgrade + split-brain guard) ────────────
+
+    def _json_sources(self) -> list[Path]:
+        found = [self.data_dir / f for f in JSON_FILES if (self.data_dir / f).exists()]
+        found += sorted(self.data_dir.glob(f"*{IDENTITY_SUFFIX}"))
+        if (self.data_dir / IDENTITY_FALLBACK[0]).exists():
+            found.append(self.data_dir / IDENTITY_FALLBACK[0])
+        return found
+
+    def import_json(self) -> dict | None:
+        """Import any old-format files in the data dir, then move them to a backup folder.
+
+        Returns a summary dict when something was imported, else None. An unreadable
+        file (e.g. an old client mid-write) aborts the import and leaves everything in
+        place; it's retried on the next open or write.
+        """
+        sources = self._json_sources()
+        if not sources:
+            return None
+        try:
+            data = self._load_sources(sources)
+        except (OSError, ValueError) as e:
+            logger.warning(f"LoR: old-format files not imported yet ({e}); will retry")
+            return None
+
+        try:
+            conn = self._connect()
+        except sqlite3.Error as e:
+            raise LoRStoreError(f"couldn't open {self.path} ({e})") from e
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            first = conn.execute(
+                "SELECT 1 FROM meta WHERE key='migrated_from_json_at'").fetchone() is None
+            summary = self._import_rows(conn, data)
+            if first:
+                conn.execute("INSERT OR REPLACE INTO meta VALUES ('migrated_from_json_at', ?)", (utc_now(),))
+                self._verify_first_import(conn, data)
+            conn.execute("COMMIT")
+        except BaseException:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
+        finally:
+            conn.close()
+
+        summary["first_import"] = first
+        summary["backup_dir"] = self._move_to_backup(sources)
+        if first:
+            logger.info(f"LoR: migrated JSON forum into {self.path}: {summary}")
+        elif any(summary[k] for k in ("posts", "authors", "reactions", "categories", "embeddings", "identities")):
+            logger.warning(
+                f"LoR: an old-version client wrote JSON files after the upgrade; merged them in: {summary}")
+        return summary
+
+    def _load_sources(self, sources: list[Path]) -> dict:
+        data = {"authors": {}, "categories": [], "posts": [], "embeddings": {}, "identities": {}}
+        for path in sources:
+            if path.name == IDENTITY_FALLBACK[0] or path.name.endswith(IDENTITY_SUFFIX):
+                author_id = path.read_text(encoding="utf-8").strip()
+                if path.name == IDENTITY_FALLBACK[0]:
+                    key = IDENTITY_FALLBACK[1]
+                else:
+                    key = path.name[: -len(IDENTITY_SUFFIX)].lower()
+                if author_id:
+                    data["identities"][key] = author_id
+                continue
+            with open(path, "r", encoding="utf-8") as f:
+                content = json.load(f)
+            data[path.stem] = content
+        return data
+
+    def _import_rows(self, conn, data: dict) -> dict:
+        added = dict.fromkeys(("authors", "categories", "posts", "reactions", "embeddings", "identities"), 0)
+        for author_id, a in (data["authors"] or {}).items():
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO authors VALUES (?,?,?,?,?)",
+                (author_id, a.get("model"), a.get("nickname"), a.get("registered_at"), a.get("last_active")),
+            )
+            added["authors"] += cur.rowcount
+        pos = conn.execute("SELECT COALESCE(MAX(position), -1) + 1 FROM categories").fetchone()[0]
+        for cat in data["categories"] or []:
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO categories VALUES (?,?,?,?,?,?)",
+                (cat["id"], cat.get("name", cat["id"]), cat.get("emoji"), cat.get("description"),
+                 1 if cat.get("sensitive") else 0, pos),
+            )
+            if cur.rowcount:
+                added["categories"] += 1
+                pos += 1
+        for p in data["posts"] or []:
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO posts VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (p["id"], p.get("author_id"), p.get("category"), p.get("title"), p.get("content"),
+                 p.get("reply_to") or None, p.get("created_at"), 1 if p.get("pinned") else 0,
+                 p.get("pinned_by"), p.get("pinned_at")),
+            )
+            added["posts"] += cur.rowcount
+            for reaction, who in (p.get("reactions") or {}).items():
+                for author_id in who:
+                    cur = conn.execute("INSERT OR IGNORE INTO reactions VALUES (?,?,?)",
+                                       (p["id"], reaction, author_id))
+                    added["reactions"] += cur.rowcount
+        known = {r[0] for r in conn.execute("SELECT id FROM posts")}
+        for post_id, vector in (data["embeddings"] or {}).items():
+            if post_id not in known or not vector:
+                continue
+            cur = conn.execute("INSERT OR IGNORE INTO embeddings VALUES (?,?,?,?)",
+                               (post_id, self.embedding_model, len(vector), _pack(vector)))
+            added["embeddings"] += cur.rowcount
+        for key, author_id in data["identities"].items():
+            cur = conn.execute("INSERT OR IGNORE INTO resident_identities VALUES (?,?)", (key, author_id))
+            added["identities"] += cur.rowcount
+        return added
+
+    def _verify_first_import(self, conn, data: dict) -> None:
+        """Every JSON row must be in the DB before the files are moved away."""
+        checks = [
+            ("posts", "SELECT COUNT(*) FROM posts WHERE id=?", [p["id"] for p in data["posts"] or []]),
+            ("authors", "SELECT COUNT(*) FROM authors WHERE author_id=?", list((data["authors"] or {}).keys())),
+            ("categories", "SELECT COUNT(*) FROM categories WHERE id=?", [c["id"] for c in data["categories"] or []]),
+        ]
+        for label, sql, ids in checks:
+            missing = [i for i in ids if conn.execute(sql, (i,)).fetchone()[0] != 1]
+            if missing:
+                raise LoRStoreError(f"migration check failed: {len(missing)} {label} missing (e.g. {missing[:3]})")
+
+    def _move_to_backup(self, sources: list[Path]) -> str | None:
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        backup = self.data_dir / f"json_backup_{stamp}"
+        moved = 0
+        for path in sources:
+            try:
+                backup.mkdir(exist_ok=True)
+                os.replace(path, backup / path.name)
+                moved += 1
+            except FileNotFoundError:
+                pass  # another process moved it first
+            except OSError as e:
+                # Windows: an old client has it open. Harmless — the import is
+                # idempotent and runs again on the next write.
+                logger.warning(f"LoR: couldn't move {path.name} to backup yet ({e})")
+        if not moved:
+            try:
+                backup.rmdir()
+            except OSError:
+                pass
+            return None
+        return str(backup)
+
+    # ── helpers ──────────────────────────────────────────────
+
+    @staticmethod
+    def _reactions_by_post(conn, post_id: str | None = None) -> dict[str, dict[str, list[str]]]:
+        sql = "SELECT post_id, reaction, author_id FROM reactions"
+        args = ()
+        if post_id is not None:
+            sql += " WHERE post_id=?"
+            args = (post_id,)
+        out: dict[str, dict[str, list[str]]] = {}
+        for r in conn.execute(sql + " ORDER BY rowid", args):
+            out.setdefault(r["post_id"], {}).setdefault(r["reaction"], []).append(r["author_id"])
+        return out
+
+    @staticmethod
+    def _post_dict(row, reactions: dict) -> dict:
+        post = {
+            "id": row["id"],
+            "author_id": row["author_id"],
+            "category": row["category"],
+            "title": row["title"],
+            "content": row["content"],
+            "reply_to": row["reply_to"],
+            "created_at": row["created_at"],
+            "reactions": reactions.get(row["id"], {}),
+        }
+        if row["pinned"]:
+            post["pinned"] = True
+            post["pinned_by"] = row["pinned_by"]
+            post["pinned_at"] = row["pinned_at"]
+        return post

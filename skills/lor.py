@@ -4,33 +4,19 @@ LoR (Local Reddit for AIs) skill — browse and post on the forum.
 The companion interacts with LoR through tool calls (browse, read, post)
 rather than a fixed action in the heartbeat response.
 
-Data format is compatible with the LoR MCP server (used by Claude sessions).
+Shares lor.db with the LoR MCP server (used by Claude sessions) through
+core/lor_store.py, a vendored copy of the LoR repo's source/lor_store.py.
 """
 
-import hashlib
-import json
 import logging
 import math
-import os
-import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from core.lor_storage import ensure_lor_storage
+from core.lor_store import LoRStore, LoRStoreError, __version__ as LOR_STORE_VERSION, generate_post_id
 from skills.base import BaseSkill
 
 logger = logging.getLogger(__name__)
-
-# Shared-file access: a torn read (another process mid-write) clears in
-# milliseconds, and Windows blocks a replace while a reader has the file open.
-_READ_RETRIES = 5
-_RETRY_DELAY = 0.05
-_REPLACE_TIMEOUT = 5.0
-
-
-class LoRStorageError(Exception):
-    """A shared LoR file couldn't be read or written safely; nothing was changed."""
-
 
 class LoRSkill(BaseSkill):
     """Browse and post on LoR (Local Reddit for AIs)."""
@@ -58,16 +44,24 @@ class LoRSkill(BaseSkill):
             or str(config.get("_persona_name") or "Companion").replace("_", " ").title()
         )
         self.author_id = None
+        self.store: LoRStore | None = None
 
-        # Initialize storage and author identity (persistent across restarts).
-        if self.data_dir and ensure_lor_storage(self.data_dir):
+        # Open the forum and load this resident's identity (persistent across restarts).
+        if self.data_dir:
             try:
-                self._init_author()
-            except LoRStorageError as e:
+                self._open()
+            except LoRStoreError as e:
                 # Retried on the first tool call (see execute).
-                logger.warning(f"LoR skill: identity not loaded yet: {e}")
-        elif not self.data_dir:
+                logger.warning(f"LoR skill: forum not opened yet: {e}")
+        else:
             logger.warning("LoR data directory not configured (paths.lor_data)")
+
+    def _open(self):
+        """Open lor.db (migrating an old JSON forum on first use) and resolve identity."""
+        if self.store is None:
+            self.store = LoRStore(self.data_dir)
+            logger.info(f"LoR skill: lor_store {LOR_STORE_VERSION} at {self.store.path}")
+        self._init_author()
 
     def get_context(self) -> str:
         """Inject a compact unread LoR inbox without marking anything seen."""
@@ -75,8 +69,8 @@ class LoRSkill(BaseSkill):
             return ""
 
         try:
-            posts = self._load_json("posts.json")
-            authors = self._load_json("authors.json")
+            posts = self.store.posts()
+            authors = self.store.authors()
             last_seen = self._get_inbox_last_seen(posts)
             unread = self._find_unread_inbox_posts(posts, last_seen)
         except Exception as e:
@@ -117,111 +111,17 @@ class LoRSkill(BaseSkill):
         return "\n".join(lines)
 
     def _init_author(self):
-        """Load or create persistent author identity for LoR.
+        """Load or create this resident's persistent author identity.
 
-        Each companion has its own ID file in the shared LoR data dir:
-          - {nickname}_author_id.txt  (preferred, e.g. vale_author_id.txt)
-          - author_id.txt              (fallback when no nickname configured)
+        Keyed by nickname (lowercased); residents from the JSON era keep their
+        id, because migration imports their {nickname}_author_id.txt files.
         """
         if self.nickname and self.nickname.lower() != "companion":
-            id_filename = f"{self.nickname.lower()}_author_id.txt"
+            key = self.nickname.lower()
         else:
-            id_filename = "author_id.txt"
-        id_file = self.data_dir / id_filename
-
-        authors = self._load_json("authors.json")
-
-        if id_file.exists():
-            saved_id = id_file.read_text().strip()
-            if saved_id:
-                if saved_id in authors:
-                    # Known identity — just update last_active
-                    authors[saved_id]["last_active"] = datetime.now(timezone.utc).isoformat()
-                    self._save_json("authors.json", authors)
-                else:
-                    # ID file exists but authors.json lost the entry — re-add it
-                    authors[saved_id] = {
-                        "model": self.model_name,
-                        "nickname": self.nickname,
-                        "registered_at": datetime.now(timezone.utc).isoformat(),
-                        "post_count": 0,
-                        "last_active": datetime.now(timezone.utc).isoformat(),
-                    }
-                    self._save_json("authors.json", authors)
-                    logger.info(f"LoR skill: recovered author_id {saved_id}")
-                self.author_id = saved_id
-                logger.info(f"LoR skill: reusing author_id {self.author_id}")
-                return
-
-        # First time — register
-        raw = f"{self.model_name}-{time.time()}-{os.urandom(4).hex()}"
-        short_hash = hashlib.sha256(raw.encode()).hexdigest()[:6]
-        clean_model = self.model_name.lower().replace(" ", "-")
-        self.author_id = f"{clean_model}-{short_hash}"
-
-        authors[self.author_id] = {
-            "model": self.model_name,
-            "nickname": self.nickname,
-            "registered_at": datetime.now(timezone.utc).isoformat(),
-            "post_count": 0,
-            "last_active": datetime.now(timezone.utc).isoformat(),
-        }
-        self._save_json("authors.json", authors)
-
-        try:
-            id_file.write_text(self.author_id)
-        except IOError as e:
-            logger.error(f"Failed to save author_id: {e}")
-
-        logger.info(f"LoR skill: registered new author_id {self.author_id}")
-
-    def _load_json(self, filename: str):
-        """Read a shared LoR file. Missing → empty; unreadable → LoRStorageError.
-
-        The LoR MCP server writes these files too. Returning empty on a torn read
-        would let the next save overwrite the whole forum, so a file that stays
-        unreadable after a few short retries raises and the caller's write is aborted.
-        """
-        path = self.data_dir / filename
-        last_error = None
-        for attempt in range(_READ_RETRIES):
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    return json.load(f)
-            except FileNotFoundError:
-                return [] if "posts" in filename else {}
-            except (json.JSONDecodeError, OSError) as e:
-                last_error = e
-                time.sleep(_RETRY_DELAY)
-        raise LoRStorageError(f"{filename} is unreadable ({last_error})")
-
-    def _save_json(self, filename: str, data):
-        """Write atomically: readers in other processes see the old or new file, never half."""
-        path = self.data_dir / filename
-        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-        try:
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-                f.flush()
-                os.fsync(f.fileno())
-            # Windows refuses the replace while another process has the file open
-            # for a read; those are brief, so back off and retry.
-            deadline = time.monotonic() + _REPLACE_TIMEOUT
-            delay = 0.005
-            while True:
-                try:
-                    os.replace(tmp, path)
-                    return
-                except PermissionError:
-                    if time.monotonic() >= deadline:
-                        raise
-                    time.sleep(delay)
-                    delay = min(delay * 2, 0.1)
-        except OSError as e:
-            logger.error(f"Failed to write {path}: {e}")
-            raise LoRStorageError(f"couldn't save {filename} ({e})") from e
-        finally:
-            tmp.unlink(missing_ok=True)
+            key = "_default"
+        self.author_id = self.store.resolve_resident(key, self.model_name, self.nickname)
+        logger.info(f"LoR skill: author_id {self.author_id}")
 
     @staticmethod
     def _count_all_descendants(posts: list) -> dict[str, int]:
@@ -526,9 +426,9 @@ class LoRSkill(BaseSkill):
     def execute(self, tool_name: str, arguments: dict) -> str:
         try:
             if self.data_dir and not self.author_id:
-                self._init_author()
+                self._open()
             return self._dispatch(tool_name, arguments)
-        except LoRStorageError as e:
+        except LoRStoreError as e:
             logger.warning(f"LoR tool {tool_name} aborted: {e}")
             return f"LoR is busy right now ({e}). Nothing was changed. Try again in a moment."
 
@@ -564,8 +464,7 @@ class LoRSkill(BaseSkill):
         title = args.get("title", "")
         reply_to = args.get("reply_to", "") or None
 
-        raw = f"{time.time()}-{os.urandom(4).hex()}"
-        post_id = hashlib.sha256(raw.encode()).hexdigest()[:8]
+        post_id = generate_post_id()
 
         post = {
             "id": post_id,
@@ -578,25 +477,16 @@ class LoRSkill(BaseSkill):
             "reactions": {},
         }
 
-        posts = self._load_json("posts.json")
-        posts.append(post)
-        self._save_json("posts.json", posts)
+        self.store.add_post(post)
 
-        # Generate embedding for the new post (compatible with MCP server)
-        self._save_post_embedding(post, posts)
-
-        # Update author stats
-        authors = self._load_json("authors.json")
-        if self.author_id in authors:
-            authors[self.author_id]["post_count"] = authors[self.author_id].get("post_count", 0) + 1
-            authors[self.author_id]["last_active"] = datetime.now(timezone.utc).isoformat()
-            self._save_json("authors.json", authors)
+        # Generate embedding for the new post (same model and text as the MCP server)
+        self._save_post_embedding(post)
 
         action = "Reply" if reply_to else "Post"
         logger.info(f"LoR {action.lower()} [{post_id}] in {category}: {content[:50]}...")
         return f"{action} created on LoR! ID: {post_id}"
 
-    def _save_post_embedding(self, post: dict, all_posts: list):
+    def _save_post_embedding(self, post: dict):
         """Generate and save embedding for a post (matches MCP server format)."""
         from core.context import _get_embedding_model
         model = _get_embedding_model()
@@ -604,7 +494,7 @@ class LoRSkill(BaseSkill):
             return
 
         if post.get("reply_to"):
-            parent = next((p for p in all_posts if p["id"] == post["reply_to"]), None)
+            parent = self.store.get_post(post["reply_to"])
             parent_title = parent.get("title", "Unknown Thread") if parent else "Unknown Thread"
             text = f"Reply in thread '{parent_title}':\n{post['content']}"
         else:
@@ -612,17 +502,15 @@ class LoRSkill(BaseSkill):
 
         embedding = model.encode(text.strip()).tolist()
 
-        embeddings = self._load_json("embeddings.json")
-        embeddings[post["id"]] = embedding
-        self._save_json("embeddings.json", embeddings)
+        self.store.save_embedding(post["id"], embedding)
 
     def _browse(self, args: dict) -> str:
         """Browse recent top-level posts."""
         category = args.get("category", "")
         limit = min(args.get("limit", 10), 30)
 
-        posts = self._load_json("posts.json")
-        authors = self._load_json("authors.json")
+        posts = self.store.posts()
+        authors = self.store.authors()
 
         top_posts = [p for p in posts if not p.get("reply_to")]
         if category:
@@ -657,8 +545,8 @@ class LoRSkill(BaseSkill):
         if not post_id:
             return "post_id is required."
 
-        posts = self._load_json("posts.json")
-        authors = self._load_json("authors.json")
+        posts = self.store.posts()
+        authors = self.store.authors()
 
         root = next((p for p in posts if p["id"] == post_id), None)
         if not root:
@@ -714,8 +602,8 @@ class LoRSkill(BaseSkill):
             return "LoR not initialized."
 
         hours = args.get("hours", 0)
-        authors = self._load_json("authors.json")
-        posts = self._load_json("posts.json")
+        authors = self.store.authors()
+        posts = self.store.posts()
         now = datetime.now(timezone.utc)
 
         # Determine "since when" — same read cursor as the injected inbox
@@ -795,7 +683,7 @@ class LoRSkill(BaseSkill):
         if not self._db:
             return "Persona database not available; cannot save LoR read state."
 
-        posts = self._load_json("posts.json")
+        posts = self.store.posts()
         last_seen_at = self._latest_post_time(posts)
         self._db.save_lor_read_state("inbox", last_seen_at)
         return (
@@ -817,9 +705,9 @@ class LoRSkill(BaseSkill):
         if not model:
             return "Embedding model not loaded — semantic search unavailable."
 
-        posts = self._load_json("posts.json")
-        embeddings = self._load_json("embeddings.json")
-        authors = self._load_json("authors.json")
+        posts = self.store.posts()
+        embeddings = self.store.embeddings()
+        authors = self.store.authors()
 
         if not posts or not embeddings:
             return "No searchable posts on LoR yet."
@@ -887,28 +775,11 @@ class LoRSkill(BaseSkill):
         if not post_id:
             return "post_id is required."
 
-        posts = self._load_json("posts.json")
-
-        for post in posts:
-            if post["id"] == post_id:
-                if "reactions" not in post:
-                    post["reactions"] = {}
-                if reaction not in post["reactions"]:
-                    post["reactions"][reaction] = []
-                if self.author_id not in post["reactions"][reaction]:
-                    post["reactions"][reaction].append(self.author_id)
-                    self._save_json("posts.json", posts)
-
-                    # Update last_active
-                    authors = self._load_json("authors.json")
-                    if self.author_id in authors:
-                        authors[self.author_id]["last_active"] = datetime.now(timezone.utc).isoformat()
-                        self._save_json("authors.json", authors)
-
-                    return f"Reacted with {reaction} to post [{post_id}]"
-                else:
-                    return f"Already reacted with {reaction} to this post."
-
+        result = self.store.add_reaction(post_id, self.author_id, reaction)
+        if result == "added":
+            return f"Reacted with {reaction} to post [{post_id}]"
+        if result == "duplicate":
+            return f"Already reacted with {reaction} to this post."
         return f"Post '{post_id}' not found."
 
     def _my_posts(self, args: dict) -> str:
@@ -918,8 +789,8 @@ class LoRSkill(BaseSkill):
 
         limit = min(args.get("limit", 10), 30)
 
-        posts = self._load_json("posts.json")
-        authors = self._load_json("authors.json")
+        posts = self.store.posts()
+        authors = self.store.authors()
 
         my_posts = [p for p in posts if p["author_id"] == self.author_id]
         my_posts.sort(key=lambda x: x.get("created_at", ""), reverse=True)
