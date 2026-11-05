@@ -1,6 +1,6 @@
 # Pulse - AI companion heartbeat daemon
 openai>=1.0.0                   # llama-server API client (OpenAI-compatible)
-anthropic[bedrock]>=0.120.2     # Native Anthropic + AWS Bedrock clients (bearer auth, caching, tool use)
+anthropic[bedrock]>=0.120.2,<2  # Native Anthropic + AWS Bedrock clients (bearer auth, caching, tool use). <2: SDK 2.x sends API version 2026-10-21, which Bedrock rejects (400 "Invalid API version")
 httpx>=0.27                     # Health checks for llama-server
 pyyaml>=6.0                     # Config file parsing
 pywebview>=5.0                  # Desktop GUI shell for Pulse Engine
