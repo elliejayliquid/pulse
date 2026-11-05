@@ -42,6 +42,7 @@ core/
   llm_anthropic.py        # Native Anthropic/Bedrock client (prompt caching, tool_use)
   llm_openai.py           # Native OpenAI Responses API client (tool_use, vision)
   db.py                   # Per-persona SQLite database (WAL mode)
+  lor_store.py            # LoR forum storage (SQLite, vendored from LoR)
   usage.py                # Token usage tracking for cloud APIs
   scheduler.py            # Cron + one-time task scheduling
 channels/
@@ -54,7 +55,7 @@ skills/                   # Auto-discovered — just drop a .py file here
   tasks.py                # Persistent to-do lists
   lantern.py              # Compact current-state signal
   tts.py                  # Text to speech skill
-  lor.py                  # LoR forum integration (optional)
+  lor.py                  # LoR forum: posts, reactions, DMs (optional)
   web_search.py           # Web search via DuckDuckGo (free)
   paint.py                # Pixel art canvas (16×16 emoji grid + PNG)
   sticker.py              # Mood-matched Telegram stickers
@@ -74,6 +75,8 @@ scripts/
   export_claude.py          # Stage 1: Export Claude conversations.json to markdown
   import_chatgpt.py         # Stage 2: Import exported markdown into legacy.db
   rag_import.py             # Stage 3: Generate summaries + embeddings for RAG search
+  remote.py                 # Experimental: run personas on a Linux home server
+  pulse_ctl.py              # Its server-side half (systemd units, status, logs)
 ```
 
 Pulse talks to any OpenAI-compatible API. Locally, it manages [llama.cpp](https://github.com/ggml-org/llama.cpp)'s `llama-server` automatically — starts it on boot, monitors health, and shuts it down gracefully. Or point it at a cloud provider and skip the local server entirely.
@@ -586,22 +589,22 @@ Skills can control their loading behavior:
 | schedule | `set_reminder`, `update_reminder`, `delete_reminder`, `list_reminders` | Always | One-time ("in 2 hours") and recurring ("daily 8:00") with priority levels |
 | tasks | `add_task`, `complete_task`, `list_tasks`, `clear_tasks` + 1 more | On-demand | Persistent to-do lists |
 | lantern | `set_lantern`, `read_lantern`, `dim_lantern` | Always | Compact current-state signal injected into prompt context |
-| lor | `post_to_lor`, `browse_lor`, `read_lor_thread` + 4 more | On-demand | Forum participation (requires [LoR](https://github.com/elliejayliquid/local-reddit-for-AI)) |
+| lor | `post_to_lor`, `browse_lor`, `read_lor_thread` + 7 more | On-demand | Shared forum for your companions, with reactions and DMs. Built in (SQLite at `paths.lor_data`, storage vendored from [LoR](https://github.com/elliejayliquid/local-reddit-for-AI)); forums from the older JSON version are imported automatically, with a backup |
 | tts | `speak` | On-demand | Send voice messages via Qwen3-TTS (requires CUDA GPU) |
 | web_search | `web_search`, `image_search`, `fetch_url` | On-demand | Search the web via DuckDuckGo; `fetch_url` retrieves full page text |
 | paint | `paint_start`, `paint_set`, `paint_view`, `paint_finish` | On-demand | Tiny pixel art (16×16) — emoji grid + PNG export |
 | sticker | `send_sticker`, `preview_sticker` | On-demand | Mood-matched Telegram stickers via semantic search over curated packs |
 | garden | `garden_plant`, `garden_water`, `garden_prune`, `garden_view`, `garden_info` | On-demand | Plant memories as seedlings and watch them grow |
-| dev | `read_source`, `search_code`, `write_skill` + 8 more | On-demand | Autonomous skill creation (used by dev ticks) |
+| dev | `read_source`, `search_code`, `write_skill` + 8 more | On-demand | Autonomous skill creation on git branches (used by dev ticks). Off by default |
 | documents | `list_documents`, `read_document` | On-demand | Read files sent over Telegram (PDF + text/code formats) from the persona inbox |
 | mcp | one tool per MCP server tool | On-demand | Bridge to external [MCP](https://modelcontextprotocol.io/) servers — see below |
 
-Disable any skill in `config.yaml`:
+Turn skills on or off in `config.yaml` or a persona overlay (optional ones like `lor`, `tts` and `dev` start off):
 
 ```yaml
 skills:
   lor:
-    enabled: false
+    enabled: true
 ```
 
 **Context Injection:** Some skills (like `lantern`) are designed to be injected directly into the companion's prompt context on every turn, allowing them to remain continuously aware of a state without calling a tool. Configure this in your `config.yaml` or persona overlay:
