@@ -3105,6 +3105,13 @@ class PulseAPI:
             return {"ok": False, "error": "Choose a persona before starting Pulse."}
         if not (self.personas_dir / persona).is_dir():
             return {"ok": False, "error": f"Persona not found: {persona}"}
+        if (self.personas_dir / persona / "remote.json").is_file():
+            # Same rule as pulse.py: the PC copy of a remote persona is a backup,
+            # and running it would fight the remote one over the Telegram bot.
+            return {
+                "ok": False,
+                "error": f"{persona} lives on the remote host. Start it there: remote.bat start {persona}",
+            }
 
         self._cleanup_processes()
         running = [

@@ -17,6 +17,7 @@ Ctrl+C to stop gracefully.
 
 import asyncio
 import argparse
+import json
 import logging
 import os
 import re
@@ -219,6 +220,32 @@ def apply_host_overlay(config: dict, pulse_root: Path) -> dict:
     return deep_merge(config, host_config)
 
 
+def check_not_remote(config: dict, local_anyway: bool = False) -> None:
+    """Refuse to run a persona that lives on a remote host (designs/remote_host.md §5.3).
+
+    personas/<p>/remote.json marks the PC copy as a backup of a persona that
+    runs on the home server. Starting the backup would poll the same Telegram
+    bot as the real one, and the two would keep knocking each other off.
+    The box never has the marker, so this is a no-op there.
+    """
+    persona_dir = config.get("_persona_dir")
+    if not persona_dir or local_anyway:
+        return
+    marker = Path(persona_dir) / "remote.json"
+    if not marker.is_file():
+        return
+    host = "the remote host"
+    try:
+        host = json.loads(marker.read_text(encoding="utf-8")).get("host") or host
+    except (OSError, ValueError):
+        pass
+    name = config.get("_persona_name")
+    logger.error(f"{name} lives on {host}; this folder is only a backup copy.")
+    logger.error(f"Start {name} there instead: remote.bat start {name}")
+    logger.error("(To run this copy here anyway, pass --local-anyway. Stop the remote one first.)")
+    sys.exit(2)
+
+
 _WINDOWS_DRIVE_PATH = re.compile(r"^[A-Za-z]:[\\/]")
 
 
@@ -242,7 +269,7 @@ def check_paths_portable(config: dict) -> None:
         sys.exit(1)
 
 
-async def main(config_path: str, persona_name: str | None = None):
+async def main(config_path: str, persona_name: str | None = None, local_anyway: bool = False):
     """Initialize and run the Pulse daemon."""
     logger.info("=" * 50)
     logger.info("  Pulse - Proactive Local AI Companion")
@@ -259,6 +286,7 @@ async def main(config_path: str, persona_name: str | None = None):
 
     # Resolve persona overlay (merges persona config over base)
     config = resolve_persona(config, persona_name, pulse_root)
+    check_not_remote(config, local_anyway)
     config = apply_host_overlay(config, pulse_root)
     check_paths_portable(config)
 
@@ -526,6 +554,8 @@ def pick_persona(pulse_root: Path) -> str | None:
                             display_name = json.load(f).get("name", d.name)
                 except Exception:
                     pass
+            if (d / "remote.json").is_file():
+                continue  # lives on the remote host: start it with remote.bat
             personas.append((d.name, display_name))
 
     if not personas:
@@ -570,6 +600,11 @@ if __name__ == "__main__":
         default=None,
         help="Persona to activate (e.g. 'nova'). Overrides active_persona in config."
     )
+    parser.add_argument(
+        "--local-anyway",
+        action="store_true",
+        help="Run a persona here even though it's marked as living on a remote host (remote.json).",
+    )
     args = parser.parse_args()
 
     persona = args.persona
@@ -583,4 +618,4 @@ if __name__ == "__main__":
                 persona = picked
                 print()
 
-    asyncio.run(main(args.config, persona_name=persona))
+    asyncio.run(main(args.config, persona_name=persona, local_anyway=args.local_anyway))

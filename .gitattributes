@@ -1,1 +1,2 @@
 deploy/linux/* text eol=lf
+*.bat text eol=crlf

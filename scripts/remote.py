@@ -15,6 +15,8 @@ same functions.
     python scripts/remote.py snapshot [<p>]
     python scripts/remote.py pull [<p>]           # newest snapshot -> personas/<p>/ (remote personas only)
     python scripts/remote.py mark-remote <p>      # PC copy becomes a backup of a box persona
+    python scripts/remote.py migrate <p> [--no-health-check]   # move a persona to the box
+    python scripts/remote.py who [--json]         # who's running on the box
 
 Settings live in gui_data/remote.json (git-ignored). Without that file nothing
 here runs and nothing in Pulse changes.
@@ -25,12 +27,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -232,6 +236,282 @@ def mark_remote(settings: dict, persona: str) -> dict:
     return {"ok": True, "persona": persona, **marker}
 
 
+# --- migration (designs/remote_host.md §8) ------------------------------------
+
+_WINDOWS_PATH = re.compile(r"^[A-Za-z]:[\\/]")
+# Never copied to the box: the PC-only marker, runtime state, SQLite side files
+# (each DB goes over as one consistent copy made with the backup API)
+_MIGRATE_SKIP_NAMES = {MARKER, "status.json", "shutdown_requested"}
+_MIGRATE_SKIP_SUFFIXES = ("-wal", "-shm", "-journal")
+# Keys whose box value must already exist there (shared resources the box owns)
+_BOX_DIR_KEYS = {"lor_data", "memories"}
+_BOX_FILE_KEYS = {"shared_database"}
+# Shared files the box may not have yet: uploaded once, never overwritten
+_UPLOADABLE_KEYS = {"legacy_db"}
+_PATHS_LINE = re.compile(
+    r"""^(?P<indent>\s+)(?P<key>[A-Za-z_][\w-]*):(?P<space>\s*)"""
+    r"""(?P<value>"(?:[^"\\]|\\.)*"|'[^']*'|[^#\s][^#]*?)(?P<rest>\s*(?:#.*)?)$"""
+)
+
+
+def _norm(path: str) -> str:
+    return path.replace("\\", "/").rstrip("/")
+
+
+def _box_path(value: str, persona: str, path_map: dict) -> str | None:
+    """Box equivalent of a Windows path, or None if nothing maps it."""
+    norm = _norm(value)
+    own = _norm(str(PERSONAS_DIR / persona))
+    if norm.lower() == own.lower() or norm.lower().startswith(own.lower() + "/"):
+        # Inside the persona's own folder: it travels with it, keep it relative
+        return f"personas/{persona}{norm[len(own):]}"
+    for pc_prefix, box_prefix in sorted(path_map.items(), key=lambda kv: -len(kv[0])):
+        pc = _norm(pc_prefix)
+        if norm.lower() == pc.lower() or norm.lower().startswith(pc.lower() + "/"):
+            return box_prefix.rstrip("/") + norm[len(pc):]
+    return None
+
+
+def box_config_text(text: str, persona: str, path_map: dict) -> tuple[str, list[dict]]:
+    """Rewrite the Windows paths under `paths:` for the box copy of a config.
+
+    Works on the text, so Lena's comments survive. Raises RemoteError for a
+    Windows path nothing maps (Pulse would refuse to start with it anyway).
+    """
+    import yaml
+
+    out, changes, unmapped = [], [], []
+    in_paths = False
+    for line in text.splitlines(keepends=True):
+        body = line.rstrip("\r\n")
+        if body and not body[0].isspace() and not body.lstrip().startswith("#"):
+            in_paths = re.match(r"^paths:\s*(#.*)?$", body) is not None
+        match = _PATHS_LINE.match(body) if in_paths else None
+        if match:
+            try:
+                value = yaml.safe_load(match["value"])
+            except yaml.YAMLError:
+                value = None
+            if isinstance(value, str) and _WINDOWS_PATH.match(value):
+                new = _box_path(value, persona, path_map)
+                if new is None:
+                    unmapped.append(f"paths.{match['key']}: {value}")
+                else:
+                    changes.append({"key": match["key"], "pc": value, "box": new})
+                    line = (f"{match['indent']}{match['key']}:{match['space']}"
+                            f"{json.dumps(new)}{match['rest']}{line[len(body):]}")
+        out.append(line)
+    if unmapped:
+        raise RemoteError(
+            "No box path for: " + "; ".join(unmapped)
+            + ". Add the PC folder to \"path_map\" in gui_data/remote.json."
+        )
+    new_text = "".join(out)
+    leftover = {
+        k: v for k, v in ((yaml.safe_load(new_text) or {}).get("paths") or {}).items()
+        if isinstance(v, str) and _WINDOWS_PATH.match(v)
+    }
+    if leftover:  # a path the line rewrite couldn't see (flow style, odd quoting)
+        raise RemoteError(f"Couldn't rewrite these paths, fix config.yaml by hand: {leftover}")
+    return new_text, changes
+
+
+def _pid_alive(pid: int) -> bool:
+    if os.name == "nt":
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return False
+        code = ctypes.c_ulong()
+        kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+        kernel32.CloseHandle(handle)
+        return code.value == 259  # STILL_ACTIVE
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _running_locally(persona_dir: Path) -> bool:
+    try:
+        status = json.loads((persona_dir / "data" / "status.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    pid = status.get("pid")
+    return bool(status.get("running")) and isinstance(pid, int) and _pid_alive(pid)
+
+
+def _is_sqlite(path: Path) -> bool:
+    try:
+        with open(path, "rb") as f:
+            return f.read(16) == b"SQLite format 3\x00"
+    except OSError:
+        return False
+
+
+def _build_bundle(persona: str, config_text: str, out: Path, scratch: Path) -> dict:
+    """Tar the persona folder for the box: rewritten config, consistent DB copies."""
+    import sqlite3
+
+    persona_dir = PERSONAS_DIR / persona
+    counts = {"files": 0, "databases": 0, "bytes": 0}
+    with tarfile.open(out, "w") as tar:
+        for path in sorted(persona_dir.rglob("*")):
+            rel = path.relative_to(persona_dir)
+            if path.name in _MIGRATE_SKIP_NAMES or path.name.endswith(_MIGRATE_SKIP_SUFFIXES):
+                continue
+            if any(part in _MIGRATE_SKIP_NAMES for part in rel.parts):
+                continue
+            arcname = f"{persona}/{rel.as_posix()}"
+            if path.is_dir():
+                info = tar.gettarinfo(str(path), arcname)
+                info.mode = 0o775
+                tar.addfile(info)
+                continue
+            source = path
+            if rel.as_posix() == "config.yaml":
+                source = scratch / "config.yaml"
+                source.write_text(config_text, encoding="utf-8", newline="\n")
+            elif path.suffix == ".db" and _is_sqlite(path):
+                source = scratch / f"db-{counts['databases']}.db"
+                src = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+                dst = sqlite3.connect(source)
+                try:
+                    src.backup(dst)
+                    if dst.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                        raise RemoteError(f"{rel} failed its integrity check; not migrating.")
+                finally:
+                    dst.close()
+                    src.close()
+                counts["databases"] += 1
+            info = tar.gettarinfo(str(source), arcname)
+            info.mode = 0o640 if path.name == ".env" else 0o664
+            with open(source, "rb") as f:
+                tar.addfile(info, f)
+            counts["files"] += 1
+            counts["bytes"] += info.size
+    return counts
+
+
+def _scp(settings: dict, local: Path, remote_path: str) -> None:
+    cmd = ["scp", "-q", "-o", "BatchMode=yes"]
+    if settings.get("key"):
+        cmd += ["-i", os.path.expanduser(settings["key"])]
+    subprocess.run(cmd + [str(local), f"{_target(settings)}:{remote_path}"], check=True, timeout=600)
+
+
+def _health_check(settings: dict, persona: str, timeout: float = 150) -> dict:
+    """Start the unit once, wait for status.json to say running, stop it again.
+
+    Only right after a migration: the box copy has no status.json until this
+    first start writes one, so whatever it says is fresh.
+    """
+    ctl(settings, "start", persona)
+    try:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            time.sleep(5)
+            info = ctl(settings, "status", persona).get("persona", {})
+            status = info.get("status", {})
+            if status.get("phase") == "running":
+                return {"ok": True, "status": status}
+            if info.get("systemd", {}).get("active") == "failed":
+                break
+        log = ctl(settings, "log", persona, "30").get("log", "")
+        return {"ok": False, "error": f"{persona} didn't reach 'running'", "log": log}
+    finally:
+        ctl(settings, "stop", persona)
+
+
+def migrate(settings: dict, persona: str, health_check: bool = True) -> dict:
+    """Move a persona to the box: §8 step 2, minus `enable` (Lena starts boys herself).
+
+    The PC folder itself is untouched apart from the remote.json marker, so it
+    stays the pre-move backup. Rollback: delete the box folder and the marker.
+    """
+    persona_dir = PERSONAS_DIR / persona
+    if not persona_dir.is_dir() or persona.startswith(("_", ".")):
+        raise RemoteError(f"Persona not found: {persona}")
+    if (persona_dir / MARKER).exists():
+        raise RemoteError(f"{persona} is already marked remote.")
+    if _running_locally(persona_dir):
+        raise RemoteError(f"{persona} is running on this PC. Stop it first.")
+    if not (persona_dir / ".env").is_file():
+        raise RemoteError(f"{persona} has no .env (bot token, API key); nothing would run on the box.")
+
+    config_path = persona_dir / "config.yaml"
+    config_text = config_path.read_text(encoding="utf-8") if config_path.is_file() else ""
+    new_text, changes = box_config_text(config_text, persona, settings.get("path_map") or {})
+
+    root = settings["box_root"]
+    app_personas = f"{root}/app/personas"
+    if ssh(settings, "true").returncode != 0:
+        raise RemoteError(f"Can't reach {_target(settings)} over SSH.")
+    if ssh(settings, f"test ! -e {shlex.quote(app_personas + '/' + persona)}").returncode != 0:
+        raise RemoteError(f"The box already has a {persona} folder; not overwriting it.")
+
+    # Shared things the box must already have, and shared files it may still need
+    uploads = []
+    for change in changes:
+        key, box = change["key"], change["box"]
+        if not box.startswith("/"):
+            continue  # inside the persona folder, travels with it
+        if key in _BOX_DIR_KEYS and ssh(settings, f"test -d {shlex.quote(box)}").returncode != 0:
+            raise RemoteError(f"paths.{key} → {box} doesn't exist on the box.")
+        if key in _BOX_FILE_KEYS and ssh(settings, f"test -f {shlex.quote(box)}").returncode != 0:
+            raise RemoteError(f"paths.{key} → {box} doesn't exist on the box.")
+        if key in _UPLOADABLE_KEYS and ssh(settings, f"test -e {shlex.quote(box)}").returncode != 0:
+            local = Path(change["pc"])
+            if not local.is_file():
+                raise RemoteError(f"paths.{key}: neither {local} here nor {box} on the box exists.")
+            uploads.append((local, box))
+
+    staging_root = ROOT / "gui_data" / "migrate_staging"
+    staging_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=staging_root) as tmp:
+        tmp_path = Path(tmp)
+        bundle = tmp_path / f"{persona}.tar"
+        counts = _build_bundle(persona, new_text, bundle, tmp_path)
+
+        for local, box in uploads:
+            part = f"{box}.uploading"
+            _scp(settings, local, part)
+            done = ssh(settings, f"chmod 660 {shlex.quote(part)} && mv -n {shlex.quote(part)} {shlex.quote(box)}")
+            if done.returncode != 0:
+                raise RemoteError(f"Couldn't place {box}: {done.stderr.decode(errors='replace').strip()}")
+
+        # Unpack into a hidden staging folder (pulse_ctl ignores dot-folders),
+        # then move into place in one step
+        script = f"""set -e
+cd {shlex.quote(app_personas)}
+[ ! -e {shlex.quote(persona)} ] || {{ echo "{persona} appeared meanwhile" >&2; exit 3; }}
+stage=$(mktemp -d .migrate-XXXXXX)
+trap 'rm -rf "$stage"' EXIT
+tar -xf - -C "$stage"
+chmod -R g+rwX "$stage"/{shlex.quote(persona)}
+[ ! -f "$stage"/{shlex.quote(persona)}/.env ] || chmod 640 "$stage"/{shlex.quote(persona)}/.env
+mv "$stage"/{shlex.quote(persona)} {shlex.quote(persona)}
+echo migrate-ok
+"""
+        result = ssh(settings, f"bash -c {shlex.quote(script)}", stdin=bundle.read_bytes(), timeout=900)
+        if result.returncode != 0 or b"migrate-ok" not in result.stdout:
+            raise RemoteError(f"Upload failed: {result.stderr.decode(errors='replace').strip()}")
+
+    # From here the box copy is the real one: mark the PC copy as its backup
+    marker = mark_remote(settings, persona)
+    report = {
+        "ok": True, "persona": persona, "remote_since": marker["remote_since"],
+        "paths": changes, "uploaded": [box for _, box in uploads], **counts,
+        "unit": "installed, not enabled (start it with remote.bat start " + persona + ")",
+    }
+    if health_check:
+        report["health"] = _health_check(settings, persona)
+        report["ok"] = report["health"]["ok"]
+    return report
+
+
 # --- one-time setup ----------------------------------------------------------
 
 def init(host: str, user: str, key: str | None, box_root: str) -> dict:
@@ -285,6 +565,27 @@ echo bootstrap-ok
     return {"ok": True, "sha": info["sha"]}
 
 
+def who_text(listing: dict) -> str:
+    """Human summary of `pulse_ctl list`: who's up on the box right now."""
+    lines = []
+    for p in listing.get("personas", []):
+        active = p.get("systemd", {}).get("active", "unknown")
+        status = p.get("status", {})
+        if active == "active":
+            phase = status.get("phase") or "starting"
+            hours = (status.get("uptime_seconds") or 0) / 3600
+            state = f"RUNNING ({phase}, up {hours:.1f}h)" if phase == "running" else phase.upper()
+        elif active in ("activating", "deactivating"):
+            state = active.upper()
+        elif active == "failed":
+            state = "FAILED (see: log)"
+        else:
+            state = "stopped"
+        boot = "  [starts at boot]" if p.get("systemd", {}).get("enabled") == "enabled" else ""
+        lines.append(f"  {p.get('display_name', p['name']):<12} {p['name']:<12} {state}{boot}")
+    return "\n".join(lines) if lines else "  (no personas on the box)"
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -322,6 +623,12 @@ def main(argv: list[str]) -> int:
     p.add_argument("--base", required=True)
     sub.add_parser("snapshot").add_argument("persona", nargs="?")
     sub.add_parser("pull").add_argument("persona", nargs="?")
+    p = sub.add_parser("migrate", help="move a persona to the box (unit installed, not enabled)")
+    p.add_argument("persona")
+    p.add_argument("--no-health-check", action="store_true",
+                   help="skip the start-once-then-stop check")
+    p = sub.add_parser("who", help="one line per remote persona: running or stopped")
+    p.add_argument("--json", action="store_true")
 
     args = parser.parse_args(argv)
     try:
@@ -361,11 +668,17 @@ def main(argv: list[str]) -> int:
                 result = {"ok": True, "pulled": [pull(settings, p) for p in personas]}
             elif args.command == "mark-remote":
                 result = mark_remote(settings, args.persona)
+            elif args.command == "migrate":
+                result = migrate(settings, args.persona, health_check=not args.no_health_check)
+            elif args.command == "who":
+                result = ctl(settings, "list")
     except (RemoteError, subprocess.SubprocessError, OSError) as e:
         result = {"ok": False, "error": str(e)}
 
     if args.command == "log" and result.get("ok"):
         print(result["log"])
+    elif args.command == "who" and result.get("ok") and not args.json:
+        print(who_text(result))
     else:
         print(json.dumps(result, indent=2))
     return 0 if result.get("ok") else 1
