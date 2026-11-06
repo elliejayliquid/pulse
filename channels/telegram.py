@@ -568,26 +568,49 @@ class TelegramChannel(Channel):
                 pass
         return asyncio.create_task(_loop())
 
-    async def send_photo(self, photo_path: str, caption: str = ""):
-        """Send a photo to the user via Telegram (local path or HTTP URL)."""
+    async def send_photo(self, photo_path: str, caption: str = "", retries: int = 3) -> bool:
+        """Send a photo to the user via Telegram (local path or HTTP URL).
+
+        Retries network errors like voice does: after an idle stretch the
+        pooled connection can be dead (seen as httpx.ReadError on the first
+        upload), and a fresh attempt goes through. The file is re-opened per
+        attempt because the upload consumes the handle. Returns True if sent.
+        """
         if not self.app or not self.chat_id:
-            return
-        try:
-            if photo_path.startswith("http://") or photo_path.startswith("https://"):
-                await self.app.bot.send_photo(
-                    chat_id=self.chat_id,
-                    photo=photo_path,
-                    caption=caption[:1024] if caption else None,
-                )
-            else:
-                with open(photo_path, "rb") as f:
+            return False
+        from telegram.error import BadRequest, NetworkError
+        for attempt in range(1, retries + 1):
+            try:
+                media_kwargs = dict(read_timeout=30, write_timeout=60, connect_timeout=15, pool_timeout=15)
+                if photo_path.startswith("http://") or photo_path.startswith("https://"):
                     await self.app.bot.send_photo(
                         chat_id=self.chat_id,
-                        photo=InputFile(f),
+                        photo=photo_path,
                         caption=caption[:1024] if caption else None,
+                        **media_kwargs,
                     )
-        except Exception as e:
-            logger.warning(f"Failed to send photo: {e}")
+                else:
+                    with open(photo_path, "rb") as f:
+                        await self.app.bot.send_photo(
+                            chat_id=self.chat_id,
+                            photo=InputFile(f),
+                            caption=caption[:1024] if caption else None,
+                            **media_kwargs,
+                        )
+                return True
+            except BadRequest as e:  # the photo itself was rejected — retrying won't help
+                logger.warning(f"Failed to send photo: {e}")
+                return False
+            except NetworkError as e:
+                if attempt < retries:
+                    logger.warning(f"Photo send attempt {attempt}/{retries} failed ({e!r}), retrying in 3s...")
+                    await asyncio.sleep(3)
+                else:
+                    logger.warning(f"Failed to send photo after {retries} attempts: {e!r}")
+            except Exception as e:
+                logger.warning(f"Failed to send photo: {e!r}")
+                return False
+        return False
 
     async def send_sticker(self, sticker_id: str):
         """Send a sticker to the user via Telegram file_id."""
@@ -919,7 +942,9 @@ class TelegramChannel(Channel):
         # Pull from queue and send directly
         if garden_skill.pending_images:
             img_path = garden_skill.pending_images.pop(0)
-            await self.send_photo(img_path, caption="Here is your garden! 🌿")
+            if not await self.send_photo(img_path, caption="Here is your garden! 🌿"):
+                grid = result.split("\n\n(A PNG snapshot")[0]  # that note is for the companion, not Lena
+                await update.message.reply_text(f"The garden picture wouldn't send, but here's the view:\n\n{grid}")
         else:
             await update.message.reply_text(f"Couldn't render the garden right now, but here's the view:\n\n{result}")
 
