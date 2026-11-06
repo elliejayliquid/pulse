@@ -65,6 +65,19 @@ def _definitely_not_delivered(error: BaseException) -> bool:
     return any(isinstance(item, safe_transport_failures) for item in _exception_chain(error))
 
 
+def _connection_reset(error: BaseException) -> bool:
+    """Return True when the socket died under the request without a response.
+
+    This is the stale keep-alive race: the server closed a pooled connection
+    just as we reused it, so the request hit a dead socket (ReadError /
+    WriteError / "server disconnected"). Unlike a timeout, Telegram almost
+    never processed such a request, so one retry on a fresh connection is
+    worth the small duplicate risk. Seen ~2 of 23 replies on the home server.
+    """
+    reset_types = (httpx.ReadError, httpx.WriteError, httpx.RemoteProtocolError)
+    return any(isinstance(item, reset_types) for item in _exception_chain(error))
+
+
 def _delivery_timed_out(error: BaseException) -> bool:
     """Return True for timeouts where Telegram may already have accepted the send."""
     timeout_types = (
@@ -439,6 +452,7 @@ class TelegramChannel(Channel):
         last_sent = None
         for i, chunk in enumerate(chunks):
             markup = reply_markup if i == last_idx else None
+            reset_retried = False
             for attempt in range(1, retries + 1):
                 try:
                     last_sent = await message.reply_text(
@@ -468,6 +482,9 @@ class TelegramChannel(Channel):
                             "automatically to avoid a duplicate. Use /resend if it "
                             "did not arrive."
                         )
+                        await self._notify_undelivered(
+                            message, "Telegram didn't confirm my last message — "
+                            "if it's missing, /resend")
                         return None
                     if attempt < retries and _definitely_not_delivered(e):
                         logger.warning(
@@ -476,9 +493,32 @@ class TelegramChannel(Channel):
                         )
                         await asyncio.sleep(retry_delay)
                         continue
+                    if attempt < retries and not reset_retried and _connection_reset(e):
+                        # Only once: a second reset means the network itself is
+                        # bad, and each retry carries a small duplicate risk.
+                        reset_retried = True
+                        logger.warning(
+                            f"Reply attempt {attempt}/{retries} hit a dead connection "
+                            f"({e}), retrying once on a fresh one in 1s..."
+                        )
+                        await asyncio.sleep(1)
+                        continue
                     logger.error(f"Reply failed without a safe retry: {e}")
+                    await self._notify_undelivered(
+                        message, "my last message didn't go through — /resend")
                     return None
         return last_sent
+
+    async def _notify_undelivered(self, message, text: str) -> None:
+        """Tell the user a reply was lost, so a drop isn't just silence.
+
+        A short plain notice, sent once with no retry: duplicating it is
+        harmless, and if the network is fully down there's nothing to do.
+        """
+        try:
+            await message.reply_text(f"⚠️ ({text})")
+        except Exception as e:
+            logger.warning(f"Could not send the undelivered-reply notice: {e}")
 
     async def _download_photo_with_retry(self, photo, retries: int = 3) -> bytearray:
         """Download a Telegram photo with the same patience as outbound sends."""
