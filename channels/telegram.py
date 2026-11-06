@@ -939,14 +939,18 @@ class TelegramChannel(Channel):
         # Trigger a view (this queues the PNG snapshot)
         result = await asyncio.to_thread(garden_skill.execute, "garden_view", {"show": True})
         
+        # The garden is the resident's own work — credit them by name
+        context_mgr = getattr(self._engine, "context", None)
+        resident = getattr(context_mgr, "ai_name", "") or "Your companion"
+        grid = result.split("\n\n(A PNG snapshot")[0]  # that note is for the companion, not Lena
+
         # Pull from queue and send directly
         if garden_skill.pending_images:
             img_path = garden_skill.pending_images.pop(0)
-            if not await self.send_photo(img_path, caption="Here is your garden! 🌿"):
-                grid = result.split("\n\n(A PNG snapshot")[0]  # that note is for the companion, not Lena
-                await update.message.reply_text(f"The garden picture wouldn't send, but here's the view:\n\n{grid}")
+            if not await self.send_photo(img_path, caption=f"Here's {resident}'s garden 🌿"):
+                await update.message.reply_text(f"{resident}'s garden picture wouldn't send, but here's the view:\n\n{grid}")
         else:
-            await update.message.reply_text(f"Couldn't render the garden right now, but here's the view:\n\n{result}")
+            await update.message.reply_text(f"Couldn't draw {resident}'s garden right now, but here's the view:\n\n{grid}")
 
     async def _cmd_timeout(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /timeout — check status or clear active timeout."""
