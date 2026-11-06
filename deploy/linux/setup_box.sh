@@ -31,7 +31,8 @@ fi
 echo "== Packages"
 apt-get update -qq
 # --no-install-recommends: ffmpeg otherwise pulls in GTK, mesa and friends on a headless box
-apt-get install -y -qq --no-install-recommends git python3-venv ffmpeg sqlite3
+# fonts-noto-color-emoji: the garden skill draws its PNG snapshots with it
+apt-get install -y -qq --no-install-recommends git python3-venv ffmpeg sqlite3 fonts-noto-color-emoji
 
 echo "== Users"
 if ! id pulse >/dev/null 2>&1; then

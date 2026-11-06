@@ -1880,23 +1880,58 @@ textarea {
   gap: 4px;
 }
 
+/* Telegram's PNG snapshot (skills/garden.py) mirrors these tile styles — keep them in step. */
 .skill-garden-plot {
-  display: grid;
-  place-items: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   min-width: 0;
   aspect-ratio: 1;
-  border: 1px solid rgba(var(--accent-rgb), 0.14);
-  border-radius: 5px;
+  container-type: inline-size;
+  border: 1px solid rgba(var(--accent-rgb), 0.18);
+  border-radius: 6px;
   background: rgba(var(--accent-rgb), 0.06);
-  color: var(--accent-hover);
-  font: 13px/1 var(--body);
   transition: border-color 140ms ease, background 140ms ease, transform 140ms ease;
+}
+
+/* Emoji sit low in their squares because Segoe UI Emoji's metrics are lopsided
+   (ascent 1.08em, descent 0.25em): in a 1em line box the ink lands ~0.065em
+   below center for every garden emoji (measured with canvas measureText).
+   Use the emoji font itself, not --body's fallback, and nudge it back up. */
+.skill-garden-emoji {
+  display: block;
+  height: 1em;
+  font-family: "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif;
+  font-size: 56cqi;
+  line-height: 1;
+  transform: translateY(-0.065em);
+}
+
+.skill-garden-plot.stage-bloomed {
+  border-color: rgba(var(--accent-rgb), 0.45);
+  background: rgba(var(--accent-rgb), 0.12);
+}
+
+.skill-garden-plot.stage-wilted {
+  border-color: var(--border);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.skill-garden-plot.stage-wilted .skill-garden-emoji {
+  opacity: 0.65;
 }
 
 .skill-garden-plot.empty {
   border-color: rgba(255, 255, 255, 0.05);
-  background: transparent;
-  color: rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.012);
+}
+
+.skill-garden-plot.empty::after {
+  content: "";
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.2);
 }
 
 .skill-garden-plot.planted:hover {

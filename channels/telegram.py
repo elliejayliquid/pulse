@@ -914,7 +914,7 @@ class TelegramChannel(Channel):
         await update.message.chat.send_action("upload_photo")
         
         # Trigger a view (this queues the PNG snapshot)
-        result = await asyncio.to_thread(garden_skill.execute, "garden_view", {})
+        result = await asyncio.to_thread(garden_skill.execute, "garden_view", {"show": True})
         
         # Pull from queue and send directly
         if garden_skill.pending_images:

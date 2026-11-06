@@ -19,9 +19,38 @@ logger = logging.getLogger(__name__)
 
 GRID_WIDTH = 12
 GRID_HEIGHT = 8
-TILE_SIZE = 64  # Size of each plot in the PNG snapshot
-SNAPSHOT_WIDTH = GRID_WIDTH * TILE_SIZE
-SNAPSHOT_HEIGHT = GRID_HEIGHT * TILE_SIZE + 60  # Extra space for title bar
+
+# PNG snapshot layout (1x pixels; drawn at SNAP_SCALE and downsampled for smooth edges)
+SNAP_SCALE = 2
+SNAP_TILE = 72
+SNAP_GAP = 6
+SNAP_PAD = 32          # outer margin around the grid panel's tiles
+SNAP_HEADER = 104      # top of the tile grid
+SNAP_PANEL_INSET = 10  # grid panel padding around the tiles
+SNAPSHOT_WIDTH = SNAP_PAD * 2 + GRID_WIDTH * SNAP_TILE + (GRID_WIDTH - 1) * SNAP_GAP
+SNAPSHOT_HEIGHT = SNAP_HEADER + GRID_HEIGHT * SNAP_TILE + (GRID_HEIGHT - 1) * SNAP_GAP + SNAP_PAD
+
+# Palette mirrors the desktop GUI tokens (gui/style.css :root)
+GUI_BG = (13, 13, 15)
+GUI_SURFACE = (22, 22, 26)
+GUI_BORDER = (42, 42, 50)
+GUI_TEXT_PRIMARY = (232, 230, 227)
+GUI_TEXT_SECONDARY = (154, 152, 163)
+GUI_TEXT_TERTIARY = (102, 101, 114)
+GUI_ACCENT_DEFAULT = "#f97316"
+
+# Fonts tried in order — Windows, Linux (the home server), macOS
+BODY_FONTS = ["segoeui.ttf", "DejaVuSans.ttf", "Arial.ttf", "Helvetica.ttc"]
+BOLD_FONTS = ["segoeuib.ttf", "DejaVuSans-Bold.ttf", "Arial Bold.ttf", "Helvetica.ttc"]
+# Color emoji fonts. Noto is a bitmap font that only loads at size 109;
+# we render big and scale down anyway. Linux: apt install fonts-noto-color-emoji
+EMOJI_FONTS = ["seguiemj.ttf", "NotoColorEmoji.ttf", "Apple Color Emoji.ttc"]
+EMOJI_RENDER_SIZE = 109
+
+# Drawn instead of an emoji when no color emoji font exists — never a tofu box
+FALLBACK_DOT_COLORS = {
+    "🌱": (110, 190, 90), "🌿": (70, 160, 80), "✨": (250, 204, 21), "🥀": (140, 90, 70),
+}
 
 # Visual Stages
 STAGE_SEEDLING = "🌱"
@@ -324,7 +353,7 @@ class GardenSkill(BaseSkill):
         memory = self._shared_db.get_memory(plant['memory_id'])
         memory_text = memory['text'] if memory else "Unknown memory"
         
-        age_delta = datetime.now() - datetime.fromisoformat(plant['planted_at'])
+        age_delta = datetime.now(timezone.utc) - _parse_utc(plant['planted_at'])
         
         lines = [
             f"--- Plant Info ({x}, {y}) ---",
@@ -422,8 +451,9 @@ class GardenSkill(BaseSkill):
     def _can_water(self, plant: dict) -> bool:
         if not plant.get('last_watered'):
             return True
-        last = datetime.fromisoformat(plant['last_watered'])
-        return (datetime.now() - last) > timedelta(hours=8)
+        # DB timestamps are UTC — compare in UTC, not local time
+        last = _parse_utc(plant['last_watered'])
+        return (datetime.now(timezone.utc) - last) > timedelta(hours=8)
 
     def _get_plant_emoji(self, plant: dict) -> str:
         if plant['health'] < 0.3:
@@ -448,61 +478,219 @@ class GardenSkill(BaseSkill):
         if g < 2.0: return "Shimmering"
         return "Bloomed"
 
+    # --- Snapshot rendering ---
+
     def _render_snapshot(self, plants: list[dict]) -> Optional[Path]:
-        """Render a pretty PNG of the garden."""
+        """Render the garden as a PNG styled like the desktop GUI's garden card."""
         try:
-            # Create background
-            img = Image.new("RGBA", (SNAPSHOT_WIDTH, SNAPSHOT_HEIGHT), (245, 245, 235, 255))
-            draw = ImageDraw.Draw(img)
-            
-            # Draw titles
-            persona_name = self.config.get("_persona_name", "Companion")
-            title = f"{persona_name.capitalize()}'s Memory Garden"
-            # Try to load a nice font, fallback to default
-            try:
-                font_title = ImageFont.truetype("arial.ttf", 32)
-                font_stats = ImageFont.truetype("arial.ttf", 16)
-                font_emoji = ImageFont.truetype("seguiemj.ttf", 48) # Windows Emoji Font
-            except (OSError, Exception):
-                font_title = ImageFont.load_default()
-                font_stats = ImageFont.load_default()
-                font_emoji = ImageFont.load_default()
-
-            draw.text((20, 10), title, fill=(60, 80, 60, 255), font=font_title)
-            
-            # Draw grid background
-            for y in range(GRID_HEIGHT):
-                for x in range(GRID_WIDTH):
-                    rect = [x * TILE_SIZE, 60 + y * TILE_SIZE, (x + 1) * TILE_SIZE, 60 + (y + 1) * TILE_SIZE]
-                    # Checkered pattern
-                    color = (230, 240, 220, 255) if (x + y) % 2 == 0 else (220, 230, 210, 255)
-                    draw.rectangle(rect, fill=color, outline=(200, 210, 190, 255))
-            
-            # Draw plants
-            for p in plants:
-                emoji = self._get_plant_emoji(p)
-                tx = p['x'] * TILE_SIZE + 10
-                ty = 60 + p['y'] * TILE_SIZE + 5
-                draw.text((tx, ty), emoji, fill=(0,0,0,255), font=font_emoji)
-                
-                # Small name tag if it has a name
-                if p.get('name'):
-                    ntx = p['x'] * TILE_SIZE + 5
-                    nty = 60 + (p['y'] + 1) * TILE_SIZE - 20
-                    draw.text((ntx, nty), p['name'][:8], fill=(100, 120, 100, 200), font=font_stats)
-
-            # Save
+            img = self._draw_snapshot(plants)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             path = self.garden_dir / f"garden_{timestamp}.png"
             img.save(path)
-            
+
             # Ring buffer: keep only last 5 snapshots to avoid bloat
             snapshots = sorted(self.garden_dir.glob("garden_*.png"), key=lambda x: x.stat().st_mtime)
             if len(snapshots) > 5:
                 for old in snapshots[:-5]:
                     old.unlink()
-            
+
             return path
         except Exception as e:
             logger.error(f"Failed to render garden snapshot: {e}")
             return None
+
+    def _draw_snapshot(self, plants: list[dict]) -> Image.Image:
+        S = SNAP_SCALE
+
+        def px(v: float) -> int:
+            return round(v * S)
+
+        accent = _parse_hex(self.config.get("accent"), GUI_ACCENT_DEFAULT)
+        img = Image.new("RGB", (px(SNAPSHOT_WIDTH), px(SNAPSHOT_HEIGHT)), GUI_SURFACE)
+        draw = ImageDraw.Draw(img)
+
+        font_title = _load_font(BOLD_FONTS, px(24))
+        font_stats = _load_font(BODY_FONTS, px(13))
+        font_name = _load_font(BODY_FONTS, px(10))
+
+        # Header: title left, stats right on a shared baseline (like .skill-garden-head)
+        persona = str(self.config.get("_persona_name") or "Companion")
+        title = f"{persona[:1].upper()}{persona[1:]}'s Memory Garden"
+        draw.text((px(SNAP_PAD), px(56)), title, fill=GUI_TEXT_PRIMARY, font=font_title, anchor="ls")
+        draw.text((px(SNAPSHOT_WIDTH - SNAP_PAD), px(56)), self._snapshot_stats(plants),
+                  fill=GUI_TEXT_SECONDARY, font=font_stats, anchor="rs")
+        draw.rounded_rectangle([px(SNAP_PAD), px(66), px(SNAP_PAD + 36), px(69)], radius=px(1.5), fill=accent)
+
+        # Grid panel
+        draw.rounded_rectangle(
+            [px(SNAP_PAD - SNAP_PANEL_INSET), px(SNAP_HEADER - SNAP_PANEL_INSET),
+             px(SNAPSHOT_WIDTH - SNAP_PAD + SNAP_PANEL_INSET), px(SNAPSHOT_HEIGHT - SNAP_PAD + SNAP_PANEL_INSET)],
+            radius=px(12), fill=GUI_BG, outline=GUI_BORDER, width=px(1),
+        )
+
+        white = (255, 255, 255)
+        plant_map = {(p["x"], p["y"]): p for p in plants}
+        for gy in range(GRID_HEIGHT):
+            for gx in range(GRID_WIDTH):
+                x0 = SNAP_PAD + gx * (SNAP_TILE + SNAP_GAP)
+                y0 = SNAP_HEADER + gy * (SNAP_TILE + SNAP_GAP)
+                box = [px(x0), px(y0), px(x0 + SNAP_TILE) - 1, px(y0 + SNAP_TILE) - 1]
+                cx = x0 + SNAP_TILE / 2
+                p = plant_map.get((gx, gy))
+
+                if not p:
+                    draw.rounded_rectangle(box, radius=px(6), fill=_mix(white, GUI_BG, 0.012),
+                                           outline=_mix(white, GUI_BG, 0.05), width=px(1))
+                    cy = y0 + SNAP_TILE / 2
+                    r = px(1.6)
+                    draw.ellipse([px(cx) - r, px(cy) - r, px(cx) + r, px(cy) + r],
+                                 fill=_mix(white, GUI_BG, 0.2))
+                    continue
+
+                stage = self._get_stage_name(p)
+                if stage == "Bloomed":
+                    fill, outline = _mix(accent, GUI_BG, 0.12), _mix(accent, GUI_BG, 0.45)
+                elif stage == "Wilted":
+                    fill, outline = _mix(white, GUI_BG, 0.02), GUI_BORDER
+                else:
+                    fill, outline = _mix(accent, GUI_BG, 0.06), _mix(accent, GUI_BG, 0.18)
+                draw.rounded_rectangle(box, radius=px(6), fill=fill, outline=outline, width=px(1))
+
+                name = (p.get("name") or "").strip()
+                emoji = self._get_plant_emoji(p)
+                size = px(SNAP_TILE * (0.48 if name else 0.56))
+                cy = y0 + SNAP_TILE * (0.42 if name else 0.5)
+                glyph = _emoji_image(emoji, size)
+                if glyph is not None:
+                    if stage == "Wilted":
+                        glyph = glyph.copy()
+                        glyph.putalpha(glyph.getchannel("A").point(lambda a: int(a * 0.65)))
+                    img.paste(glyph, (px(cx) - glyph.width // 2, px(cy) - glyph.height // 2), glyph)
+                else:
+                    dot = FALLBACK_DOT_COLORS.get(emoji, accent)
+                    r = size * 0.3
+                    draw.ellipse([px(cx) - r, px(cy) - r, px(cx) + r, px(cy) + r], fill=dot)
+
+                if name:
+                    label = _fit_text(draw, name, font_name, px(SNAP_TILE - 8))
+                    draw.text((px(cx), px(y0 + SNAP_TILE * 0.88)), label,
+                              fill=GUI_TEXT_SECONDARY, font=font_name, anchor="ms")
+
+        return img.resize((SNAPSHOT_WIDTH, SNAPSHOT_HEIGHT), Image.LANCZOS)
+
+    def _snapshot_stats(self, plants: list[dict]) -> str:
+        if not plants:
+            return "Nothing planted yet"
+        n = len(plants)
+        bloomed = sum(1 for p in plants if self._get_stage_name(p) == "Bloomed")
+        thirsty = sum(1 for p in plants if self._can_water(p))
+        wilting = sum(1 for p in plants if p["health"] < 0.3)
+        parts = [f"{n} plant{'s' if n != 1 else ''}"]
+        if bloomed:
+            parts.append(f"{bloomed} bloomed")
+        if thirsty:
+            parts.append(f"{thirsty} can water")
+        if wilting:
+            parts.append(f"{wilting} wilting")
+        return "  ·  ".join(parts)
+
+
+# --- Rendering helpers (module-level caches: fonts and glyphs never change) ---
+
+_FONT_CACHE: dict = {}
+_EMOJI_CACHE: dict = {}
+
+
+def _parse_utc(value) -> datetime:
+    """Parse a DB timestamp (SQLite 'YYYY-MM-DD HH:MM:SS' or ISO) as UTC."""
+    dt = datetime.fromisoformat(str(value).replace(" ", "T"))
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _parse_hex(value, default: str) -> tuple:
+    for candidate in (value, default):
+        s = str(candidate or "").strip().lstrip("#")
+        if len(s) == 6:
+            try:
+                return tuple(int(s[i:i + 2], 16) for i in (0, 2, 4))
+            except ValueError:
+                pass
+    return (249, 115, 22)
+
+
+def _mix(color: tuple, base: tuple, alpha: float) -> tuple:
+    """Flatten rgba(color, alpha) over an opaque base."""
+    return tuple(round(c * alpha + b * (1 - alpha)) for c, b in zip(color, base))
+
+
+def _load_font(candidates: list[str], size: int):
+    key = (tuple(candidates), size)
+    if key not in _FONT_CACHE:
+        font = None
+        for name in candidates:
+            try:
+                font = ImageFont.truetype(name, size)
+                break
+            except OSError:
+                continue
+        if font is None:
+            try:
+                font = ImageFont.load_default(size=size)
+            except TypeError:  # Pillow < 10.1
+                font = ImageFont.load_default()
+        _FONT_CACHE[key] = font
+    return _FONT_CACHE[key]
+
+
+def _emoji_font():
+    if "emoji" not in _FONT_CACHE:
+        font = None
+        for name in EMOJI_FONTS:
+            try:
+                font = ImageFont.truetype(name, EMOJI_RENDER_SIZE)
+                break
+            except OSError:
+                continue
+        if font is None:
+            logger.warning("Garden snapshot: no color emoji font found "
+                           "(Linux: apt install fonts-noto-color-emoji) - drawing dots instead")
+        _FONT_CACHE["emoji"] = font
+    return _FONT_CACHE["emoji"]
+
+
+def _emoji_image(emoji: str, size: int) -> Optional[Image.Image]:
+    """Render one color emoji, trimmed to its visible pixels and fit into size x size.
+
+    Centering on the trimmed bitmap instead of font metrics is what keeps
+    every flower in the middle of its tile, whichever emoji font is used.
+    """
+    key = (emoji, size)
+    if key in _EMOJI_CACHE:
+        return _EMOJI_CACHE[key]
+    result = None
+    font = _emoji_font()
+    if font is not None:
+        glyph = emoji.replace("️", "")  # the variation selector draws as tofu without raqm
+        canvas = Image.new("RGBA", (EMOJI_RENDER_SIZE * 3, EMOJI_RENDER_SIZE * 3), (0, 0, 0, 0))
+        try:
+            ImageDraw.Draw(canvas).text((EMOJI_RENDER_SIZE // 2, EMOJI_RENDER_SIZE // 2), glyph,
+                                        font=font, embedded_color=True)
+            bbox = canvas.getchannel("A").getbbox()
+        except Exception as e:
+            logger.debug(f"Garden snapshot: could not draw {emoji!r}: {e}")
+            bbox = None
+        if bbox:
+            trimmed = canvas.crop(bbox)
+            scale = size / max(trimmed.size)
+            result = trimmed.resize((max(1, round(trimmed.width * scale)),
+                                     max(1, round(trimmed.height * scale))), Image.LANCZOS)
+    _EMOJI_CACHE[key] = result
+    return result
+
+
+def _fit_text(draw: ImageDraw.ImageDraw, text: str, font, max_width: int) -> str:
+    if draw.textlength(text, font=font) <= max_width:
+        return text
+    while text and draw.textlength(text + "…", font=font) > max_width:
+        text = text[:-1]
+    return text.rstrip() + "…"

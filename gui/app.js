@@ -1710,9 +1710,9 @@ function renderGardenSkillPreview(data) {
   const grid = rows.map((row) => `
     <div class="skill-garden-row">
       ${(row || []).map((plot) => `
-        <span class="skill-garden-plot ${plot.empty ? "empty" : "planted"}"
+        <span class="skill-garden-plot ${plot.empty ? "empty" : `planted stage-${escapeHtml(String(plot.stage || "").toLowerCase())}`}"
               title="${escapeHtml(plot.tooltip || "")}"
-              aria-label="${escapeHtml(plot.tooltip || "Garden plot")}">${escapeHtml(plot.emoji || ".")}</span>
+              aria-label="${escapeHtml(plot.tooltip || "Garden plot")}">${plot.empty ? "" : `<span class="skill-garden-emoji">${escapeHtml(plot.emoji || "")}</span>`}</span>
       `).join("")}
     </div>
   `).join("");
