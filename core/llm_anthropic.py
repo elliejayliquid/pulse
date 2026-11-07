@@ -110,9 +110,15 @@ def _convert_messages(messages: list[dict],
     attached, creating a prompt-cache breakpoint at that position. Requires
     cache_control to be passed; ignored otherwise.
 
+    A leading system message whose content is a LIST of pre-built Anthropic
+    text blocks (the prompt builder placing its own cache_control markers, so
+    persona and context cache as separate slots) is passed through block by
+    block when cache_control is given, and flattened to plain text otherwise.
+
     Returns (system_parts, anthropic_messages).
     system_parts is an ordered list so the caller can apply cache_control
-    selectively (e.g. only on the stable blocks).
+    selectively (e.g. only on the stable blocks). Items are strings, or
+    pre-built block dicts in the case above.
     """
     system_parts = []
     anthropic_msgs = []
@@ -128,7 +134,18 @@ def _convert_messages(messages: list[dict],
         hinted = bool(msg.get("cache_hint") and cache_control and content)
 
         if role == "system":
-            if anthropic_msgs:
+            if isinstance(content, list):
+                # Pre-built system blocks (see docstring). Keep them as-is
+                # when caching is on; otherwise flatten to text so an
+                # uncached call never carries cache_control markers.
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    if cache_control:
+                        system_parts.append(dict(block))
+                    elif block.get("text"):
+                        system_parts.append(block["text"])
+            elif anthropic_msgs:
                 # Mid-conversation system text (e.g. the "new message:"
                 # separator between history and the current message) must keep
                 # its position. Anthropic has no mid-list system role, so send
@@ -193,16 +210,28 @@ def _convert_messages(messages: list[dict],
                 # Multi-part content (e.g. text + image) — convert from OpenAI format
                 blocks = []
                 for part in content:
+                    if not isinstance(part, dict):
+                        continue
                     if part.get("type") == "text":
-                        blocks.append({"type": "text", "text": part.get("text", "")})
+                        block = {"type": "text", "text": part.get("text", "")}
+                        # Keep a cache breakpoint the prompt builder placed on
+                        # this part (e.g. after the stable head of a heartbeat
+                        # prompt) — only when this call caches at all.
+                        if cache_control and part.get("cache_control"):
+                            block["cache_control"] = part["cache_control"]
+                        blocks.append(block)
                     elif part.get("type") == "image_url":
                         # OpenAI: {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,..."}}
                         # Anthropic: {"type": "image", "source": {"type": "base64", "media_type": "...", "data": "..."}}
                         url = part.get("image_url", {}).get("url", "")
                         if url.startswith("data:"):
                             # Parse data URI: data:<media_type>;base64,<data>
-                            header, b64_data = url.split(",", 1)
-                            media_type = header.split(":")[1].split(";")[0]
+                            try:
+                                header, b64_data = url.split(",", 1)
+                                media_type = header.split(":")[1].split(";")[0] or "image/jpeg"
+                            except (ValueError, IndexError) as e:
+                                logger.warning(f"Failed to parse image data URI: {e}")
+                                continue
                             blocks.append({
                                 "type": "image",
                                 "source": {
@@ -442,6 +471,16 @@ class AnthropicClient:
                 cache_creation_5m_input_tokens=cache_5m,
                 cache_creation_1h_input_tokens=cache_1h,
             )
+            # Machine-parseable per-call usage line: the aggregate input count
+            # alone hides whether a call hit cache. Fires on every call, so
+            # full-miss calls (both cache fields 0) show up too. Grep for
+            # "[usage]" in the persona's log to pull the raw series.
+            logger.info(
+                f"[usage] input={_obj_get(usage, 'input_tokens', 0) or 0} "
+                f"read={cache_read} create={cache_create} "
+                f"output={_obj_get(usage, 'output_tokens', 0) or 0} "
+                f"model={self.model_name}"
+            )
             # Log cache stats if available
             if cache_read or cache_create:
                 # Anthropic's input_tokens excludes cached tokens, so total =
@@ -622,7 +661,7 @@ class AnthropicClient:
             self._available = False
             return False
 
-    def _build_system_blocks(self, system_parts: list[str]) -> list[dict]:
+    def _build_system_blocks(self, system_parts: list) -> list[dict]:
         """Build system prompt as content blocks with selective caching.
 
         The FIRST and LAST blocks get cache_control. ContextManager only puts
@@ -632,9 +671,18 @@ class AnthropicClient:
         partial hit alive for the persona when the outer context does change.
         Per-call volatile content (time, recalled memories) lives in the
         messages array, after the history, where it can't bust this prefix.
+
+        If the parts include pre-built block dicts (see _convert_messages),
+        the prompt builder already placed its own cache_control markers, so
+        the blocks pass through and no markers are added here.
         """
         if not system_parts:
             return []
+        if any(isinstance(part, dict) for part in system_parts):
+            return [
+                part if isinstance(part, dict) else {"type": "text", "text": part}
+                for part in system_parts if part
+            ]
 
         blocks = []
         for text in system_parts:
@@ -647,16 +695,24 @@ class AnthropicClient:
                 blocks[-1]["cache_control"] = self._cache_control()
         return blocks
 
-    def chat(self, messages: list[dict]) -> Optional[PulseResponse]:
+    def chat(self, messages: list[dict], expect_json: bool = True) -> Optional[PulseResponse]:
         """Send a cacheable message and return a parsed PulseResponse."""
-        return self._chat(messages, use_cache=True)
+        return self._chat(messages, use_cache=True, expect_json=expect_json)
 
-    def chat_uncached(self, messages: list[dict]) -> Optional[PulseResponse]:
+    def chat_uncached(self, messages: list[dict],
+                      expect_json: bool = True) -> Optional[PulseResponse]:
         """Send a one-shot utility message without creating prompt-cache entries."""
-        return self._chat(messages, use_cache=False)
+        return self._chat(messages, use_cache=False, expect_json=expect_json)
 
-    def _chat(self, messages: list[dict], *, use_cache: bool) -> Optional[PulseResponse]:
-        """Send messages for heartbeats/tasks or one-shot internal utilities."""
+    def _chat(self, messages: list[dict], *, use_cache: bool,
+              expect_json: bool = True) -> Optional[PulseResponse]:
+        """Send messages for heartbeats/tasks or one-shot internal utilities.
+
+        Set expect_json=False for callers that want plain text back (the
+        summarizer, the image captioner) so they skip the heartbeat-envelope
+        parse and its misleading "no parsable JSON" warning. The text lands
+        in response.raw either way.
+        """
         self.last_error = ""
         try:
             if not use_cache:
@@ -718,6 +774,8 @@ class AnthropicClient:
                 logger.info("Empty response — treating as silent.")
                 return PulseResponse(raw="", action="silent")
 
+            if not expect_json:
+                return PulseResponse(raw=text, action="silent")
             return PulseResponse.from_llm_output(text)
 
         except APIConnectionError:

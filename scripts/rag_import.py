@@ -499,7 +499,7 @@ def run(dry_run: bool = True, reprocess: bool = False,
     logger.debug("Initializing OpenAI Client...")
     llm_client = OpenAI(
         base_url=llm_endpoint,
-        api_key='not-needed',
+        api_key=os.environ.get('OPENAI_API_KEY', 'not-needed'),
         timeout=180.0  # or even 30 if you want it aggressive
     )
     logger.info(f'LLM endpoint config: {llm_endpoint}')

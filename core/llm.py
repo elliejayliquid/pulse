@@ -282,10 +282,19 @@ class PulseResponse:
                 data = cls._parse_labeled_response(cleaned)
 
             if data is None:
-                # No JSON found — treat entire response as a message
-                logger.warning("No JSON found in response, treating as notification")
-                resp.action = "notify"
-                resp.message = cleaned.strip()
+                # No JSON (or labeled fields) found in the heartbeat response.
+                # Do NOT push the raw text to the user: that leaks the model's
+                # private thinking (deliberation prose, raw JSON envelopes,
+                # markdown fences) into the chat. Stay silent and log the raw
+                # for diagnosis instead; the model gets another chance on the
+                # next heartbeat.
+                preview = cleaned[:200].replace("\n", " ")
+                logger.warning(
+                    "Heartbeat response had no parsable JSON; staying "
+                    f"silent rather than leak thinking. Raw preview: {preview!r}"
+                )
+                resp.action = "silent"
+                resp.message = ""
                 return resp
 
             resp.thinking = data.get("thinking", "")
@@ -307,9 +316,15 @@ class PulseResponse:
                 resp.action = data.get("action", "silent")
                 resp.message = data.get("message", "")
             else:
-                # If JSON fails, treat it as a notification with the raw text
-                resp.action = "notify"
-                resp.message = cleaned.strip()
+                # Same reason as above: a malformed response is not something
+                # the user should see. Stay silent; log the raw for diagnosis.
+                preview = cleaned[:200].replace("\n", " ")
+                logger.warning(
+                    f"Heartbeat response failed JSON parse ({e}); staying "
+                    f"silent rather than leak thinking. Raw preview: {preview!r}"
+                )
+                resp.action = "silent"
+                resp.message = ""
 
         return resp
 
@@ -323,7 +338,8 @@ class LLMClient:
                  top_p: float = 1.0, top_k: int | None = None,
                  api_key: str = "", usage_tracker=None,
                  reasoning: bool = False, reasoning_effort: str = "",
-                 provider_type: str = "local"):
+                 provider_type: str = "local",
+                 provider_routing: dict | None = None):
         self.client = OpenAI(
             base_url=endpoint,
             api_key=api_key or "not-needed",
@@ -353,6 +369,14 @@ class LLMClient:
                     self._extra_body["reasoning"] = {"enabled": True}
             else:
                 self._extra_body["reasoning"] = {"effort": "none"}
+
+            # OpenRouter provider routing: pin to specific backend providers
+            # (e.g. {"order": ["mistral"], "allow_fallbacks": false,
+            # "require_parameters": true}). Used when a model's behavior
+            # varies by backend host and you want consistency. See OpenRouter
+            # docs at openrouter.ai/docs/provider-routing.
+            if provider_routing:
+                self._extra_body["provider"] = provider_routing
 
         # top_k is a llama.cpp / OpenRouter sampler (not part of the base
         # OpenAI schema), so it rides in extra_body. Only sent when set.
@@ -396,11 +420,18 @@ class LLMClient:
     def _track(self, response):
         """Log token usage from an API response (no-op if no tracker)."""
         if self._usage and hasattr(response, "usage") and response.usage:
+            # OpenAI automatic caching: cached tokens are a SUBSET of
+            # prompt_tokens (unlike Anthropic, where the buckets are
+            # disjoint). Recorded so cost_report.py can bill the cached
+            # portion at the discounted rate instead of guessing.
+            details = getattr(response.usage, "prompt_tokens_details", None)
+            cached = getattr(details, "cached_tokens", 0) if details else 0
             self._usage.record(
                 prompt_tokens=response.usage.prompt_tokens or 0,
                 completion_tokens=response.usage.completion_tokens or 0,
                 provider=self._provider_name,
                 model=self.model_name,
+                cache_read_input_tokens=cached or 0,
             )
             # Log prompt cache stats (OpenAI/OpenRouter automatic caching)
             details = getattr(response.usage, "prompt_tokens_details", None)
@@ -528,15 +559,19 @@ class LLMClient:
         self.last_reasoning = ""
         self.last_error = ""
         try:
-            response = self._create_completion(
+            # Build kwargs — only include penalties if non-zero (Google API rejects them)
+            kwargs = dict(
                 model=self.model_name,
                 messages=self._merge_leading_system_messages(messages),
                 temperature=self.temperature,
                 top_p=self.top_p,
-                frequency_penalty=self.frequency_penalty,
-                presence_penalty=self.presence_penalty,
                 max_tokens=self.max_tokens,
             )
+            if self.frequency_penalty:
+                kwargs["frequency_penalty"] = self.frequency_penalty
+            if self.presence_penalty:
+                kwargs["presence_penalty"] = self.presence_penalty
+            response = self._create_completion(**kwargs)
 
             self._track(response)
             finish = getattr(response.choices[0], "finish_reason", "unknown")
@@ -601,16 +636,20 @@ class LLMClient:
 
         for round_num in range(effective_max):
             try:
-                response = self._create_completion(
+                # Build kwargs — only include penalties if non-zero (Google API rejects them)
+                kwargs = dict(
                     model=self.model_name,
                     messages=msgs,
                     tools=tools if tools else None,
                     temperature=self.temperature,
                     top_p=self.top_p,
-                    frequency_penalty=self.frequency_penalty,
-                    presence_penalty=self.presence_penalty,
                     max_tokens=self.max_tokens,
                 )
+                if self.frequency_penalty:
+                    kwargs["frequency_penalty"] = self.frequency_penalty
+                if self.presence_penalty:
+                    kwargs["presence_penalty"] = self.presence_penalty
+                response = self._create_completion(**kwargs)
 
                 self._track(response)
                 choice = response.choices[0]

@@ -37,6 +37,8 @@ class UsageTracker:
         """Record token usage for the current day.
 
         Accumulates into the existing entry for today, or creates a new one.
+        cache_read/creation tokens are Anthropic prompt-cache stats; pass 0
+        (the defaults) for other providers.
         """
         today = datetime.now().strftime("%Y-%m-%d")
         

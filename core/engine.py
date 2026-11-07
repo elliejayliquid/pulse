@@ -120,11 +120,44 @@ class PulseEngine:
                 reasoning=model_config.get("reasoning", False),
                 reasoning_effort=model_config.get("reasoning_effort", ""),
                 provider_type=provider_type,
+                provider_routing=provider_config.get("routing"),
             )
         self.llm._provider_name = provider_type
 
+        # Optional summarizer LLM — for context-compression calls only.
+        # When provider.summarization_model is set on an Anthropic persona, this
+        # is a lightweight second client on a cheaper model (e.g. Haiku 4.5). The
+        # compression prompt is mechanical ("You are a summarizer") — not identity-
+        # bearing — so routing this to a cheaper model saves cost without
+        # changing who the persona is. Recap generation and every other LLM call
+        # stays on self.llm. A byline is added inside _summarize_conversation so
+        # future readers of the summary know which model wrote it.
+        summarizer_model = provider_config.get("summarization_model", "")
+        if summarizer_model and provider_type == "anthropic":
+            self.summarizer_llm = AnthropicClient(
+                endpoint=endpoint,
+                model_name=summarizer_model,
+                temperature=model_config.get("temperature", 0.7),
+                max_tokens=model_config.get("max_response_tokens", 1024),
+                top_p=model_config.get("top_p", 1.0),
+                api_key=api_key,
+                usage_tracker=usage_tracker,
+                cache_ttl="5m",             # summaries aren't re-read, no cache benefit
+                cache_automatic=False,
+            )
+            self.summarizer_llm._provider_name = provider_type
+            logger.info(f"Summarizer LLM: routing _summarize_conversation to {summarizer_model} (persona stays on {model_name})")
+        else:
+            self.summarizer_llm = self.llm
+
         self.max_tool_rounds = model_config.get("max_tool_rounds", 5)
         self.default_tool_loop_mode = model_config.get("tool_loop_mode", "capped")
+        # Some models (e.g. reasoning-only OpenRouter routes) reject the tools
+        # param entirely — offering it 404s. provider.supports_tools: false
+        # makes this persona run in plain-chat mode (no tool calls).
+        self.tools_enabled = provider_config.get("supports_tools", True)
+        if not self.tools_enabled:
+            logger.info("Tools disabled (provider.supports_tools=false) — plain-chat mode")
         self.context = ContextManager(config)
         self.scheduler = ScheduleManager(config)
 
@@ -194,6 +227,12 @@ class PulseEngine:
             config.get("paths", {}).get("action_log", "data/action_log.json")
         )
         self._action_log_max = 20  # keep last 20 actions
+
+    def _available_tools(self) -> list:
+        """Full tool list for scheduled tasks, or [] when the model can't do tool calls."""
+        if not self.tools_enabled or not self.skill_registry:
+            return []
+        return self.skill_registry.get_all_tools()
 
     def _resolve_tool_loop_params(self) -> tuple[str, int]:
         """Resolve tool loop mode and budget based on skills in play.
@@ -341,6 +380,9 @@ class PulseEngine:
     def _log_action(self, action: str, tools_used: list[str] = None, summary: str = ""):
         """Append an entry to the heartbeat action log (ring buffer)."""
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+        # Coerce None → "" so the DB's NOT NULL on summary doesn't fail when
+        # callers pass response.message (which is None for silent actions).
+        summary = summary or ""
 
         if self.db:
             try:
@@ -863,8 +905,9 @@ class PulseEngine:
         history = self.context._load_conversation()
 
         # Build conversation prompt (with optional image)
-        skill_summary = self.skill_registry.get_skill_summary() if self.skill_registry else []
-        on_demand_manifest = self.skill_registry.get_on_demand_manifest() if self.skill_registry else []
+        tools_on = bool(self.skill_registry) and self.tools_enabled
+        skill_summary = self.skill_registry.get_skill_summary() if tools_on else []
+        on_demand_manifest = self.skill_registry.get_on_demand_manifest() if tools_on else []
         messages = self.context.build_conversation_prompt(
             message, history, image_url=image_url, timeout_state=timeout_state,
             skill_summary=skill_summary, on_demand_manifest=on_demand_manifest
@@ -875,7 +918,7 @@ class PulseEngine:
         # Get response — run in thread so we don't block the event loop!
         # If skills are available, use tool-calling mode; otherwise plain chat.
         tools_used = []
-        tools = self.skill_registry.get_always_tools() if self.skill_registry else []
+        tools = self.skill_registry.get_always_tools() if tools_on else []
         t0 = time.time()
         if tools:
             logger.info(f"Tool-calling mode: {len(tools)} tools available")
@@ -1043,16 +1086,21 @@ class PulseEngine:
                 f"{conversation_text}"
             )}
         ]
-        # Run in thread — this is also a sync HTTP call
-        # Don't pass tools — this is a utility call, not a conversation
-        # A summary prompt is unique and never reused. Anthropic's ordinary
-        # chat path would otherwise buy a 1h cache entry for the full old
-        # conversation, doubling input cost with no later read.
-        summary_chat = getattr(self.llm, "chat_uncached", self.llm.chat)
+        # Summaries are one-shot: use the uncached path where the client has
+        # one (a cache entry for the whole old conversation is never read
+        # again). provider.summarization_model routes this to a cheaper
+        # model; otherwise summarizer_llm is self.llm.
+        summarizer = self.summarizer_llm
+        summary_chat = getattr(summarizer, "chat_uncached", summarizer.chat)
         response = await asyncio.to_thread(summary_chat, summary_prompt)
         if response and response.raw:
             summary = strip_think_tags(response.raw).strip()
             if summary:
+                # Byline: if a different model wrote the summary, prefix it so future
+                # readers (memory loads, archived conversations, next-instance context)
+                # know that model authored this mechanical compression — NOT the persona.
+                if self.summarizer_llm is not self.llm:
+                    summary = f"[summarized by {self.summarizer_llm.model_name}]\n\n{summary}"
                 logger.info(f"Conversation summarized: {summary[:80]}...")
                 return summary
         return None
@@ -1072,7 +1120,7 @@ class PulseEngine:
             logger.warning("LLM server not available — can't execute due tasks.")
             return False
 
-        tools = self.skill_registry.get_all_tools() if self.skill_registry else []
+        tools = self._available_tools()
 
         for task in due_tasks:
             logger.info(f"Executing due task: {task['task']}")
@@ -1159,7 +1207,7 @@ class PulseEngine:
             return None
 
         # Free-think tick — companion decides what to do
-        if self.skill_registry:
+        if self.skill_registry and self.tools_enabled:
             shelf_names = self.skill_registry.get_heartbeat_shelf_names()
             tools = self.skill_registry.get_heartbeat_tools(shelf_names)
             if shelf_names:

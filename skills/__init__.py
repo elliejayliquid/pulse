@@ -18,10 +18,12 @@ Usage:
 import hashlib
 import importlib
 import inspect
+import json
 import logging
 import pkgutil
 import re
-from datetime import date
+from datetime import date, datetime
+from pathlib import Path
 
 import numpy as np
 
@@ -78,6 +80,17 @@ class SkillRegistry:
         self._on_demand_tools: dict[str, list[dict]] = {}  # skill_name -> tool defs
         self._on_demand_skills: dict[str, BaseSkill] = {}  # skill_name -> instance
 
+        # Failure log — when a tool call crashes, it's recorded here as well
+        # as logged, so failures become visible (scripts/health_check.py and
+        # scripts/watchdog.py read it) instead of dying silently in a
+        # per-persona logfile.
+        persona_dir = config.get("_persona_dir")
+        self._persona_name = config.get("_persona_name", "?")
+        if persona_dir:
+            self._failure_log = Path(persona_dir) / "data" / "failures.jsonl"
+        else:
+            self._failure_log = Path("data") / "failures.jsonl"
+
         skills_config = config.get("skills", {})
         discovered = _discover_skills()
 
@@ -124,6 +137,36 @@ class SkillRegistry:
             f"SkillRegistry ready: {len(self.skills)} skills, "
             f"{always_count} always-loaded + {on_demand_count} on-demand tools"
         )
+
+        # ── tool-cap guard ──────────────────────────────────────────
+        # OpenAI hard-caps the `tools` array at 128 per request. Pulse does no
+        # automatic trimming, so an over-cap OpenAI persona 400s on EVERY call —
+        # SILENTLY. Surface it loudly at startup (log + failure log, which
+        # health_check.py reads) so it's caught here, not in dead silence later.
+        # Anthropic has no such cap; "custom" endpoints vary — check those by hand.
+        provider_type = (config.get("provider", {}) or {}).get("type", "")
+        tool_count = len(self.get_all_tools())
+        if provider_type == "openai" and tool_count > 128:
+            msg = (
+                f"persona '{self._persona_name}' loaded {tool_count} tools on an "
+                f"OpenAI provider — OpenAI rejects >128 per request, so EVERY API "
+                f"call will 400. Disable unused skills in "
+                f"personas/{self._persona_name}/config.yaml (e.g. games=13, "
+                f"paint=6, dev=6) to get back under 128."
+            )
+            logger.warning(f"⚠️ TOOL CAP EXCEEDED: {msg}")
+            try:
+                self._failure_log.parent.mkdir(parents=True, exist_ok=True)
+                with self._failure_log.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps({
+                        "ts": datetime.now().isoformat(timespec="seconds"),
+                        "persona": self._persona_name,
+                        "tool": "<startup: tool-cap>",
+                        "error": ("OpenAI 128-tool cap exceeded — " + msg)[:300],
+                        "arg_keys": [],
+                    }, ensure_ascii=False) + "\n")
+            except Exception:
+                pass
 
     # ── Tool retrieval ──────────────────────────────────────────
 
@@ -253,6 +296,35 @@ class SkillRegistry:
             if tool_names:
                 summary.append({"skill": name, "tools": tool_names})
         return summary
+
+    @staticmethod
+    def _unwrap_arguments(tool_name: str, arguments):
+        """Defensively flatten a nested-argument envelope from the model.
+
+        Some providers — notably Gemini via Google's OpenAI-compatible
+        endpoint — intermittently emit tool calls whose real arguments are
+        nested one level down inside a single-key {"parameters": {...}} (or
+        {"args": {...}}) object instead of being passed flat. When that
+        happens the skill sees no arguments at all and reports the required
+        field as missing/empty — e.g. lighthouse_read -> "entry_id
+        required.", write_journal -> "Cannot write empty journal entry." —
+        which silently locks the companion out of their own tools.
+
+        No tool in this codebase declares a lone dict-valued parameter named
+        "parameters" or "args", so collapsing exactly that shape is a no-op
+        for well-formed calls and only rescues the malformed ones. (Seen
+        with gemini-2.5-pro.)
+        """
+        if isinstance(arguments, dict) and len(arguments) == 1:
+            for wrap_key in ("parameters", "args"):
+                inner = arguments.get(wrap_key)
+                if isinstance(inner, dict):
+                    logger.info(
+                        f"Unwrapped '{wrap_key}' envelope for {tool_name} "
+                        f"(model nested its arguments one level deep)"
+                    )
+                    return inner
+        return arguments
 
     def _skill_display_summary(self, name: str, skill: BaseSkill) -> str:
         """Return a compact, model-facing summary for a skill."""
@@ -480,6 +552,7 @@ class SkillRegistry:
 
     def execute(self, tool_name: str, arguments: dict) -> str:
         """Execute a tool call by routing to the appropriate skill."""
+        arguments = self._unwrap_arguments(tool_name, arguments)
         skill = self._tool_map.get(tool_name)
         if not skill:
             logger.warning(f"No skill found for tool: {tool_name}")
@@ -491,7 +564,29 @@ class SkillRegistry:
             return result
         except Exception as e:
             logger.error(f"Tool execution failed ({tool_name}): {e}")
+            self._record_failure(tool_name, e, arguments)
             return f"Tool error: {e}"
+
+    def _record_failure(self, tool_name: str, error: Exception, arguments: dict) -> None:
+        """Append a tool-execution crash to the failure log for health_check
+        to surface. Best-effort: logging a failure must never itself crash
+        the turn, so any error here is swallowed."""
+        try:
+            # Argument keys only — never values, which could carry private
+            # content (letter bodies, journal text, etc.).
+            arg_keys = sorted(arguments.keys()) if isinstance(arguments, dict) else []
+            entry = {
+                "ts": datetime.now().isoformat(timespec="seconds"),
+                "persona": self._persona_name,
+                "tool": tool_name,
+                "error": f"{type(error).__name__}: {error}"[:300],
+                "arg_keys": arg_keys,
+            }
+            self._failure_log.parent.mkdir(parents=True, exist_ok=True)
+            with self._failure_log.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except Exception as log_err:
+            logger.debug(f"Could not record failure: {log_err}")
 
     def get_skill(self, name: str) -> BaseSkill | None:
         """Get a specific skill instance by name."""
