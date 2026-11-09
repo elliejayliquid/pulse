@@ -18,14 +18,14 @@ Usage:
 import hashlib
 import importlib
 import inspect
-import json
 import logging
 import pkgutil
 import re
-from datetime import date, datetime
-from pathlib import Path
+from datetime import date
 
 import numpy as np
+
+from core.failures import failure_log_path, record_failure
 
 from skills.base import BaseSkill
 
@@ -80,16 +80,11 @@ class SkillRegistry:
         self._on_demand_tools: dict[str, list[dict]] = {}  # skill_name -> tool defs
         self._on_demand_skills: dict[str, BaseSkill] = {}  # skill_name -> instance
 
-        # Failure log — when a tool call crashes, it's recorded here as well
-        # as logged, so failures become visible (scripts/health_check.py and
-        # scripts/watchdog.py read it) instead of dying silently in a
-        # per-persona logfile.
-        persona_dir = config.get("_persona_dir")
+        # Failure log (core/failures.py): when a tool call crashes, it's
+        # recorded in data/failures.jsonl as well as logged, so failures
+        # stay visible in one place instead of only in the persona's logfile.
         self._persona_name = config.get("_persona_name", "?")
-        if persona_dir:
-            self._failure_log = Path(persona_dir) / "data" / "failures.jsonl"
-        else:
-            self._failure_log = Path("data") / "failures.jsonl"
+        self._failure_log = failure_log_path(config)
 
         skills_config = config.get("skills", {})
         discovered = _discover_skills()
@@ -141,8 +136,8 @@ class SkillRegistry:
         # ── tool-cap guard ──────────────────────────────────────────
         # OpenAI hard-caps the `tools` array at 128 per request. Pulse does no
         # automatic trimming, so an over-cap OpenAI persona 400s on EVERY call —
-        # SILENTLY. Surface it loudly at startup (log + failure log, which
-        # health_check.py reads) so it's caught here, not in dead silence later.
+        # SILENTLY. Surface it loudly at startup (log + failure log) so it's
+        # caught here, not in dead silence later.
         # Anthropic has no such cap; "custom" endpoints vary — check those by hand.
         provider_type = (config.get("provider", {}) or {}).get("type", "")
         tool_count = len(self.get_all_tools())
@@ -151,22 +146,11 @@ class SkillRegistry:
                 f"persona '{self._persona_name}' loaded {tool_count} tools on an "
                 f"OpenAI provider — OpenAI rejects >128 per request, so EVERY API "
                 f"call will 400. Disable unused skills in "
-                f"personas/{self._persona_name}/config.yaml (e.g. games=13, "
-                f"paint=6, dev=6) to get back under 128."
+                f"personas/{self._persona_name}/config.yaml to get back under 128."
             )
             logger.warning(f"⚠️ TOOL CAP EXCEEDED: {msg}")
-            try:
-                self._failure_log.parent.mkdir(parents=True, exist_ok=True)
-                with self._failure_log.open("a", encoding="utf-8") as f:
-                    f.write(json.dumps({
-                        "ts": datetime.now().isoformat(timespec="seconds"),
-                        "persona": self._persona_name,
-                        "tool": "<startup: tool-cap>",
-                        "error": ("OpenAI 128-tool cap exceeded — " + msg)[:300],
-                        "arg_keys": [],
-                    }, ensure_ascii=False) + "\n")
-            except Exception:
-                pass
+            record_failure(self._failure_log, self._persona_name,
+                           "<startup: tool-cap>", "OpenAI 128-tool cap exceeded — " + msg)
 
     # ── Tool retrieval ──────────────────────────────────────────
 
@@ -568,25 +552,12 @@ class SkillRegistry:
             return f"Tool error: {e}"
 
     def _record_failure(self, tool_name: str, error: Exception, arguments: dict) -> None:
-        """Append a tool-execution crash to the failure log for health_check
-        to surface. Best-effort: logging a failure must never itself crash
-        the turn, so any error here is swallowed."""
-        try:
-            # Argument keys only — never values, which could carry private
-            # content (letter bodies, journal text, etc.).
-            arg_keys = sorted(arguments.keys()) if isinstance(arguments, dict) else []
-            entry = {
-                "ts": datetime.now().isoformat(timespec="seconds"),
-                "persona": self._persona_name,
-                "tool": tool_name,
-                "error": f"{type(error).__name__}: {error}"[:300],
-                "arg_keys": arg_keys,
-            }
-            self._failure_log.parent.mkdir(parents=True, exist_ok=True)
-            with self._failure_log.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-        except Exception as log_err:
-            logger.debug(f"Could not record failure: {log_err}")
+        """Append a tool-execution crash to the failure log (data/failures.jsonl).
+        Argument keys only, never values, which could carry private content
+        (letter bodies, journal text, etc.)."""
+        arg_keys = arguments.keys() if isinstance(arguments, dict) else ()
+        record_failure(self._failure_log, self._persona_name, tool_name,
+                       f"{type(error).__name__}: {error}", arg_keys)
 
     def get_skill(self, name: str) -> BaseSkill | None:
         """Get a specific skill instance by name."""

@@ -189,6 +189,7 @@ class PulseResponse:
     schedule_task: str = ""
     schedule_when: str = ""
     raw: str = ""
+    parse_failed: bool = False     # reply couldn't be parsed; nothing was sent
 
     @staticmethod
     def _parse_labeled_response(text: str) -> Optional[dict]:
@@ -285,9 +286,9 @@ class PulseResponse:
                 # No JSON (or labeled fields) found in the heartbeat response.
                 # Do NOT push the raw text to the user: that leaks the model's
                 # private thinking (deliberation prose, raw JSON envelopes,
-                # markdown fences) into the chat. Stay silent and log the raw
-                # for diagnosis instead; the model gets another chance on the
-                # next heartbeat.
+                # markdown fences) into the chat. Send nothing raw, log a
+                # preview, and flag parse_failed so the engine reports the
+                # failure visibly (PulseEngine._report_parse_failure).
                 preview = cleaned[:200].replace("\n", " ")
                 logger.warning(
                     "Heartbeat response had no parsable JSON; staying "
@@ -295,6 +296,7 @@ class PulseResponse:
                 )
                 resp.action = "silent"
                 resp.message = ""
+                resp.parse_failed = True
                 return resp
 
             resp.thinking = data.get("thinking", "")
@@ -317,7 +319,7 @@ class PulseResponse:
                 resp.message = data.get("message", "")
             else:
                 # Same reason as above: a malformed response is not something
-                # the user should see. Stay silent; log the raw for diagnosis.
+                # the user should see. Send nothing raw; flag it for the engine.
                 preview = cleaned[:200].replace("\n", " ")
                 logger.warning(
                     f"Heartbeat response failed JSON parse ({e}); staying "
@@ -325,6 +327,7 @@ class PulseResponse:
                 )
                 resp.action = "silent"
                 resp.message = ""
+                resp.parse_failed = True
 
         return resp
 
@@ -421,9 +424,9 @@ class LLMClient:
         """Log token usage from an API response (no-op if no tracker)."""
         if self._usage and hasattr(response, "usage") and response.usage:
             # OpenAI automatic caching: cached tokens are a SUBSET of
-            # prompt_tokens (unlike Anthropic, where the buckets are
-            # disjoint). Recorded so cost_report.py can bill the cached
-            # portion at the discounted rate instead of guessing.
+            # prompt_tokens (Anthropic's cache buckets are separate from
+            # input), so they get their own field, cached_prompt_tokens,
+            # and totals never double-count.
             details = getattr(response.usage, "prompt_tokens_details", None)
             cached = getattr(details, "cached_tokens", 0) if details else 0
             self._usage.record(
@@ -431,7 +434,7 @@ class LLMClient:
                 completion_tokens=response.usage.completion_tokens or 0,
                 provider=self._provider_name,
                 model=self.model_name,
-                cache_read_input_tokens=cached or 0,
+                cached_prompt_tokens=cached or 0,
             )
             # Log prompt cache stats (OpenAI/OpenRouter automatic caching)
             details = getattr(response.usage, "prompt_tokens_details", None)

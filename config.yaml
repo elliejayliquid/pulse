@@ -81,8 +81,10 @@ provider:
   # nears its budget and needs summarizing) to a cheaper model. Compression is
   # mechanical, not identity-bearing; conversations, journals and recaps stay on
   # the persona's own model. Output gets a "[summarized by <model>]" byline.
-  # Anthropic providers only for now. Leave blank to use the persona's model.
-  # Example: "claude-haiku-4-5-20251001"
+  # Same provider, different model name. Ignored (with a log line) for the
+  # local provider: llama-server serves one model per endpoint.
+  # Leave blank to use the persona's model.
+  # Examples: "claude-haiku-4-5-20251001", "gpt-5-mini"
   summarization_model: ""
 
 # --- Heartbeat ---
