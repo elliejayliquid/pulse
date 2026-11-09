@@ -56,6 +56,7 @@ from gui.import_staging import (
     update_curation,
 )
 from gui.openrouter_import import parse_openrouter_chat
+from gui.remote_bridge import RemoteBridge
 from core.db import PulseDatabase, normalize_resident_id
 from core.scheduler import (
     ScheduleManager,
@@ -292,6 +293,7 @@ class PulseAPI:
         self._close_requested: list[str] | None = None
         self._force_close = False
         self._import_previews: dict[str, dict[str, Any]] = {}
+        self.remote = RemoteBridge(self.root)
 
     # Persona management
 
@@ -332,6 +334,7 @@ class PulseAPI:
             "key_status": self.get_key_status(name),
             "status": self.get_status(name),
             "core_anchors": self._core_anchor_statuses(name),
+            "remote": self._remote_info(name),
             "paths": {
                 "persona_dir": _safe_rel(persona_dir, self.root),
                 "config": _safe_rel(persona_dir / "config.yaml", self.root) if name != "__base__" else "config.yaml",
@@ -1533,6 +1536,8 @@ class PulseAPI:
         if persona is None:
             return {name: self.get_status(name) for name in self._persona_names()}
 
+        if self.remote.is_remote(persona):
+            return self.remote.status(persona)
         status = self._read_status_file(persona)
         proc = self.processes.get(persona)
         if proc:
@@ -1557,6 +1562,8 @@ class PulseAPI:
     def get_log_tail(self, persona: str, lines: int = 80) -> str:
         if not persona or persona == "__base__":
             return ""
+        if self.remote.is_remote(persona):
+            return self.remote.log(persona, lines)
         path = self.root / "logs" / f"{persona}.log"
         if not path.exists():
             return f"No log file yet: {_safe_rel(path, self.root)}"
@@ -3090,6 +3097,8 @@ class PulseAPI:
             return {"ok": False, "error": "Choose a persona before stopping Pulse."}
         if not (self.personas_dir / persona).is_dir():
             return {"ok": False, "error": f"Persona not found: {persona}"}
+        if self.remote.is_remote(persona):
+            return self.remote.control(persona, "stop")
 
         data_dir = self._persona_data_dir(persona)
         data_dir.mkdir(parents=True, exist_ok=True)
@@ -3105,12 +3114,15 @@ class PulseAPI:
             return {"ok": False, "error": "Choose a persona before starting Pulse."}
         if not (self.personas_dir / persona).is_dir():
             return {"ok": False, "error": f"Persona not found: {persona}"}
+        if self.remote.is_remote(persona):
+            # Starts on the box: the PC copy is a backup, and running it here would
+            # fight the remote one over the Telegram bot (pulse.py refuses too)
+            return self.remote.control(persona, "start")
         if (self.personas_dir / persona / "remote.json").is_file():
-            # Same rule as pulse.py: the PC copy of a remote persona is a backup,
-            # and running it would fight the remote one over the Telegram bot.
             return {
                 "ok": False,
-                "error": f"{persona} lives on the remote host. Start it there: remote.bat start {persona}",
+                "error": f"{persona} lives on the remote host, but gui_data/remote.json is missing. "
+                         f"Start it there: remote.bat start {persona}",
             }
 
         self._cleanup_processes()
@@ -3158,6 +3170,38 @@ class PulseAPI:
         )
         return {"ok": True, "status": self.get_status(persona)}
 
+    # Remote personas (designs/remote_host.md §5.3)
+
+    def _remote_info(self, persona: str) -> dict | None:
+        if not self.remote.is_remote(persona):
+            return None
+        return {"host": self.remote.host(), "unsynced": self.remote.unsynced(persona).get("files", [])}
+
+    def _require_remote(self, persona: str) -> dict | None:
+        if self.remote.is_remote(persona):
+            return None
+        return {"ok": False, "error": f"{persona} isn't a remote persona."}
+
+    def remote_restart(self, persona: str) -> dict:
+        return self._require_remote(persona) or self.remote.control(persona, "restart")
+
+    def remote_unsynced(self, persona: str) -> dict:
+        if not self.remote.is_remote(persona):
+            return {"ok": True, "files": []}
+        return self.remote.unsynced(persona)
+
+    def remote_sync_check(self, persona: str) -> dict:
+        return self._require_remote(persona) or self.remote.sync_check(persona)
+
+    def remote_sync_apply(self, persona: str, choices: dict) -> dict:
+        return self._require_remote(persona) or self.remote.sync_apply(persona, choices)
+
+    def remote_backup_state(self, persona: str) -> dict:
+        return self._require_remote(persona) or self.remote.backup_state(persona)
+
+    def remote_pull_backup(self, persona: str) -> dict:
+        return self._require_remote(persona) or self.remote.pull_backup(persona)
+
     # Shell helpers
 
     def check_close_request(self) -> list[str] | None:
@@ -3172,6 +3216,8 @@ class PulseAPI:
             if info.process is not None and info.process.poll() is None
         )
         for name in self._persona_names():
+            if self.remote.is_remote(name):
+                continue  # lives on the box: closing the GUI doesn't touch it
             status = self._read_status_file(name)
             if status.get("running") and not status.get("stale"):
                 running.add(name)
@@ -3341,6 +3387,14 @@ class PulseAPI:
         persona_dir = self.personas_dir / persona
         if not persona_dir.is_dir():
             return {"ok": False, "error": f"Persona not found: {persona}"}
+        if (persona_dir / "remote.json").is_file():
+            # The PC copy of his database is a snapshot backup: an edit here would be
+            # lost on the next pull and never reach him. Live remote DB edits are Phase 3.
+            return {
+                "ok": False,
+                "error": f"{persona} lives on the box, and this database is only a backup copy. "
+                         "Memory, journal and other database edits for him aren't supported from the PC yet.",
+            }
         return {"ok": True}
 
     def _persona_is_running(self, persona: str) -> bool:
@@ -5087,6 +5141,7 @@ class PulseAPI:
             "model": summary["model_display"],
             "is_base": False,
             "running": loaded["status"].get("running", False),
+            "remote": bool(loaded.get("remote")),
         }
 
     def _load_identity(self, persona: str | None) -> dict:

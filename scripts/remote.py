@@ -17,6 +17,9 @@ same functions.
     python scripts/remote.py mark-remote <p>      # PC copy becomes a backup of a box persona
     python scripts/remote.py migrate <p> [--no-health-check]   # move a persona to the box
     python scripts/remote.py who [--json]         # who's running on the box
+    python scripts/remote.py diff <p>             # persona.yaml/config.yaml: which way each must go
+    python scripts/remote.py push <p> [--yes] [--force] [--restart]   # PC edits (GUI or by hand) -> box
+    python scripts/remote.py pull-config <p> [--yes] [--force]        # box edits -> PC
 
 Settings live in gui_data/remote.json (git-ignored). Without that file nothing
 here runs and nothing in Pulse changes.
@@ -171,7 +174,10 @@ def _safe_members(tar: tarfile.TarFile):
 
 
 def pull(settings: dict, persona: str) -> dict:
-    """Replace personas/<persona>/ with the newest box snapshot, keeping the marker and .env."""
+    """Replace personas/<persona>/ with the newest box snapshot (DBs, journal, avatar...).
+
+    Keeps the marker, .env and the PC's persona.yaml/config.yaml: those sync per file.
+    """
     persona_dir = PERSONAS_DIR / persona
     if not (persona_dir / MARKER).exists():
         raise RemoteError(f"{persona} isn't marked remote on this PC — refusing to overwrite a local persona.")
@@ -196,12 +202,15 @@ def pull(settings: dict, persona: str) -> dict:
             raise RemoteError(f"Copying snapshot {name} failed; {persona} left untouched.")
 
         # Only now touch the PC copy: everything downloaded fine
+        # persona.yaml/config.yaml stay: the PC copy is where Lena edits, and a snapshot
+        # would silently wipe unpushed edits (sync_state/pull_files move those per file)
+        keep = PULL_KEEP | {f for f in SYNC_FILES if (persona_dir / f).is_file()}
         for item in persona_dir.iterdir():
-            if item.name in PULL_KEEP:
+            if item.name in keep:
                 continue
             shutil.rmtree(item) if item.is_dir() else item.unlink()
         for item in Path(tmp).iterdir():
-            if item.name in PULL_KEEP:
+            if item.name in keep:
                 continue
             shutil.move(str(item), str(persona_dir / item.name))
 
@@ -219,6 +228,180 @@ def get_file(settings: dict, persona: str, filename: str) -> dict:
 def put_file(settings: dict, persona: str, filename: str, content: str, base_sha256: str) -> dict:
     """Write back an edited file. Refused (conflict) if it changed on the box since get."""
     return ctl(settings, "put", persona, filename, base_sha256, stdin=content.encode("utf-8"))
+
+
+# --- syncing persona.yaml / config.yaml between the PC and the box ------------
+#
+# The PC copy is where Lena edits (GUI or by hand); the box copy is what runs.
+# `synced` in remote.json holds, per file, the sha256 of the text both sides last
+# agreed on (box form: box paths, LF endings). Comparing each side to it says which
+# way a file has to go: only the PC moved -> push, only the box moved -> pull,
+# both -> conflict (Lena picks). No record yet and they differ -> "unknown".
+
+SYNC_FILES = ("config.yaml", "persona.yaml")
+SYNC_STATES = ("same", "push", "pull", "conflict", "unknown")
+
+
+def _lf(text: str) -> str:
+    return text.replace("\r\n", "\n")
+
+
+def _sha256_text(text: str) -> str:
+    import hashlib
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _read_marker(persona: str) -> dict:
+    path = PERSONAS_DIR / persona / MARKER
+    if not path.is_file():
+        raise RemoteError(f"{persona} isn't marked remote on this PC.")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _remember_synced(persona: str, synced: dict[str, str]) -> None:
+    """Record the agreed text's sha256 (box form, LF) per file."""
+    if not synced:
+        return
+    marker = _read_marker(persona)
+    marker.setdefault("synced", {}).update(synced)
+    (PERSONAS_DIR / persona / MARKER).write_text(json.dumps(marker, indent=2), encoding="utf-8")
+
+
+def _pc_as_box(settings: dict, persona: str, name: str) -> str | None:
+    """The PC file in the form the box would hold (box paths, LF), or None if it's missing."""
+    local = PERSONAS_DIR / persona / name
+    if not local.is_file():
+        return None
+    text = _lf(local.read_text(encoding="utf-8"))
+    if name == "config.yaml":
+        text, _ = box_config_text(text, persona, settings.get("path_map") or {})
+    return text
+
+
+def local_unsynced(settings: dict, persona: str) -> list[str]:
+    """Files edited on the PC since the last sync. No SSH, so it's cheap enough to poll.
+
+    A file with no record yet isn't listed: only a real check against the box can tell.
+    """
+    synced = _read_marker(persona).get("synced", {})
+    out = []
+    for name in SYNC_FILES:
+        known = synced.get(name)
+        try:
+            text = _pc_as_box(settings, persona, name)
+        except RemoteError:
+            text = None  # unmapped path: sync_state reports it properly
+        if known and text is not None and _sha256_text(text) != known:
+            out.append(name)
+    return out
+
+
+def _diff(a: str, b: str, a_label: str, b_label: str) -> str:
+    import difflib
+    return "".join(difflib.unified_diff(
+        _lf(a).splitlines(keepends=True), _lf(b).splitlines(keepends=True), a_label, b_label,
+    ))
+
+
+def sync_state(settings: dict, persona: str) -> list[dict]:
+    """Per file: which way it needs to go, with the diff for that direction.
+
+    Each entry: file, state (SYNC_STATES), box, pc_as_box, box_sha256 (raw: what a put
+    must match), diff. In the diff '-' is what the target loses and '+' what it gets:
+    for a pull the target is the PC, otherwise it reads box -> PC.
+    """
+    synced = _read_marker(persona).get("synced", {})
+    rows, agreed = [], {}
+    for name in SYNC_FILES:
+        pc = _pc_as_box(settings, persona, name) or ""
+        got = get_file(settings, persona, name)
+        if not got.get("ok"):
+            raise RemoteError(f"Couldn't read {name} from the box: {got.get('error')}")
+        box = got["content"]
+        box_lf = _lf(box)
+        known = synced.get(name)
+        if box_lf == pc:
+            state = "same"
+            agreed[name] = _sha256_text(pc)
+        elif not known:
+            state = "unknown"
+        else:
+            pc_moved = _sha256_text(pc) != known
+            box_moved = _sha256_text(box_lf) != known
+            state = ("push" if pc_moved and not box_moved
+                     else "pull" if box_moved and not pc_moved
+                     else "conflict")
+        box_label, pc_label = f"box/{persona}/{name}", f"pc/{persona}/{name}"
+        if state == "same":
+            diff = ""
+        elif state == "pull":
+            diff = _diff(pc, box_lf, pc_label, box_label)
+        else:
+            diff = _diff(box_lf, pc, box_label, pc_label)
+        rows.append({
+            "file": name, "state": state, "box": box, "pc_as_box": pc,
+            "box_sha256": got["sha256"], "diff": diff,
+        })
+    _remember_synced(persona, agreed)
+    return rows
+
+
+def push_files(settings: dict, persona: str, rows: list[dict], files: list[str]) -> dict:
+    """PC -> box for the named files (rows from sync_state). Hash-checked, backed up on the box."""
+    pushed, agreed = [], {}
+    for row in rows:
+        if row["file"] not in files or row["state"] == "same":
+            continue
+        result = put_file(settings, persona, row["file"], row["pc_as_box"], row["box_sha256"])
+        if not result.get("ok"):
+            _remember_synced(persona, agreed)
+            raise RemoteError(f"{row['file']}: {result.get('error')} Nothing else was written after it.")
+        agreed[row["file"]] = _sha256_text(row["pc_as_box"])
+        pushed.append({"file": row["file"], "backup": result.get("backup")})
+    _remember_synced(persona, agreed)
+    return {"ok": True, "persona": persona, "pushed": pushed}
+
+
+def pull_files(settings: dict, persona: str, rows: list[dict], files: list[str]) -> dict:
+    """Box -> PC for the named files: box paths mapped back to PC paths, PC line endings kept.
+
+    The PC copy is backed up first (gui_data/backups, same as a GUI save).
+    """
+    todo = [r for r in rows if r["file"] in files and r["state"] != "same"]
+    if not todo:
+        return {"ok": True, "persona": persona, "pulled": []}
+    from gui.backup import BackupManager
+    backup = BackupManager(ROOT).create_backup(persona, reason="pre-pull")
+    pulled, agreed = [], {}
+    for row in todo:
+        text = _lf(row["box"])
+        if row["file"] == "config.yaml":
+            text = pc_config_text(text, settings.get("path_map") or {})
+        local = PERSONAS_DIR / persona / row["file"]
+        crlf = local.is_file() and b"\r\n" in local.read_bytes()
+        tmp = local.with_name(local.name + ".tmp")
+        tmp.write_bytes((text.replace("\n", "\r\n") if crlf else text).encode("utf-8"))
+        os.replace(tmp, local)
+        agreed[row["file"]] = _sha256_text(_lf(row["box"]))
+        pulled.append({"file": row["file"]})
+    _remember_synced(persona, agreed)
+    return {"ok": True, "persona": persona, "pulled": pulled, "backup": backup.get("path")}
+
+
+def backup_state(settings: dict, persona: str) -> dict:
+    """Newest box snapshot vs the last one pulled to the PC (memories, journal, sessions)."""
+    snapshots = f"{settings['box_root']}/snapshots/{persona}"
+    latest = ssh(settings, f"cat {shlex.quote(snapshots + '/LATEST')}")
+    newest = latest.stdout.decode().strip() if latest.returncode == 0 else ""
+    last = _read_marker(persona).get("last_pull") or {}
+    return {
+        "ok": True,
+        "persona": persona,
+        "newest_snapshot": newest,
+        "last_pull": last.get("snapshot", ""),
+        "last_pull_at": last.get("at", ""),
+        "behind": bool(newest) and newest != last.get("snapshot"),
+    }
 
 
 def remote_personas_here() -> list[str]:
@@ -314,6 +497,38 @@ def box_config_text(text: str, persona: str, path_map: dict) -> tuple[str, list[
     if leftover:  # a path the line rewrite couldn't see (flow style, odd quoting)
         raise RemoteError(f"Couldn't rewrite these paths, fix config.yaml by hand: {leftover}")
     return new_text, changes
+
+
+def pc_config_text(text: str, path_map: dict) -> str:
+    """Reverse of box_config_text for a pulled config: box paths under `paths:` -> PC paths.
+
+    Paths inside the persona's own folder stay relative (they work on both machines).
+    A box path nothing maps stays as it is: the PC copy is a backup, it never runs here.
+    """
+    import yaml
+
+    reverse = sorted(((box.rstrip("/"), _norm(pc)) for pc, box in path_map.items()),
+                     key=lambda kv: -len(kv[0]))
+    out, in_paths = [], False
+    for line in text.splitlines(keepends=True):
+        body = line.rstrip("\r\n")
+        if body and not body[0].isspace() and not body.lstrip().startswith("#"):
+            in_paths = re.match(r"^paths:\s*(#.*)?$", body) is not None
+        match = _PATHS_LINE.match(body) if in_paths else None
+        if match:
+            try:
+                value = yaml.safe_load(match["value"])
+            except yaml.YAMLError:
+                value = None
+            if isinstance(value, str) and value.startswith("/"):
+                for box_prefix, pc_prefix in reverse:
+                    if value == box_prefix or value.startswith(box_prefix + "/"):
+                        new = pc_prefix + value[len(box_prefix):]
+                        line = (f"{match['indent']}{match['key']}:{match['space']}"
+                                f"{json.dumps(new)}{match['rest']}{line[len(body):]}")
+                        break
+        out.append(line)
+    return "".join(out)
 
 
 def _pid_alive(pid: int) -> bool:
@@ -592,6 +807,83 @@ def _now() -> str:
 
 # --- CLI -------------------------------------------------------------------
 
+def _ask(question: str) -> bool:
+    if not sys.stdin.isatty():
+        return False
+    return input(f"{question} [y/N] ").strip().lower() in ("y", "yes")
+
+
+_STATE_TEXT = {
+    "same": "same on both sides",
+    "push": "edited on the PC -> push (- box now, + after push)",
+    "pull": "edited ON THE BOX -> pull (- PC now, + after pull)",
+    "conflict": "edited on BOTH sides (- box, + PC): pick one",
+    "unknown": "differs, no record of the last sync (- box, + PC): read both sides",
+}
+
+
+def _sync_command(args) -> int:
+    """`diff`, `push` and `pull-config`: human-readable, interactive unless --yes."""
+    for stream in (sys.stdout, sys.stderr):
+        try:  # configs hold →, — and emoji; the Windows console is cp1252
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+    try:
+        settings = load_settings()
+        rows = sync_state(settings, args.persona)
+    except (RemoteError, subprocess.SubprocessError, OSError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    for row in rows:
+        print(f"\n  {row['file']}: {_STATE_TEXT[row['state']]}")
+        if row["diff"]:
+            print("\n" + row["diff"])
+    if args.command == "diff":
+        return 0
+
+    pushing = args.command == "push"
+    wanted = "push" if pushing else "pull"
+    other = "pull" if pushing else "push"
+    files = [r["file"] for r in rows if r["state"] == wanted]
+    unsure = [r["file"] for r in rows if r["state"] in ("conflict", "unknown")]
+    for r in rows:
+        if r["state"] == other:
+            print(f"  ({r['file']} goes the other way: remote.py {'pull-config' if pushing else 'push'} {args.persona})")
+    if unsure and (args.force or _ask(
+            f"\n{', '.join(unsure)}: {'overwrite the BOX with the PC' if pushing else 'overwrite the PC with the BOX'}"
+            f" version anyway?")):
+        files += unsure
+    if not files:
+        print(f"\n  Nothing to {wanted}.")
+        return 0
+    if not args.yes and not _ask(f"\n{'Push' if pushing else 'Pull'} {', '.join(files)}?"):
+        print("Nothing changed.")
+        return 1
+    try:
+        if not pushing:
+            result = pull_files(settings, args.persona, rows, files)
+            print(f"  pulled {', '.join(i['file'] for i in result['pulled'])}  (PC backup: {result.get('backup')})")
+            return 0
+        result = push_files(settings, args.persona, rows, files)
+        for item in result["pushed"]:
+            print(f"  pushed {item['file']}  (box backup: {item['backup']})")
+        info = ctl(settings, "status", args.persona).get("persona") or {}
+        if (info.get("systemd") or {}).get("active") == "active":
+            if args.restart or _ask(f"{args.persona} is running with the old files. Restart him now?"):
+                r = ctl(settings, "restart", args.persona)
+                print(f"  restart: {'requested' if r.get('ok') else r.get('error')}")
+            else:
+                print(f"  He keeps the old settings until a restart: remote.bat restart {args.persona}")
+        else:
+            print(f"  {args.persona} is stopped: the new files apply on his next start.")
+    except (RemoteError, subprocess.SubprocessError, OSError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description="Deploy Pulse to a remote host and manage remote personas.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -629,8 +921,19 @@ def main(argv: list[str]) -> int:
                    help="skip the start-once-then-stop check")
     p = sub.add_parser("who", help="one line per remote persona: running or stopped")
     p.add_argument("--json", action="store_true")
+    sub.add_parser("diff", help="persona.yaml/config.yaml: PC vs box, and which way each must go").add_argument("persona")
+    for verb, text in (("push", "send PC edits of persona.yaml/config.yaml to the box"),
+                       ("pull-config", "bring box edits of persona.yaml/config.yaml to the PC")):
+        p = sub.add_parser(verb, help=text)
+        p.add_argument("persona")
+        p.add_argument("--yes", action="store_true", help="don't ask before writing")
+        p.add_argument("--force", action="store_true", help="also overwrite files edited on both sides / never synced")
+        if verb == "push":
+            p.add_argument("--restart", action="store_true", help="restart him afterwards if he's running")
 
     args = parser.parse_args(argv)
+    if args.command in ("diff", "push", "pull-config"):
+        return _sync_command(args)
     try:
         if args.command == "init":
             result = init(args.host, args.user, args.key, args.box_root)

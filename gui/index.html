@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Pulse Engine</title>
-  <link rel="stylesheet" href="style.css?v=20261106a">
+  <link rel="stylesheet" href="style.css?v=20261109b">
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
   <meta http-equiv="Pragma" content="no-cache">
   <meta http-equiv="Expires" content="0">
@@ -51,6 +51,7 @@
         <div class="hero-actions">
           <button id="pulseToggle" class="hero-start-btn" type="button">▶ Start</button>
           <button id="openFolderBtn" class="icon-btn" type="button" title="Open persona folder">📂</button>
+          <button id="syncBtn" class="icon-btn hidden" type="button" title="Sync with the box">⇅</button>
         </div>
       </section>
 
@@ -492,6 +493,20 @@
       <div id="backupList" class="backup-list"></div>
       <div class="modal-actions">
         <button id="backupCloseBtn" class="modal-btn ghost" type="button">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="syncDialog" class="modal-overlay hidden">
+    <div class="modal-card sync-card">
+      <h2 class="modal-title">Sync with the box</h2>
+      <p id="syncSubtitle" class="modal-body">Settings files sync both ways. Memories and journal come back as a backup.</p>
+      <div id="syncNotice" class="notice-pill"><span>Checking the box...</span></div>
+      <div id="syncBody" class="sync-body"></div>
+      <div class="modal-actions">
+        <button id="syncApplyBtn" class="modal-btn secondary" type="button" disabled>Apply</button>
+        <button id="syncRefreshBtn" class="modal-btn ghost" type="button" title="Read both sides again">Check again</button>
+        <button id="syncCloseBtn" class="modal-btn ghost" type="button">Close</button>
       </div>
     </div>
   </div>

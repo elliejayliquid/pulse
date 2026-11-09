@@ -100,6 +100,110 @@ def test_pull_refuses_local_persona_and_failed_copy():
             remote.subprocess.Popen, remote.ssh = real_popen, real_ssh
 
 
+def _fake_sync_box(tmp: Path, box: dict):
+    """A demo persona on the PC plus a fake box holding `box` (file -> text)."""
+    import hashlib
+    sha = lambda t: hashlib.sha256(t.encode()).hexdigest()
+    remote.ROOT = tmp
+    remote.PERSONAS_DIR = tmp / "personas"
+    persona = remote.PERSONAS_DIR / "demo"
+    persona.mkdir(parents=True)
+    (persona / "remote.json").write_text("{}", encoding="utf-8")
+    (persona / "persona.yaml").write_bytes(b"name: Demo\r\n")
+    (persona / "config.yaml").write_bytes(
+        b'provider:\r\n  model: "new-model"\r\npaths:\r\n  lor_data: "D:/Claude/LoR/lor_data"  # forum\r\n')
+    puts = []
+    remote.get_file = lambda s, p, f: {"ok": True, "content": box[f], "sha256": sha(box[f])}
+
+    def fake_put(s, p, f, content, base):
+        if base != sha(box[f]):
+            return {"ok": False, "conflict": True, "error": "changed on the remote"}
+        puts.append(f)
+        box[f] = content
+        return {"ok": True, "sha256": sha(content), "backup": "/opt/pulse/backups/x"}
+
+    remote.put_file = fake_put
+    return persona, puts
+
+
+SYNC_SETTINGS = {**SETTINGS, "path_map": {"D:/Claude/LoR/lor_data": "/srv/lor"}}
+OLD_BOX_CONFIG = 'provider:\n  model: "old-model"\npaths:\n  lor_data: "/srv/lor"  # forum\n'
+
+
+def _states(persona: str = "demo") -> dict:
+    return {r["file"]: r for r in remote.sync_state(SYNC_SETTINGS, persona)}
+
+
+def test_sync_push_pull_conflict_directions():
+    real = remote.get_file, remote.put_file, remote.ROOT, remote.PERSONAS_DIR
+    with tempfile.TemporaryDirectory() as tmp:
+        box = {"persona.yaml": "name: Demo\n", "config.yaml": OLD_BOX_CONFIG}
+        persona, puts = _fake_sync_box(Path(tmp), box)
+        try:
+            rows = _states()
+            assert rows["persona.yaml"]["state"] == "same"           # CRLF vs LF only
+            assert rows["config.yaml"]["state"] == "unknown"         # differs, never synced
+            assert '"/srv/lor"  # forum' in rows["config.yaml"]["pc_as_box"]
+            assert "\r" not in rows["config.yaml"]["pc_as_box"]
+            assert remote.local_unsynced(SYNC_SETTINGS, "demo") == []
+
+            remote.push_files(SYNC_SETTINGS, "demo", list(rows.values()), ["config.yaml"])
+            assert puts == ["config.yaml"] and 'model: "new-model"' in box["config.yaml"]
+            assert _states()["config.yaml"]["state"] == "same"
+
+            # Edited on the PC only -> push, and the cheap local check sees it too
+            cfg = persona / "config.yaml"
+            cfg.write_bytes(cfg.read_bytes().replace(b"new-model", b"pc-model"))
+            assert _states()["config.yaml"]["state"] == "push"
+            assert remote.local_unsynced(SYNC_SETTINGS, "demo") == ["config.yaml"]
+            cfg.write_bytes(cfg.read_bytes().replace(b"pc-model", b"new-model"))
+
+            # Edited on the box only -> pull; the diff reads PC -> box
+            box["config.yaml"] = box["config.yaml"].replace("new-model", "box-model")
+            row = _states()["config.yaml"]
+            assert row["state"] == "pull" and "+  model: \"box-model\"" in row["diff"]
+            remote.pull_files(SYNC_SETTINGS, "demo", [row], ["config.yaml"])
+            pulled = cfg.read_bytes()
+            assert b'model: "box-model"' in pulled
+            assert b'"D:/Claude/LoR/lor_data"  # forum' in pulled             # path mapped home
+            assert b"\r\n" in pulled and b"\n" not in pulled.replace(b"\r\n", b"")  # CRLF kept
+            assert any((Path(tmp) / "gui_data" / "backups" / "demo").iterdir())  # PC backed up
+            assert _states()["config.yaml"]["state"] == "same"
+
+            # Both sides moved -> conflict; a stale put is refused, not overwritten
+            cfg.write_bytes(cfg.read_bytes().replace(b"box-model", b"pc-2"))
+            box["config.yaml"] = box["config.yaml"].replace("box-model", "box-2")
+            rows = _states()
+            assert rows["config.yaml"]["state"] == "conflict"
+            box["config.yaml"] += "# one more box edit\n"
+            try:
+                remote.push_files(SYNC_SETTINGS, "demo", list(rows.values()), ["config.yaml"])
+                raise AssertionError("pushed over a box edit it never saw")
+            except remote.RemoteError:
+                pass
+            assert "one more box edit" in box["config.yaml"]
+        finally:
+            remote.get_file, remote.put_file, remote.ROOT, remote.PERSONAS_DIR = real
+
+
+def test_pull_snapshot_keeps_pc_configs():
+    real_popen, real_ssh = subprocess.Popen, remote.ssh
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        persona = tmp / "personas" / "demo"
+        persona.mkdir(parents=True)
+        (persona / "remote.json").write_text("{}", encoding="utf-8")
+        (persona / "config.yaml").write_text("unpushed: edit\n", encoding="utf-8")
+        payload = _tar_bytes({"./config.yaml": b"from: snapshot\n", "./data/demo.db": b"db"})
+        try:
+            _with_fake_box(tmp, payload)
+            remote.pull(SETTINGS, "demo")
+        finally:
+            remote.subprocess.Popen, remote.ssh = real_popen, real_ssh
+        assert (persona / "config.yaml").read_text() == "unpushed: edit\n"
+        assert (persona / "data" / "demo.db").read_bytes() == b"db"
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

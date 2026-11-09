@@ -320,6 +320,12 @@ const fallbackApi = {
   async start_pulse() { return { ok: false, error: "Run through pywebview to start Pulse." }; },
   async stop_pulse() { return { ok: false, error: "Run through pywebview to stop Pulse." }; },
   async open_folder() { return { ok: false, error: "Run through pywebview to open folders." }; },
+  async remote_unsynced() { return { ok: true, files: [] }; },
+  async remote_sync_check() { return { ok: false, error: "Run through pywebview to reach the box." }; },
+  async remote_sync_apply() { return { ok: false, error: "Run through pywebview to reach the box." }; },
+  async remote_backup_state() { return { ok: false, error: "Run through pywebview to reach the box." }; },
+  async remote_pull_backup() { return { ok: false, error: "Run through pywebview to reach the box." }; },
+  async remote_restart() { return { ok: false, error: "Run through pywebview to reach the box." }; },
   async stop_all_and_close() { return { ok: false, error: "Run through pywebview." }; },
   async close_keep_running() { return { ok: false, error: "Run through pywebview." }; },
   async check_close_request() { return null; },
@@ -340,6 +346,7 @@ function fieldValue(id) {
 let noticeTimer = null;
 let secretsBackdropPointerDown = false;
 let lanternBackdropPointerDown = false;
+let syncBackdropPointerDown = false;
 let memoriesBackdropPointerDown = false;
 let avatarBackdropPointerDown = false;
 let journalBackdropPointerDown = false;
@@ -407,7 +414,7 @@ function renderPersonaMenu() {
   state.personas.forEach((persona) => {
     const btn = document.createElement("button");
     btn.type = "button";
-    btn.innerHTML = `<span>${persona.display_name}</span><small>${persona.provider || ""} ${persona.model || ""}</small>`;
+    btn.innerHTML = `<span>${persona.display_name}</span><small>${persona.provider || ""} ${persona.model || ""}${persona.remote ? " · on the box" : ""}</small>`;
     btn.addEventListener("click", () => {
       menu.classList.add("hidden");
       el("personaPicker").classList.remove("open");
@@ -522,7 +529,9 @@ function renderStatus(status) {
   const label = pill.querySelector("span");
   const pulse = document.querySelector(".brand-pulse");
   pill.classList.remove("running", "warning", "stopped");
-  if (status?.phase === "stopping") {
+  if (status?.remote) {
+    renderRemoteStatus(status, pill, label, pulse);
+  } else if (status?.phase === "stopping") {
     pill.classList.add("warning");
     label.textContent = "Stopping...";
     pulse?.classList.remove("flatline");
@@ -537,6 +546,51 @@ function renderStatus(status) {
     label.textContent = text(status?.phase, "Stopped");
     pulse?.classList.add("flatline");
   }
+}
+
+// A persona that lives on the home server: status, Start/Stop and the log come
+// from the box; settings are edited here and sent over with Sync (⇅).
+function isRemotePersona(data = state.current) {
+  return Boolean(data?.remote);
+}
+
+function renderRemoteStatus(status, pill, label, pulse) {
+  const phase = text(status.phase, "stopped");
+  if (status.unknown || status.remote_error) {
+    pill.classList.add(status.unknown ? "stopped" : "warning");
+    label.textContent = status.remote_error ? "Box unreachable" : "Checking box...";
+    pill.title = status.remote_error || "";
+  } else if (phase === "starting" || phase === "stopping") {
+    pill.classList.add("warning");
+    label.textContent = `${phase === "starting" ? "Starting" : "Stopping"}... · box`;
+    pill.title = "";
+  } else if (status.running) {
+    pill.classList.add("running");
+    label.textContent = "Running · box";
+    pill.title = "";
+  } else {
+    pill.classList.add("stopped");
+    label.textContent = "Stopped · box";
+    pill.title = "";
+  }
+  pulse?.classList.toggle("flatline", !status.running);
+}
+
+function renderRemoteChrome(data) {
+  const remote = isRemotePersona(data);
+  el("openFolderBtn").classList.toggle("hidden", remote);
+  el("syncBtn").classList.toggle("hidden", !remote);
+  el("statusPill").title = "";
+  setSyncDot(remote ? data.remote.unsynced || [] : []);
+}
+
+function setSyncDot(files) {
+  const btn = el("syncBtn");
+  const pending = Array.isArray(files) && files.length > 0;
+  btn.classList.toggle("has-changes", pending);
+  btn.title = pending
+    ? `Saved on the PC but not on the box yet: ${files.join(", ")}. Click to sync.`
+    : "Sync with the box: settings both ways, and pull the latest backup";
 }
 
 function selectedProviderType(status = {}) {
@@ -614,6 +668,13 @@ function renderProcessButton(data) {
     btn.className = "hero-stop-btn";
     btn.disabled = isBase || stopping;
     btn.title = "";
+  } else if (status.remote && (status.unknown || status.remote_error)) {
+    btn.textContent = "▶ Start";
+    btn.className = "hero-start-btn";
+    btn.disabled = true;
+    btn.title = status.remote_error
+      ? `Can't reach the box: ${status.remote_error}`
+      : "Checking the box...";
   } else {
     btn.textContent = "▶ Start";
     btn.className = "hero-start-btn";
@@ -3206,7 +3267,9 @@ function renderHero(data) {
     summary.provider_type,
     summary.max_context ? `${summary.max_context} context` : "",
     data.status?.pid ? `pid ${data.status.pid}` : "",
+    isRemotePersona(data) ? `on ${data.remote.host || "the box"}` : "",
   ].filter(Boolean).join(" · ");
+  renderRemoteChrome(data);
 
   const isBase = data.name === "__base__";
   const avatar = el("avatar");
@@ -5672,7 +5735,11 @@ async function applyCurrentSave(changes, { notice = true } = {}) {
   setDirty(false);
   setCanUndo(Boolean(result.changed));
   if (notice) {
-    if (result.changed && wasRunning) {
+    if (result.changed && isRemotePersona()) {
+      const name = state.current.display_name || personaName;
+      setNotice(`Saved on the PC. ${name}'s box copy doesn't have it yet: use ⇅ Sync to send it over.`, "warning", NOTICE_WARNING_MS);
+      setFooterNotice(`Not on the box yet: open ⇅ Sync to send it to ${name}.`);
+    } else if (result.changed && wasRunning) {
       const restartMessage = "Restart needed: saved changes take effect after restart.";
       setNotice("Saved. Restart the persona for changes to take effect.", "warning", NOTICE_WARNING_MS);
       setFooterNotice(restartMessage);
@@ -5787,6 +5854,7 @@ async function refreshCurrentStatus() {
   renderStatus(status);
   renderRuntime(status, state.current.summary || {});
   renderProcessButton(state.current);
+  if (status.remote) setSyncDot(status.unsynced || []);
   if (!status.running) setFooterNotice("");
   await loadLogs();
 
@@ -5903,6 +5971,23 @@ function wireEvents() {
   el("backupCloseBtn").addEventListener("click", hideBackupsDialog);
   el("backupsDialog").addEventListener("click", (e) => {
     if (e.target === el("backupsDialog")) hideBackupsDialog();
+  });
+  el("syncBtn").addEventListener("click", openSyncDialog);
+  el("syncCloseBtn").addEventListener("click", closeSyncDialog);
+  el("syncRefreshBtn").addEventListener("click", () => loadSyncState());
+  el("syncApplyBtn").addEventListener("click", applySync);
+  el("syncBody").addEventListener("change", (event) => {
+    if (event.target.classList.contains("sync-choice")) updateSyncApplyButton();
+  });
+  el("syncBody").addEventListener("click", (event) => {
+    if (event.target.id === "syncPullBackupBtn") pullSyncBackup();
+  });
+  el("syncDialog").addEventListener("pointerdown", (event) => {
+    syncBackdropPointerDown = event.target === el("syncDialog");
+  });
+  el("syncDialog").addEventListener("click", (e) => {
+    if (syncBackdropPointerDown && e.target === el("syncDialog")) closeSyncDialog();
+    syncBackdropPointerDown = false;
   });
   el("lanternCloseBtn").addEventListener("click", closeLanternDialog);
   el("lanternSaveBtn").addEventListener("click", saveLanternEditor);
@@ -6190,7 +6275,9 @@ function wireEvents() {
         const choice = await saveBeforeStopChoice();
         if (!choice.ok) return;
       }
-      setNotice("Requesting graceful shutdown...");
+      setNotice(isRemotePersona()
+        ? "Stopping on the box... a reply in progress finishes first."
+        : "Requesting graceful shutdown...");
       setFooterNotice("");
       state.pendingTransition = "stopping";
       const result = await api().stop_pulse(state.current.name);
@@ -6205,7 +6292,22 @@ function wireEvents() {
         const choice = await saveBeforeStartChoice();
         if (!choice.ok || choice.action === "saved") return;
       }
-      setNotice("Starting Pulse...");
+      if (isRemotePersona()) {
+        // He starts from the box's copy: settings saved here but not synced would be missed
+        const pending = await api().remote_unsynced(state.current.name);
+        if (pending.ok && pending.files?.length) {
+          const name = state.current.display_name || state.current.name;
+          const choice = await showChoice(
+            `${name}'s box copy is older`,
+            `Saved here but not on the box yet: <strong>${escapeHtml(pending.files.join(", "))}</strong>. `
+              + `He starts from the box's copy, so these changes would be missed.`,
+            { okLabel: "Sync first", okStyle: "secondary", secondaryLabel: "Start anyway", cancelLabel: "Cancel" }
+          );
+          if (choice === "cancel") return;
+          if (choice === "ok") { openSyncDialog(); return; }
+        }
+      }
+      setNotice(isRemotePersona() ? "Starting on the box..." : "Starting Pulse...");
       setFooterNotice("");
       state.pendingTransition = "starting";
       const result = await api().start_pulse(state.current.name);
@@ -6220,6 +6322,256 @@ function wireEvents() {
     renderRuntime(state.current.status, state.current.summary || {});
     renderProcessButton(state.current);
   });
+}
+
+// --- Sync with the box (remote personas) ------------------------------------
+// persona.yaml/config.yaml: each file shows which way it needs to go, worked out
+// from the last version both sides agreed on (scripts/remote.py sync_state).
+// The DBs (memories, journal, sessions) only come back, as a snapshot backup.
+
+const SYNC_FILE_STATES = {
+  same: { label: "In sync", hint: "Same on the PC and the box." },
+  push: { label: "PC → box", hint: "Saved on the PC since the last sync, so the box copy is older.", legend: "− box now · + after push" },
+  pull: { label: "Box → PC", hint: "Changed on the box since the last sync, so the PC copy is older.", legend: "− PC now · + after pull" },
+  conflict: { label: "Both changed", hint: "Edited on the PC and on the box since the last sync. Pick which copy wins: the other one's changes are replaced (both sides keep a backup).", legend: "− box · + PC" },
+  unknown: { label: "Differs", hint: "The copies differ, and there's no record of the last sync to tell which is newer. Read the diff, then pick.", legend: "− box · + PC" },
+};
+
+const syncState = { persona: null, files: [], backup: null, busy: false };
+
+function setSyncNotice(message) {
+  el("syncNotice").innerHTML = `<span>${escapeHtml(message)}</span>`;
+}
+
+function formatSnapshotName(name) {
+  // 20261108T143027Z -> local time
+  const m = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/.exec(name || "");
+  if (!m) return name || "";
+  return formatBackupTime(`${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}Z`);
+}
+
+function syncDefaultChoice(fileState) {
+  return fileState === "push" ? "push" : fileState === "pull" ? "pull" : "skip";
+}
+
+function renderSyncRows() {
+  const files = syncState.files.length
+    ? syncState.files
+    : ["config.yaml", "persona.yaml"].map((file) => ({ file, state: null, diff: "" }));
+  const rows = files.map((item) => {
+    const info = SYNC_FILE_STATES[item.state] || { label: "Checking...", hint: "Reading both copies." };
+    const choice = item.state && item.state !== "same"
+      ? `<select class="sync-choice tuning-select" data-file="${escapeHtml(item.file)}">
+          <option value="push" ${syncDefaultChoice(item.state) === "push" ? "selected" : ""}>Send PC copy to the box</option>
+          <option value="pull" ${syncDefaultChoice(item.state) === "pull" ? "selected" : ""}>Take the box copy</option>
+          <option value="skip" ${syncDefaultChoice(item.state) === "skip" ? "selected" : ""}>Leave for now</option>
+        </select>`
+      : "";
+    const diff = item.diff
+      ? `<div class="sync-legend">${escapeHtml(info.legend || "")}</div><pre class="diff-block">${formatDiff(item.diff)}</pre>`
+      : "";
+    return `<div class="sync-row">
+      <div class="sync-row-head">
+        <strong>${escapeHtml(item.file)}</strong>
+        <span class="sync-state ${escapeHtml(item.state || "checking")}">${escapeHtml(info.label)}</span>
+        ${choice}
+      </div>
+      <p class="sync-hint">${escapeHtml(info.hint)}</p>
+      ${diff}
+    </div>`;
+  });
+
+  const b = syncState.backup;
+  let backupHint = "Checking the newest snapshot...";
+  let backupLabel = "Checking...";
+  let backupClass = "checking";
+  if (b && !b.ok) {
+    backupHint = b.error || "Couldn't read the snapshot list.";
+    backupLabel = "Unknown";
+  } else if (b) {
+    const newest = b.newest_snapshot ? formatSnapshotName(b.newest_snapshot) : "none yet";
+    const last = b.last_pull ? formatSnapshotName(b.last_pull) : "never";
+    backupHint = `Newest snapshot on the box: ${newest} · last pulled to the PC: ${last}. `
+      + "The box takes one every night and before each deploy.";
+    backupLabel = b.behind ? "Newer on the box" : "Up to date";
+    backupClass = b.behind ? "pull" : "same";
+  }
+  rows.push(`<div class="sync-row">
+    <div class="sync-row-head">
+      <strong>Memories, journal, sessions</strong>
+      <span class="sync-state ${backupClass}">${escapeHtml(backupLabel)}</span>
+      <button id="syncPullBackupBtn" class="modal-btn ghost sync-row-btn" type="button"
+        ${b?.ok && b.newest_snapshot ? "" : "disabled"}
+        title="Copy the newest box snapshot into the PC's backup folder. Nothing on the box changes.">Pull backup</button>
+    </div>
+    <p class="sync-hint">${escapeHtml(backupHint)}</p>
+  </div>`);
+  el("syncBody").innerHTML = rows.join("");
+  updateSyncApplyButton();
+}
+
+function syncChoices() {
+  const choices = {};
+  el("syncBody").querySelectorAll(".sync-choice").forEach((select) => {
+    choices[select.dataset.file] = select.value;
+  });
+  return choices;
+}
+
+function updateSyncApplyButton() {
+  const anything = Object.values(syncChoices()).some((value) => value !== "skip");
+  el("syncApplyBtn").disabled = syncState.busy || !anything;
+}
+
+function syncSummaryNotice() {
+  const counts = {};
+  syncState.files.forEach((item) => { counts[item.state] = (counts[item.state] || 0) + 1; });
+  const name = state.current?.display_name || syncState.persona;
+  if (!syncState.files.length) return "";
+  if (counts.conflict || counts.unknown) {
+    return "Some files differ in a way only you can settle: read the diff and pick a side for each.";
+  }
+  if (counts.push && counts.pull) return "Changes on both sides, in different files. Apply sends each one its way.";
+  if (counts.push) return `Saved here but not on the box yet. Apply sends it to ${name}.`;
+  if (counts.pull) return "Changed on the box. Apply brings it to the PC (the PC copy is backed up first).";
+  return `${name}'s settings are the same on the PC and the box.`;
+}
+
+async function loadSyncState(message = "") {
+  const persona = syncState.persona;
+  if (!persona) return;
+  syncState.busy = true;
+  setSyncNotice("Checking the box...");
+  updateSyncApplyButton();
+  const [check, backup] = await Promise.all([
+    api().remote_sync_check(persona),
+    api().remote_backup_state(persona),
+  ]);
+  if (syncState.persona !== persona) return;
+  syncState.busy = false;
+  syncState.backup = backup;
+  syncState.files = check.ok ? check.files || [] : [];
+  renderSyncRows();
+  setSyncNotice(check.ok ? (message || syncSummaryNotice()) : (check.error || "Couldn't reach the box."));
+  const pending = syncState.files.filter((item) => item.state === "push").map((item) => item.file);
+  if (state.current?.name === persona && check.ok) setSyncDot(pending);
+}
+
+function openSyncDialog() {
+  if (!isRemotePersona()) return;
+  const name = state.current.display_name || state.current.name;
+  syncState.persona = state.current.name;
+  syncState.files = [];
+  syncState.backup = null;
+  el("syncSubtitle").textContent = `${name} lives on ${state.current.remote.host || "the box"}. `
+    + "His settings files sync both ways; his memories and journal come back here as a backup.";
+  renderSyncRows();
+  el("syncDialog").classList.remove("hidden");
+  document.body.classList.add("modal-open");
+  loadSyncState();
+}
+
+function closeSyncDialog() {
+  el("syncDialog").classList.add("hidden");
+  document.body.classList.remove("modal-open");
+  syncState.persona = null;
+}
+
+async function applySync() {
+  const persona = syncState.persona;
+  const name = state.current?.display_name || persona;
+  const choices = syncChoices();
+  const byFile = Object.fromEntries(syncState.files.map((item) => [item.file, item.state]));
+  const overwriting = Object.entries(choices).filter(([file, choice]) => (
+    choice !== "skip" && ["conflict", "unknown"].includes(byFile[file])
+  ));
+  if (overwriting.length) {
+    const lines = overwriting.map(([file, choice]) => (
+      `<strong>${escapeHtml(file)}</strong>: ${choice === "push" ? "the box copy is replaced by the PC copy" : "the PC copy is replaced by the box copy"}`
+    )).join("<br>");
+    const ok = await showConfirm(
+      "Replace the other side?",
+      `${lines}<br><br>Its own changes there are replaced. Both sides keep a backup.`,
+      "Replace",
+      "danger"
+    );
+    if (!ok) return;
+  }
+  const pulling = Object.values(choices).includes("pull");
+  if (pulling && (state.dirty || hasEditableChanges())) {
+    const ok = await showConfirm(
+      "Discard unsaved edits?",
+      "Taking the box copy reloads this persona, and the unsaved edits in the main window would be lost.",
+      "Discard & take",
+      "danger"
+    );
+    if (!ok) return;
+  }
+
+  syncState.busy = true;
+  updateSyncApplyButton();
+  setSyncNotice("Applying...");
+  const result = await api().remote_sync_apply(persona, choices);
+  syncState.busy = false;
+  if (!result.ok) {
+    if (result.changed) await loadSyncState(result.error);
+    else { setSyncNotice(result.error || "Sync failed."); updateSyncApplyButton(); }
+    return;
+  }
+
+  const done = [];
+  if (result.pushed?.length) done.push(`Sent ${result.pushed.join(", ")} to the box.`);
+  if (result.pulled?.length) done.push(`Took ${result.pulled.join(", ")} from the box (PC copy backed up first).`);
+  if (result.pulled?.length && state.current?.name === persona) {
+    await loadPersona(persona);
+    setDirty(false);
+  }
+  if (result.pushed?.length && result.running) {
+    const restart = await showConfirm(
+      `Restart ${name}?`,
+      `${escapeHtml(name)} is running with the old settings. Restart him on the box so they take effect? A reply in progress finishes first.`,
+      "Restart",
+      "secondary"
+    );
+    if (restart) {
+      const r = await api().remote_restart(persona);
+      done.push(r.ok ? "Restart requested." : `Restart failed: ${r.error || "unknown error"}`);
+      if (r.ok && state.current?.name === persona) state.pendingTransition = "starting";
+    } else {
+      done.push("He keeps the old settings until his next restart.");
+    }
+  } else if (result.pushed?.length) {
+    done.push("He's stopped, so they apply on his next start.");
+  }
+  setFooterNotice("");
+  await loadSyncState(done.join(" "));
+}
+
+async function pullSyncBackup() {
+  const persona = syncState.persona;
+  const name = state.current?.display_name || persona;
+  const b = syncState.backup || {};
+  const ok = await showConfirm(
+    "Pull the backup?",
+    `Replaces the PC's backup copy of ${escapeHtml(name)}'s databases, journal files and avatar with the box snapshot from `
+      + `<strong>${escapeHtml(formatSnapshotName(b.newest_snapshot))}</strong>. His settings files and .env stay as they are, `
+      + "and nothing on the box changes. The box keeps its last 14 snapshots.",
+    "Pull",
+    "secondary"
+  );
+  if (!ok) return;
+  syncState.busy = true;
+  el("syncPullBackupBtn").disabled = true;
+  setSyncNotice("Pulling the snapshot... this can take a minute for a big database.");
+  const result = await api().remote_pull_backup(persona);
+  syncState.busy = false;
+  if (!result.ok) {
+    setSyncNotice(result.error || "Pull failed.");
+    renderSyncRows();
+    return;
+  }
+  if (state.current?.name === persona && !state.dirty) await loadPersona(persona);
+  await loadSyncState(`Pulled snapshot ${formatSnapshotName(result.snapshot)} into the PC backup.`);
 }
 
 async function openBackupsDialog() {
