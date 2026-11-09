@@ -80,12 +80,21 @@ def _target(settings: dict) -> str:
     return f"{settings['user']}@{settings['host']}"
 
 
+# The GUI runs under pythonw (no console), and Windows gives every console program it
+# starts (ssh, git) a console window of its own: a black flash per status poll.
+# Captured calls never need one. Streamed CLI calls keep theirs, since that's where
+# their output shows.
+HIDDEN = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if os.name == "nt" else {}
+
+
 def ssh(settings: dict, remote_cmd: str, stdin: bytes | None = None,
         timeout: float | None = 60, stream: bool = False) -> subprocess.CompletedProcess:
     cmd = _ssh_base(settings) + [_target(settings), remote_cmd]
     if stream:  # long-running (pip, first clone): show output as it happens
         return subprocess.run(cmd, timeout=timeout)
-    return subprocess.run(cmd, input=stdin, capture_output=True, timeout=timeout)
+    if stdin is None:  # never let ssh reach for a console or the parent's stdin
+        return subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, timeout=timeout, **HIDDEN)
+    return subprocess.run(cmd, input=stdin, capture_output=True, timeout=timeout, **HIDDEN)
 
 
 def ctl(settings: dict, *args: str, stdin: bytes | None = None, timeout: float | None = 60) -> dict:
@@ -104,7 +113,8 @@ def ctl(settings: dict, *args: str, stdin: bytes | None = None, timeout: float |
 
 
 def _git(*args: str, env: dict | None = None, check: bool = True) -> subprocess.CompletedProcess:
-    result = subprocess.run(["git", "-C", str(ROOT), *args], capture_output=True, text=True, env=env)
+    result = subprocess.run(["git", "-C", str(ROOT), *args], capture_output=True, text=True, env=env,
+                            stdin=subprocess.DEVNULL, **HIDDEN)
     if check and result.returncode != 0:
         raise RemoteError(f"git {' '.join(args)} failed: {result.stderr.strip()}")
     return result
@@ -193,7 +203,9 @@ def pull(settings: dict, persona: str) -> dict:
     with tempfile.TemporaryDirectory(dir=staging_root) as tmp:
         proc = subprocess.Popen(
             _ssh_base(settings) + [_target(settings), f"tar -C {shlex.quote(snapshots + '/' + name)} -cf - ."],
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
+            **HIDDEN,
         )
         with tarfile.open(fileobj=proc.stdout, mode="r|") as tar:
             for member in _safe_members(tar):
