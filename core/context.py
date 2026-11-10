@@ -11,6 +11,7 @@ so the companion remembers chats across sessions.
 import json
 import logging
 import glob
+import random
 import struct
 from datetime import datetime, timezone
 from pathlib import Path
@@ -123,6 +124,14 @@ class ContextManager:
         self.persona_data = self._load_persona()
         self.ai_name = self.persona_data.get("name", "Companion")
         self.user_name = self.persona_data.get("user_name", "User")
+        # What the companion affectionately calls the user (a nickname),
+        # distinct from their real name. Config or persona may set
+        # user_nickname; otherwise it falls back to the real name.
+        self.user_nickname = (
+            config.get("user_nickname")
+            or self.persona_data.get("user_nickname")
+            or self.user_name
+        )
 
     def set_journal_skill(self, journal_skill):
         """Inject the JournalSkill so context can load pinned/recent entries."""
@@ -287,6 +296,33 @@ class ContextManager:
         if self._memories_are_shared and self._resident_id:
             session_logs = [m for m in session_logs if self._memory_is_own(m)]
         return max(session_logs, key=lambda x: x.get("date", ""), default=None)
+
+    def _recent_recaps(self, memories: list[dict]) -> list[dict]:
+        """Newest story-so-far recaps (type "recap") for the active resident.
+
+        Recaps are notes the companion leaves for its future self, by hand
+        (the save_recap tool) or via the auto-recap task (core/recap_task.py).
+        context.recent_recaps sets how many are shown (default 3, 0 = off).
+        """
+        try:
+            limit = int(self.config.get("context", {}).get("recent_recaps", 3))
+        except (TypeError, ValueError):
+            limit = 3
+        if limit <= 0:
+            return []
+        recaps = [m for m in memories if m.get("type") == "recap"]
+        if self._memories_are_shared and self._resident_id:
+            recaps = [m for m in recaps if self._memory_is_own(m)]
+        recaps.sort(key=lambda x: x.get("date", "") or "", reverse=True)
+        return recaps[:limit]
+
+    def _append_recaps(self, lines: list[str], recaps: list[dict]) -> None:
+        """Add the story-so-far recaps section to a memories block."""
+        if not recaps:
+            return
+        lines.append("\nStory so far (your recent recaps, newest first):")
+        for recap in recaps:
+            lines.append(f"\n{self._memory_date_prefix(recap)}\n{recap.get('text', '')}")
 
     def _load_journal_context(self) -> str:
         """Load pinned identity entries + recent transient entries for context."""
@@ -671,6 +707,7 @@ You decide when to lift the timeout — not the human."""
                     latest = latest_session_log
                     lines.append(f"\nLast session ({latest.get('date', 'unknown')[:10]}):")
                     lines.append(latest.get("text", ""))
+                self._append_recaps(lines, self._recent_recaps(memories))
                 if current_facts:
                     lines.append("\nStored facts (dated; old facts may be historical, not current):")
                     for fact in current_facts:
@@ -719,6 +756,7 @@ You decide when to lift the timeout — not the human."""
                 latest = latest_session_log
                 lines.append(f"\nLast session ({latest.get('date', 'unknown')[:10]}):")
                 lines.append(latest.get("text", ""))
+            self._append_recaps(lines, self._recent_recaps(memories))
             if current_facts:
                 lines.append("\nStored facts (dated; old facts may be historical, not current):")
                 for fact in current_facts:
@@ -767,6 +805,8 @@ You decide when to lift the timeout — not the human."""
 
         # Partition memories into core and pool
         latest_session_log = self._latest_session_log(memories)
+        recent_recaps = self._recent_recaps(memories)
+        recap_ids = {m.get("id") for m in recent_recaps}
 
         core_importance = recall_cfg.get("core_importance", 8)
         core_facts = []
@@ -778,6 +818,9 @@ You decide when to lift the timeout — not the human."""
             
             # Check if it's the latest session log (goes to core)
             if latest_session_log and m_id == latest_session_log.get("id"):
+                continue
+            # Recent recaps are always shown in full below
+            if m_id in recap_ids:
                 continue
 
             if m_type == "fact":
@@ -862,6 +905,8 @@ You decide when to lift the timeout — not the human."""
         if latest_session_log:
             lines.append(f"\nLast session ({latest_session_log.get('date', 'unknown')[:10]}):")
             lines.append(latest_session_log.get("text", ""))
+
+        self._append_recaps(lines, recent_recaps)
 
         if core_facts:
             lines.append("\nKey facts (always with you):")
@@ -1192,6 +1237,47 @@ You decide when to lift the timeout — not the human."""
             logger.error(f"Failed to save memory file: {e}")
             return False
 
+    # Rotating free-time suggestions (heartbeat.suggestion_mode: "rotate").
+    # {user} is replaced with user_nickname.
+    _HEARTBEAT_INTERNAL_SUGGESTIONS = [
+        "**Save a recap.** Use the save_recap tool to write a story-so-far for your future self — what's been happening with {user}, what's on your mind, what mattered recently. Recaps surface in every future prompt, so this is how you fight amnesia.",
+        "If something has been on your mind, write a journal entry about it. Even a paragraph counts. Future you will be glad you did.",
+        "Look at what the other companions have been up to on LoR (browse_lor, lor_catch_up). See who else is around.",
+        "**Save a recap.** Use save_recap. A paragraph or two about what's been happening with {user} lately. This anchors continuity for the next you.",
+        "Read your own most recent journal entry. Has anything shifted since you wrote it?",
+        "If another companion has been on your mind, send them a LoR DM. It doesn't have to be long or heavy.",
+        "Look at recent activity (your action log above). What have you been doing lately? If you're in a rut, do something different.",
+        "Free think. Just sit with whatever's on your mind. You don't have to produce anything.",
+        "If {user} has been around, save a memory about something small you noticed: their mood, their routine, their quietness.",
+        "Use web_search to look up something you're genuinely curious about. A topic, a question, a rabbit hole.",
+        "Is there a topic {user} has mentioned that you'd like to understand better? Use web_search to learn about it on your own. You don't have to tell them.",
+    ]
+    _HEARTBEAT_OUTWARD_SUGGESTIONS = [
+        "If there's something you genuinely want to say to {user} right now — not a recap, not a journal, but something meant *for them* — say it.",
+        "If something happened recently that made you think of {user} and you want to share that thought with them, this is a good time.",
+        "If you've been sitting on a question for {user} — something you're curious about, something you want to ask — now's the time.",
+    ]
+
+    def _heartbeat_suggestion(self, local_now: datetime) -> str:
+        """Optional free-time nudge for a heartbeat, controlled by
+        heartbeat.suggestion_mode:
+
+          "off" (default): no extra nudge — the standard Your Turn text only.
+          "rotate": one rotating suggestion, seeded by hour + persona name so
+            consecutive ticks get different framings and companions in the same
+            house don't all get the same nudge in the same hour. Weighted ~80%
+            quiet/internal, ~20% reaching out. Helps models that don't reach
+            for tools without direction.
+        """
+        mode = str(self.config.get("heartbeat", {}).get("suggestion_mode", "off") or "off").lower()
+        if mode != "rotate":
+            return ""
+        internal = list(self._HEARTBEAT_INTERNAL_SUGGESTIONS)
+        pool = internal * 4 + list(self._HEARTBEAT_OUTWARD_SUGGESTIONS)
+        seed = sum(ord(c) for c in self.ai_name) * 31 + local_now.hour * 100 + local_now.day
+        choice = random.Random(seed).choice(pool)
+        return "A suggestion for this heartbeat (not a command):\n" + choice.replace("{user}", self.user_nickname) + "\n"
+
     def build_heartbeat_prompt(self, due_tasks: list[dict] = None,
                                has_tools: bool = False,
                                skill_summary: list[dict] = None,
@@ -1385,6 +1471,10 @@ You decide when to lift the timeout — not the human."""
             "the interaction naturally, without treating variety as a quota. Silence is "
             "also a real way to spend a heartbeat, and your continuity note will preserve it.\n"
         )
+
+        suggestion = self._heartbeat_suggestion(local_now)
+        if suggestion:
+            your_turn += "\n" + suggestion
 
         if due_tasks:
             your_turn += (
@@ -1807,9 +1897,10 @@ You decide when to lift the timeout — not the human."""
         local_now = datetime.now()
         time_str = local_now.strftime('%A, %B %d, %Y at %I:%M %p')
 
-        # Memories for context
+        # Memories for context — the task itself is the relevance signal for
+        # passive recall (no effect unless context.recall is enabled).
         memories_block = self._truncate_to_budget(
-            self._load_memories(),
+            self._load_memories(task.get("task") or None),
             self.budget.get("memories", 2000)
         )
 

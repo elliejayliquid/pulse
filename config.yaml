@@ -105,6 +105,23 @@ heartbeat:
     categories: [creative, social, research]
     max_tools_per_skill: 8
   # Note: scheduled tasks bypass cooldowns
+  # Optional free-time nudge added to open-ended heartbeats:
+  #   "off" (default) = just the usual Your Turn text
+  #   "rotate" = one rotating suggestion (recap, journal, LoR, web search...),
+  #   different per hour and per companion. Helps models that don't reach for
+  #   tools unless pointed at them.
+  # suggestion_mode: "off"
+
+# --- Recaps (story so far) ---
+# Companions can leave themselves a story-so-far note with the save_recap tool.
+# The newest recaps show up in every prompt (context.recent_recaps, default 3).
+# Auto-recap is a safety net: after a conversation goes quiet, it writes one
+# for them. Off by default.
+# auto_recap:
+#   enabled: false
+#   inactivity_minutes: 120    # quiet time before a recap is written
+#   cooldown_hours: 4          # at most one auto-recap per this many hours
+#   min_messages: 4            # skip tiny conversations
 
 # --- Context Budget (tokens) ---
 # Pulse auto-derives these from your model's max_context (above), so most
@@ -148,6 +165,8 @@ context:
     resident_affinity_weight: 0.02
   inject_skills:
     - lantern
+  # How many story-so-far recaps to show in the prompt (0 = off).
+  # recent_recaps: 3
 
 # --- Data Paths ---
 paths:

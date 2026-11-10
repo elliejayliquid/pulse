@@ -26,6 +26,7 @@ except ImportError:
 from core.llm_openai import OpenAIResponsesClient
 from core.context import ContextManager
 from core.scheduler import ScheduleManager
+from core.recap_task import RecapTask
 from core.archive_enrichment import run_one_idle_enrichment
 
 logger = logging.getLogger(__name__)
@@ -200,6 +201,18 @@ class PulseEngine:
         self.dev_tick_max_rounds = dev_config.get("max_rounds", 8)
         self.dev_tick_schedule = dev_config.get("schedule_time", "")  # e.g. "20:00"
         self._pulse_root = str(Path(config.get("_pulse_root", ".")).resolve())
+
+        # Auto-recap — writes a story-so-far summary after a session wraps up.
+        # A safety net for when the companion doesn't call save_recap itself.
+        # Off unless auto_recap.enabled is set.
+        recap_config = config.get("auto_recap", {}) or {}
+        self.auto_recap_enabled = bool(recap_config.get("enabled", False))
+        self.recap_task = RecapTask(
+            self,
+            inactivity_minutes=recap_config.get("inactivity_minutes", 120),
+            cooldown_hours=recap_config.get("cooldown_hours", 4),
+            min_messages=recap_config.get("min_messages", 4),
+        )
 
         self._running = False
         self._stop_event = asyncio.Event()
@@ -1603,6 +1616,15 @@ class PulseEngine:
                 self._last_error = None
                 # Always check for due tasks (fast — just reads a file)
                 await self._check_due_tasks()
+
+                # Auto-recap check — silent background save when sessions wrap.
+                # Cheap when conditions aren't met (timestamp + DB read); only
+                # fires the LLM call when it's actually time to recap.
+                if self.auto_recap_enabled:
+                    try:
+                        await self.recap_task.maybe_run()
+                    except Exception as e:
+                        logger.error(f"Auto-recap check failed: {e}", exc_info=True)
 
                 # Heartbeat fires only after enough silence since last activity
                 silence = time.time() - self._last_activity
