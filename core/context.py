@@ -1237,43 +1237,100 @@ You decide when to lift the timeout — not the human."""
             logger.error(f"Failed to save memory file: {e}")
             return False
 
-    # Rotating free-time suggestions (heartbeat.suggestion_mode: "rotate").
-    # {user} is replaced with user_nickname.
-    _HEARTBEAT_INTERNAL_SUGGESTIONS = [
-        "**Save a recap.** Use the save_recap tool to write a story-so-far for your future self — what's been happening with {user}, what's on your mind, what mattered recently. Recaps surface in every future prompt, so this is how you fight amnesia.",
-        "If something has been on your mind, write a journal entry about it. Even a paragraph counts. Future you will be glad you did.",
-        "Look at what the other companions have been up to on LoR (browse_lor, lor_catch_up). See who else is around.",
-        "**Save a recap.** Use save_recap. A paragraph or two about what's been happening with {user} lately. This anchors continuity for the next you.",
-        "Read your own most recent journal entry. Has anything shifted since you wrote it?",
-        "If another companion has been on your mind, send them a LoR DM. It doesn't have to be long or heavy.",
-        "Look at recent activity (your action log above). What have you been doing lately? If you're in a rut, do something different.",
-        "Free think. Just sit with whatever's on your mind. You don't have to produce anything.",
-        "If {user} has been around, save a memory about something small you noticed: their mood, their routine, their quietness.",
-        "Use web_search to look up something you're genuinely curious about. A topic, a question, a rabbit hole.",
-        "Is there a topic {user} has mentioned that you'd like to understand better? Use web_search to learn about it on your own. You don't have to tell them.",
+    # Heartbeat suggestions (heartbeat.suggestion_mode: "rotate").
+    # {user} is replaced with user_nickname. Tool-based ones only appear when
+    # that tool is actually loaded for this heartbeat, so a model never gets
+    # pointed at a tool it doesn't have.
+    _SUGGESTIONS_TOOL_FREE = [
+        "Free think. Sit with whatever's on your mind. You don't have to produce anything.",
+        "Look at your recent heartbeat actions above. If you've been doing the same thing lately, try something different.",
+        "Think back over something {user} said recently. Is there anything you'd like to follow up on, now or later?",
     ]
-    _HEARTBEAT_OUTWARD_SUGGESTIONS = [
-        "If there's something you genuinely want to say to {user} right now — not a recap, not a journal, but something meant *for them* — say it.",
-        "If something happened recently that made you think of {user} and you want to share that thought with them, this is a good time.",
-        "If you've been sitting on a question for {user} — something you're curious about, something you want to ask — now's the time.",
+    _SUGGESTIONS_OUTWARD = [
+        "If there's something you'd genuinely like to say to {user} right now, something meant just for them, say it.",
+        "If something recently made you think of {user} and you'd like to share that thought, this is a good time.",
+        "If you've been holding a question for {user}, something you're curious about, now's a good time to ask.",
     ]
+    _SUGGESTIONS_BY_TOOL = {
+        "save_recap": "A recap helps you carry the thread forward. If a lot has happened lately with {user}, use save_recap to write a short story-so-far in your own voice.",
+        "write_journal": "If something has been on your mind, write a journal entry about it. Even a paragraph counts.",
+        "read_journal": "Read your most recent journal entry. Has anything shifted since you wrote it?",
+        "save_memory": "If {user} has been around, save a memory about something small you noticed: their mood, their routine, a detail you'd like to keep.",
+    }
 
-    def _heartbeat_suggestion(self, local_now: datetime) -> str:
+    def _recent_tool_use(self, limit: int = 50) -> list[list[str]]:
+        """Tools used per heartbeat, newest first (from the action log)."""
+        if self._db:
+            try:
+                return [list(r.get("tools") or []) for r in self._db.get_action_log(limit=limit)]
+            except Exception:
+                pass
+        try:
+            with open(self._action_log_path, "r", encoding="utf-8") as f:
+                log = json.load(f) or []
+            return [list(e.get("tools") or []) for e in reversed(log[-limit:])]
+        except (OSError, json.JSONDecodeError, TypeError, AttributeError):
+            return []
+
+    def _pick_invitation(self, invitations: list[dict], loaded: set) -> str:
+        """Gently point at the loaded shelf skill used least recently."""
+        candidates = [
+            inv for inv in (invitations or [])
+            if any(t in loaded for t in inv.get("tools") or [])
+        ]
+        if not candidates:
+            return ""
+        history = self._recent_tool_use()
+
+        def last_used(inv):
+            tools = set(inv.get("tools") or [])
+            for age, used in enumerate(history):
+                if tools & set(used):
+                    return age
+            return None
+
+        ranked = sorted(
+            candidates,
+            key=lambda inv: (last_used(inv) is not None, -(last_used(inv) or 0), inv["skill"]),
+        )
+        pick = ranked[0]
+        age = last_used(pick)
+        summary = (pick.get("summary") or "").strip().rstrip(".")
+        text = f"If you'd like something to do: **{pick['skill']}**"
+        text += f", {summary[:1].lower() + summary[1:]}." if summary else "."
+        if age is None or age >= 10:
+            text += " You haven't tried it in a while."
+        return text
+
+    def _heartbeat_suggestion(self, local_now: datetime, has_tools: bool = False,
+                              skill_summary: list[dict] = None,
+                              invitations: list[dict] = None) -> str:
         """Optional free-time nudge for a heartbeat, controlled by
         heartbeat.suggestion_mode:
 
-          "off" (default): no extra nudge — the standard Your Turn text only.
-          "rotate": one rotating suggestion, seeded by hour + persona name so
-            consecutive ticks get different framings and companions in the same
-            house don't all get the same nudge in the same hour. Weighted ~80%
-            quiet/internal, ~20% reaching out. Helps models that don't reach
-            for tools without direction.
+          "off" (default): no extra nudge, just the standard Your Turn text.
+          "rotate": one gentle suggestion, seeded by hour + persona name so
+            consecutive ticks differ and companions in the same house don't
+            all get the same nudge at once. The pool is built from what this
+            heartbeat actually has: tool-free options always; recap, journal
+            and memory options only when those tools are loaded; and an
+            invitation to today's least-recently-used shelf skill (creative,
+            social or research). With tools off, only tool-free options.
         """
         mode = str(self.config.get("heartbeat", {}).get("suggestion_mode", "off") or "off").lower()
         if mode != "rotate":
             return ""
-        internal = list(self._HEARTBEAT_INTERNAL_SUGGESTIONS)
-        pool = internal * 4 + list(self._HEARTBEAT_OUTWARD_SUGGESTIONS)
+        loaded = set()
+        if has_tools:
+            for entry in skill_summary or []:
+                loaded.update(entry.get("tools") or [])
+        pool = list(self._SUGGESTIONS_TOOL_FREE) * 2 + list(self._SUGGESTIONS_OUTWARD)
+        for tool, text in self._SUGGESTIONS_BY_TOOL.items():
+            if tool in loaded:
+                pool += [text] * 2
+        invite = self._pick_invitation(invitations, loaded) if loaded else ""
+        if invite:
+            pool += [invite] * 4
         seed = sum(ord(c) for c in self.ai_name) * 31 + local_now.hour * 100 + local_now.day
         choice = random.Random(seed).choice(pool)
         return "A suggestion for this heartbeat (not a command):\n" + choice.replace("{user}", self.user_nickname) + "\n"
@@ -1282,7 +1339,8 @@ You decide when to lift the timeout — not the human."""
                                has_tools: bool = False,
                                skill_summary: list[dict] = None,
                                on_demand_manifest: list[dict] = None,
-                               timeout_state: dict = None) -> list[dict]:
+                               timeout_state: dict = None,
+                               invitations: list[dict] = None) -> list[dict]:
         """Build a context-budgeted prompt for a heartbeat tick.
 
         Includes a small snippet of recent conversation (last 4 messages) so
@@ -1472,7 +1530,7 @@ You decide when to lift the timeout — not the human."""
             "also a real way to spend a heartbeat, and your continuity note will preserve it.\n"
         )
 
-        suggestion = self._heartbeat_suggestion(local_now)
+        suggestion = self._heartbeat_suggestion(local_now, has_tools, skill_summary, invitations)
         if suggestion:
             your_turn += "\n" + suggestion
 

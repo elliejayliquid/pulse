@@ -115,15 +115,12 @@ class MemorySkill(BaseSkill):
                 "function": {
                     "name": "save_recap",
                     "description": (
-                        "Save a STORY-SO-FAR recap memory. Use this when you want "
-                        "to give your future-self (or your next instance) a summary "
-                        "of what's been happening recently — with the user, in the "
-                        "household, in your own thinking. Recaps surface "
-                        "prominently in every prompt going forward, so this is "
-                        "your tool for combating amnesia. Write in your own voice, "
-                        "as a letter to future-you. A few paragraphs is right. "
-                        "Mention what you talked about, what mattered, what you "
-                        "noticed."
+                        "Save a story-so-far recap: a short note in your own voice "
+                        "about what's been happening lately, with the user and in "
+                        "your own thinking. Your newest few recaps appear with your "
+                        "memories, so a recap helps you carry the thread forward. "
+                        "A few paragraphs is right: what you talked about, what "
+                        "mattered, what you noticed."
                     ),
                     "parameters": {
                         "type": "object",
@@ -554,9 +551,8 @@ class MemorySkill(BaseSkill):
     def _save_recap(self, text: str, tags: str = "") -> str:
         """Save a recap memory (type='recap', importance=5).
 
-        Recap memories are surfaced prominently in every prompt going forward
-        — they're how a companion leaves a story-so-far summary for future-self
-        and the next instance.
+        The newest few recaps appear in the memories block of later prompts
+        (context.recent_recaps), so they carry the thread forward.
         """
         if not text.strip():
             return "Cannot save empty recap."
@@ -576,7 +572,7 @@ class MemorySkill(BaseSkill):
                 resident_id=self._resident_id,
             )
             logger.info(f"Recap saved to DB (ID: {mem_id}) — {text[:60]}...")
-            return f"Recap saved (ID: {mem_id}). Future you will see this at the top of every prompt."
+            return f"Recap saved (ID: {mem_id}). Your newest recaps appear with your memories."
 
         # JSON fallback
         mem_id = f"{self._get_next_id():03d}"
@@ -594,7 +590,7 @@ class MemorySkill(BaseSkill):
                 json.dump(memory, f, indent=2)
             self._rebuild_aggregate()
             logger.info(f"Recap saved: {mem_file.name}")
-            return f"Recap saved (ID: {mem_id}). Future you will see this at the top of every prompt."
+            return f"Recap saved (ID: {mem_id}). Your newest recaps appear with your memories."
         except IOError as e:
             logger.error(f"Failed to save recap: {e}")
             return f"Failed to save recap: {e}"

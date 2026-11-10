@@ -219,6 +219,9 @@ class PulseEngine:
 
         # Activity tracking — heartbeat only fires after silence
         self._last_activity = 0.0   # timestamp of last message exchange
+        # Last real message from the user. Heartbeats don't touch it (they do
+        # reset _last_activity), so auto-recap can measure quiet time from it.
+        self._last_conversation_at = 0.0
         self._started_at = 0.0
         self._next_heartbeat_target = None
         self._last_tick_at = None
@@ -923,6 +926,7 @@ class PulseEngine:
         # Reset heartbeat timer — conversation is active, re-roll interval
         self.interval = self._roll_heartbeat_interval()
         self._mark_activity()
+        self._last_conversation_at = time.time()
         # Manual quiet mode is sticky: it stays on across messages so the
         # companion can chat without free-think ticks. Only /quiet again
         # (or a restart) turns it back off.
@@ -1258,15 +1262,18 @@ class PulseEngine:
             on_demand_manifest = self.skill_registry.get_on_demand_manifest(
                 exclude_skills=set(shelf_names)
             )
+            invitations = self.skill_registry.get_heartbeat_invitations(shelf_names)
         else:
             tools = []
             skill_summary = []
             on_demand_manifest = []
+            invitations = []
 
         messages = self.context.build_heartbeat_prompt(
             has_tools=bool(tools), skill_summary=skill_summary,
             on_demand_manifest=on_demand_manifest,
-            timeout_state=self._check_timeout_state()
+            timeout_state=self._check_timeout_state(),
+            invitations=invitations,
         )
 
         t0 = time.time()

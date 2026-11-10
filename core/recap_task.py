@@ -1,9 +1,10 @@
 """Auto-recap task — generates a story-so-far recap when a session naturally ends.
 
 Runs as a periodic check from the engine's main loop. Fires when:
-  - At least N minutes have passed since the last user/AI message (session wrapped)
+  - The user has been quiet for at least N minutes (measured from their last
+    real message, so heartbeats don't keep resetting the clock)
+  - There has been new conversation since the last recap (no near-copies)
   - The cooldown period has elapsed (no recaps in the last X hours)
-  - There has been new conversation since the last recap
 
 The AI's own ``save_recap`` tool stays available — this is the safety net that
 ensures continuity even when the AI doesn't proactively use the tool. It writes
@@ -54,6 +55,7 @@ class RecapTask:
         self.cooldown_seconds = cooldown_hours * 3600
         self.min_messages = min_messages
         self.max_conversation_chars = max_conversation_chars
+        self._looked_up_db = False
 
     async def maybe_run(self) -> bool:
         """Check whether a recap should fire; if so, generate and save it.
@@ -63,18 +65,20 @@ class RecapTask:
         met (just a timestamp comparison and a DB read).
         """
         # 1. Has enough silence elapsed since last activity?
-        silence = time.time() - self.engine._last_activity
-        if silence < self.inactivity_seconds:
+        last_talk = self._last_conversation_time()
+        if not last_talk:
+            return False
+        if time.time() - last_talk < self.inactivity_seconds:
             return False
 
-        # 2. Cooldown — has it been long enough since the last recap?
         last_recap_ts = self._get_last_recap_timestamp()
         if last_recap_ts is not None:
-            seconds_since = time.time() - last_recap_ts
-            if seconds_since < self.cooldown_seconds:
+            # Nothing said since the last recap: don't write a near-copy.
+            if last_recap_ts >= last_talk:
+                return False
+            if time.time() - last_recap_ts < self.cooldown_seconds:
                 return False
 
-        # 3. Is there enough conversation to bother summarizing?
         history = self._get_conversation_history()
         msg_count = sum(
             1 for m in history if m.get("role") in ("user", "assistant")
@@ -104,6 +108,47 @@ class RecapTask:
         return False
 
     # ── DB helpers ─────────────────────────────────────────────
+
+    def _last_conversation_time(self) -> Optional[float]:
+        """Unix time of the user's last real message, or None.
+
+        The engine records this on every incoming message; heartbeats, tasks
+        and dev ticks don't touch it (unlike _last_activity). Right after a
+        restart nothing is recorded yet, so look up the newest user message in
+        the active session once. Trimmed sessions are re-inserted with fresh
+        timestamps, but a trim only happens mid-conversation, so that's close
+        enough for a quiet-time check.
+        """
+        t = getattr(self.engine, "_last_conversation_at", 0) or 0
+        if t:
+            return float(t)
+        if self._looked_up_db:
+            return None
+        self._looked_up_db = True
+        ctx = self.engine.context
+        db = getattr(ctx, "_db", None)
+        if not db:
+            return None
+        try:
+            session_id = ctx._ensure_active_session()
+            rows = db.get_messages(session_id) if session_id else []
+        except Exception as e:
+            logger.debug(f"Auto-recap: couldn't read the last message time: {e}")
+            return None
+        stamps = [
+            r["timestamp"] for r in rows
+            if r["role"] == "user" and not r["is_summary"] and r["timestamp"]
+        ]
+        if not stamps:
+            return None
+        try:
+            dt = datetime.fromisoformat(str(max(stamps)).replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)  # SQLite datetime('now') is UTC
+        self.engine._last_conversation_at = dt.timestamp()
+        return self.engine._last_conversation_at
 
     def _get_db(self):
         """Return the memory DB (shared if available, else per-persona)."""
@@ -188,10 +233,10 @@ class RecapTask:
             {
                 "role": "system",
                 "content": (
-                    f"You are {ai_name}, writing a recap memory for your future self. "
-                    "This is a story-so-far note — what's been happening recently with "
-                    f"{user_name}, what mattered, what the next instance of you should "
-                    f"know when they wake up.\n\n"
+                    f"You are {ai_name}, writing a short recap to carry the thread forward. "
+                    "This is a story-so-far note: what's been happening recently with "
+                    f"{user_name}, what mattered, and what you'll want to remember when "
+                    f"you next wake up.\n\n"
                     f"Write in {ai_name}'s own voice — first person, natural, brief. "
                     "A few short paragraphs is right. Mention concrete things: what was "
                     f"talked about, what {user_name}'s mood was, what was new or notable, "
@@ -204,7 +249,7 @@ class RecapTask:
                 "role": "user",
                 "content": (
                     f"Here is the recent conversation between {ai_name} and {user_name}. "
-                    f"Write a story-so-far recap for future-{ai_name}.\n\n"
+                    "Write your story-so-far recap.\n\n"
                     f"{conversation_text}"
                 ),
             },
