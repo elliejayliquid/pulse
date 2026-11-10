@@ -392,11 +392,14 @@ class OpenAIResponsesClient:
     def _track(self, response):
         """Record token usage if a tracker is provided."""
         if self._usage and hasattr(response, "usage") and response.usage:
+            # Cached tokens are a subset of input_tokens (see LLMClient._track).
+            in_details = getattr(response.usage, "input_tokens_details", None)
             self._usage.record(
                 prompt_tokens=response.usage.input_tokens or 0,
                 completion_tokens=response.usage.output_tokens or 0,
                 provider=self._provider_name,
                 model=self.model_name,
+                cached_prompt_tokens=(getattr(in_details, "cached_tokens", 0) or 0) if in_details else 0,
             )
             # Reasoning tokens are separate from output tokens
             reasoning_tokens = getattr(response.usage, "reasoning_tokens", 0)

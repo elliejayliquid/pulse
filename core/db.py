@@ -59,6 +59,7 @@ class PulseDatabase:
             "ALTER TABLE usage ADD COLUMN cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE usage ADD COLUMN cache_creation_5m_input_tokens INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE usage ADD COLUMN cache_creation_1h_input_tokens INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE usage ADD COLUMN cached_prompt_tokens INTEGER NOT NULL DEFAULT 0",
         ]:
             try:
                 self.conn.execute(stmt)
@@ -675,13 +676,15 @@ class PulseDatabase:
                      cache_read_input_tokens: int = 0,
                      cache_creation_input_tokens: int = 0,
                      cache_creation_5m_input_tokens: int = 0,
-                     cache_creation_1h_input_tokens: int = 0) -> None:
+                     cache_creation_1h_input_tokens: int = 0,
+                     cached_prompt_tokens: int = 0) -> None:
         """Record or accumulate token usage for a date+model combo."""
         self.conn.execute(
             "INSERT INTO usage (date, prompt_tokens, completion_tokens, calls, "
             "provider, model, cache_read_input_tokens, cache_creation_input_tokens, "
-            "cache_creation_5m_input_tokens, cache_creation_1h_input_tokens) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "cache_creation_5m_input_tokens, cache_creation_1h_input_tokens, "
+            "cached_prompt_tokens) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(date, model) DO UPDATE SET "
             "prompt_tokens = prompt_tokens + excluded.prompt_tokens, "
             "completion_tokens = completion_tokens + excluded.completion_tokens, "
@@ -690,11 +693,13 @@ class PulseDatabase:
             "cache_creation_input_tokens = cache_creation_input_tokens + excluded.cache_creation_input_tokens, "
             "cache_creation_5m_input_tokens = cache_creation_5m_input_tokens + excluded.cache_creation_5m_input_tokens, "
             "cache_creation_1h_input_tokens = cache_creation_1h_input_tokens + excluded.cache_creation_1h_input_tokens, "
+            "cached_prompt_tokens = cached_prompt_tokens + excluded.cached_prompt_tokens, "
             "provider = COALESCE(excluded.provider, provider)",
             (
                 date, prompt_tokens, completion_tokens, calls, provider, model,
                 cache_read_input_tokens, cache_creation_input_tokens,
                 cache_creation_5m_input_tokens, cache_creation_1h_input_tokens,
+                cached_prompt_tokens,
             )
         )
         self.conn.commit()
@@ -1115,6 +1120,7 @@ CREATE TABLE IF NOT EXISTS usage (
     cache_creation_input_tokens    INTEGER NOT NULL DEFAULT 0,
     cache_creation_5m_input_tokens INTEGER NOT NULL DEFAULT 0,
     cache_creation_1h_input_tokens INTEGER NOT NULL DEFAULT 0,
+    cached_prompt_tokens           INTEGER NOT NULL DEFAULT 0,  -- OpenAI-style: subset of prompt_tokens
     provider          TEXT,
     model             TEXT
 );

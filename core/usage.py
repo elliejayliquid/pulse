@@ -33,10 +33,15 @@ class UsageTracker:
                cache_read_input_tokens: int = 0,
                cache_creation_input_tokens: int = 0,
                cache_creation_5m_input_tokens: int = 0,
-               cache_creation_1h_input_tokens: int = 0):
+               cache_creation_1h_input_tokens: int = 0,
+               cached_prompt_tokens: int = 0):
         """Record token usage for the current day.
 
         Accumulates into the existing entry for today, or creates a new one.
+        cache_read/creation tokens are Anthropic prompt-cache stats, separate
+        from prompt_tokens. cached_prompt_tokens is OpenAI-style automatic
+        caching: a SUBSET of prompt_tokens, kept in its own field so totals
+        never double-count. Pass 0 (the defaults) where they don't apply.
         """
         today = datetime.now().strftime("%Y-%m-%d")
         
@@ -54,6 +59,7 @@ class UsageTracker:
                     cache_creation_input_tokens=cache_creation_input_tokens,
                     cache_creation_5m_input_tokens=cache_creation_5m_input_tokens,
                     cache_creation_1h_input_tokens=cache_creation_1h_input_tokens,
+                    cached_prompt_tokens=cached_prompt_tokens,
                 )
                 return
             except Exception as e:
@@ -81,6 +87,7 @@ class UsageTracker:
                 "cache_creation_input_tokens": 0,
                 "cache_creation_5m_input_tokens": 0,
                 "cache_creation_1h_input_tokens": 0,
+                "cached_prompt_tokens": 0,
             }
             log.append(entry)
 
@@ -95,6 +102,7 @@ class UsageTracker:
         entry["cache_creation_1h_input_tokens"] = (
             entry.get("cache_creation_1h_input_tokens", 0) + cache_creation_1h_input_tokens
         )
+        entry["cached_prompt_tokens"] = entry.get("cached_prompt_tokens", 0) + cached_prompt_tokens
         # Update provider/model in case it changed mid-day
         if provider:
             entry["provider"] = provider
@@ -126,6 +134,7 @@ class UsageTracker:
                     "cache_creation_input_tokens": sum(r.get("cache_creation_input_tokens", 0) for r in rows),
                     "cache_creation_5m_input_tokens": sum(r.get("cache_creation_5m_input_tokens", 0) for r in rows),
                     "cache_creation_1h_input_tokens": sum(r.get("cache_creation_1h_input_tokens", 0) for r in rows),
+                    "cached_prompt_tokens": sum(r.get("cached_prompt_tokens", 0) for r in rows),
                 }
                 return summary
             return self._empty_summary(today)
@@ -137,6 +146,7 @@ class UsageTracker:
                 item.setdefault("cache_creation_input_tokens", 0)
                 item.setdefault("cache_creation_5m_input_tokens", 0)
                 item.setdefault("cache_creation_1h_input_tokens", 0)
+                item.setdefault("cached_prompt_tokens", 0)
                 return item
         return self._empty_summary(today)
 
@@ -169,6 +179,7 @@ class UsageTracker:
             "cache_creation_input_tokens": 0,
             "cache_creation_5m_input_tokens": 0,
             "cache_creation_1h_input_tokens": 0,
+            "cached_prompt_tokens": 0,
         }
 
     def _save(self, log: list[dict]):

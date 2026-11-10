@@ -193,6 +193,8 @@ def _convert_messages(messages: list[dict],
                 # Multi-part content (e.g. text + image) — convert from OpenAI format
                 blocks = []
                 for part in content:
+                    if not isinstance(part, dict):
+                        continue
                     if part.get("type") == "text":
                         blocks.append({"type": "text", "text": part.get("text", "")})
                     elif part.get("type") == "image_url":
@@ -201,8 +203,12 @@ def _convert_messages(messages: list[dict],
                         url = part.get("image_url", {}).get("url", "")
                         if url.startswith("data:"):
                             # Parse data URI: data:<media_type>;base64,<data>
-                            header, b64_data = url.split(",", 1)
-                            media_type = header.split(":")[1].split(";")[0]
+                            try:
+                                header, b64_data = url.split(",", 1)
+                                media_type = header.split(":")[1].split(";")[0] or "image/jpeg"
+                            except (ValueError, IndexError) as e:
+                                logger.warning(f"Failed to parse image data URI: {e}")
+                                continue
                             blocks.append({
                                 "type": "image",
                                 "source": {
@@ -441,6 +447,16 @@ class AnthropicClient:
                 cache_creation_input_tokens=cache_create,
                 cache_creation_5m_input_tokens=cache_5m,
                 cache_creation_1h_input_tokens=cache_1h,
+            )
+            # Machine-parseable per-call usage line: the aggregate input count
+            # alone hides whether a call hit cache. Fires on every call, so
+            # full-miss calls (both cache fields 0) show up too. Grep for
+            # "[usage]" in the persona's log to pull the raw series.
+            logger.info(
+                f"[usage] input={_obj_get(usage, 'input_tokens', 0) or 0} "
+                f"read={cache_read} create={cache_create} "
+                f"output={_obj_get(usage, 'output_tokens', 0) or 0} "
+                f"model={self.model_name}"
             )
             # Log cache stats if available
             if cache_read or cache_create:

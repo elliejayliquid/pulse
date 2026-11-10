@@ -17,6 +17,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from core.failures import failure_log_path, record_failure
 from core.llm import LLMClient, PulseResponse
 try:
     from core.llm_anthropic import AnthropicClient
@@ -71,60 +72,93 @@ class PulseEngine:
         # accept it. None unless explicitly configured.
         top_k = model_config.get("top_k")
 
-        if provider_type in ("anthropic", "bedrock"):
-            if AnthropicClient is None:
-                raise RuntimeError(
-                    f"{provider_type.title()} provider selected, but the anthropic package is not installed."
+        def make_client(model: str):
+            """This provider's client class, on the given model."""
+            if provider_type in ("anthropic", "bedrock"):
+                if AnthropicClient is None:
+                    raise RuntimeError(
+                        f"{provider_type.title()} provider selected, but the anthropic package is not installed."
+                    )
+                return AnthropicClient(
+                    endpoint=endpoint,
+                    model_name=model,
+                    temperature=model_config.get("temperature", 0.7),
+                    max_tokens=model_config.get("max_response_tokens", 1024),
+                    top_p=model_config.get("top_p", 1.0),
+                    top_k=top_k,
+                    api_key=api_key,
+                    usage_tracker=usage_tracker,
+                    cache_ttl=provider_config.get("cache_ttl", "5m"),
+                    cache_automatic=provider_config.get("cache_automatic", False),
+                    cache_diagnostics=provider_config.get("cache_diagnostics", False),
+                    native_tool_search=provider_config.get("native_tool_search", True),
+                    provider_type=provider_type,
                 )
-            self.llm = AnthropicClient(
-                endpoint=endpoint,
-                model_name=model_name,
-                temperature=model_config.get("temperature", 0.7),
-                max_tokens=model_config.get("max_response_tokens", 1024),
-                top_p=model_config.get("top_p", 1.0),
-                top_k=top_k,
-                api_key=api_key,
-                usage_tracker=usage_tracker,
-                cache_ttl=provider_config.get("cache_ttl", "5m"),
-                cache_automatic=provider_config.get("cache_automatic", False),
-                cache_diagnostics=provider_config.get("cache_diagnostics", False),
-                native_tool_search=provider_config.get("native_tool_search", True),
-                provider_type=provider_type,
-            )
-        elif provider_type == "openai":
-            self.llm = OpenAIResponsesClient(
-                endpoint=endpoint,
-                model_name=model_name,
-                temperature=model_config.get("temperature", 0.7),
-                max_tokens=model_config.get("max_response_tokens", 1024),
-                top_p=model_config.get("top_p", 1.0),
-                frequency_penalty=model_config.get("frequency_penalty", 0.0),
-                presence_penalty=model_config.get("presence_penalty", 0.0),
-                api_key=api_key,
-                usage_tracker=usage_tracker,
-                reasoning=model_config.get("reasoning", False),
-                reasoning_effort=model_config.get("reasoning_effort", ""),
-            )
-        else:
-            self.llm = LLMClient(
-                endpoint=endpoint,
-                model_name=model_name,
-                temperature=model_config.get("temperature", 0.7),
-                max_tokens=model_config.get("max_response_tokens", 1024),
-                frequency_penalty=model_config.get("frequency_penalty", 0.0),
-                presence_penalty=model_config.get("presence_penalty", 0.0),
-                top_p=model_config.get("top_p", 1.0),
-                top_k=top_k,
-                api_key=api_key,
-                usage_tracker=usage_tracker,
-                reasoning=model_config.get("reasoning", False),
-                reasoning_effort=model_config.get("reasoning_effort", ""),
-                provider_type=provider_type,
-            )
+            elif provider_type == "openai":
+                return OpenAIResponsesClient(
+                    endpoint=endpoint,
+                    model_name=model,
+                    temperature=model_config.get("temperature", 0.7),
+                    max_tokens=model_config.get("max_response_tokens", 1024),
+                    top_p=model_config.get("top_p", 1.0),
+                    frequency_penalty=model_config.get("frequency_penalty", 0.0),
+                    presence_penalty=model_config.get("presence_penalty", 0.0),
+                    api_key=api_key,
+                    usage_tracker=usage_tracker,
+                    reasoning=model_config.get("reasoning", False),
+                    reasoning_effort=model_config.get("reasoning_effort", ""),
+                )
+            else:
+                return LLMClient(
+                    endpoint=endpoint,
+                    model_name=model,
+                    temperature=model_config.get("temperature", 0.7),
+                    max_tokens=model_config.get("max_response_tokens", 1024),
+                    frequency_penalty=model_config.get("frequency_penalty", 0.0),
+                    presence_penalty=model_config.get("presence_penalty", 0.0),
+                    top_p=model_config.get("top_p", 1.0),
+                    top_k=top_k,
+                    api_key=api_key,
+                    usage_tracker=usage_tracker,
+                    reasoning=model_config.get("reasoning", False),
+                    reasoning_effort=model_config.get("reasoning_effort", ""),
+                    provider_type=provider_type,
+                    provider_routing=provider_config.get("routing"),
+                )
+        self.llm = make_client(model_name)
         self.llm._provider_name = provider_type
+
+        # Optional summarizer LLM, for context-compression calls only.
+        # provider.summarization_model runs _summarize_conversation on a cheaper
+        # model of the same provider (same client class, different model name).
+        # Compression is mechanical ("You are a summarizer"), not identity-
+        # bearing, so this saves cost without changing who the persona is.
+        # Everything else stays on self.llm. A byline is added inside
+        # _summarize_conversation so future readers know which model wrote it.
+        # Local llama-server serves one model per endpoint, so it can't apply
+        # there: that's logged and the persona's own model is used.
+        summarizer_model = (provider_config.get("summarization_model") or "").strip()
+        self.summarizer_llm = self.llm
+        if summarizer_model and summarizer_model != model_name:
+            if provider_type == "local":
+                logger.info(
+                    "provider.summarization_model is ignored for the local provider "
+                    "(llama-server serves one model per endpoint); summaries use "
+                    f"the persona's own model ({model_name})."
+                )
+            else:
+                self.summarizer_llm = make_client(summarizer_model)
+                self.summarizer_llm._provider_name = provider_type
+                logger.info(f"Summarizer LLM: routing _summarize_conversation to {summarizer_model} (persona stays on {model_name})")
 
         self.max_tool_rounds = model_config.get("max_tool_rounds", 5)
         self.default_tool_loop_mode = model_config.get("tool_loop_mode", "capped")
+        # Some models (e.g. reasoning-only OpenRouter routes) reject the tools
+        # param entirely — offering it 404s. provider.supports_tools: false
+        # makes this persona run in plain-chat mode (no tool calls).
+        self.tools_enabled = provider_config.get("supports_tools", True)
+        if not self.tools_enabled:
+            logger.info("Tools disabled (provider.supports_tools=false) — plain-chat mode")
         self.context = ContextManager(config)
         self.scheduler = ScheduleManager(config)
 
@@ -194,6 +228,37 @@ class PulseEngine:
             config.get("paths", {}).get("action_log", "data/action_log.json")
         )
         self._action_log_max = 20  # keep last 20 actions
+        self._last_parse_notice = 0.0  # rate-limits the HB-PARSE / TASK-PARSE notice
+
+    async def _report_parse_failure(self, kind: str, tools_used: list[str] | None = None) -> None:
+        """Make an unreadable heartbeat / scheduled-task reply visible.
+
+        PulseResponse.from_llm_output already sent nothing raw and logged a
+        preview. This adds a failures.jsonl entry, an action-log entry (so the
+        companion sees it on its next tick), and a short notice to the user,
+        at most once an hour per persona. kind is "heartbeat" or "task".
+        """
+        what = "heartbeat" if kind == "heartbeat" else "scheduled-task"
+        name = self.context.ai_name
+        record_failure(failure_log_path(self.config), self.config.get("_persona_name", name),
+                       f"<{kind}: parse>", f"{what} reply couldn't be parsed; nothing was sent")
+        self._log_action("parse_error", tools_used,
+                         f"{what} reply couldn't be read, so nothing was sent (details in the log)")
+        now = time.time()
+        if now - self._last_parse_notice >= 3600:
+            self._last_parse_notice = now
+            tag = "HB-PARSE" if kind == "heartbeat" else "TASK-PARSE"
+            await self._dispatch(PulseResponse(
+                action="notify",
+                message=(f"⚠️ {tag}: {name}'s {what} reply couldn't be read, "
+                         "so nothing was sent. Details are in the log."),
+            ))
+
+    def _available_tools(self) -> list:
+        """Full tool list for scheduled tasks, or [] when the model can't do tool calls."""
+        if not self.tools_enabled or not self.skill_registry:
+            return []
+        return self.skill_registry.get_all_tools()
 
     def _resolve_tool_loop_params(self) -> tuple[str, int]:
         """Resolve tool loop mode and budget based on skills in play.
@@ -341,6 +406,9 @@ class PulseEngine:
     def _log_action(self, action: str, tools_used: list[str] = None, summary: str = ""):
         """Append an entry to the heartbeat action log (ring buffer)."""
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+        # Coerce None → "" so the DB's NOT NULL on summary doesn't fail when
+        # callers pass response.message (which is None for silent actions).
+        summary = summary or ""
 
         if self.db:
             try:
@@ -863,8 +931,9 @@ class PulseEngine:
         history = self.context._load_conversation()
 
         # Build conversation prompt (with optional image)
-        skill_summary = self.skill_registry.get_skill_summary() if self.skill_registry else []
-        on_demand_manifest = self.skill_registry.get_on_demand_manifest() if self.skill_registry else []
+        tools_on = bool(self.skill_registry) and self.tools_enabled
+        skill_summary = self.skill_registry.get_skill_summary() if tools_on else []
+        on_demand_manifest = self.skill_registry.get_on_demand_manifest() if tools_on else []
         messages = self.context.build_conversation_prompt(
             message, history, image_url=image_url, timeout_state=timeout_state,
             skill_summary=skill_summary, on_demand_manifest=on_demand_manifest
@@ -875,7 +944,7 @@ class PulseEngine:
         # Get response — run in thread so we don't block the event loop!
         # If skills are available, use tool-calling mode; otherwise plain chat.
         tools_used = []
-        tools = self.skill_registry.get_always_tools() if self.skill_registry else []
+        tools = self.skill_registry.get_always_tools() if tools_on else []
         t0 = time.time()
         if tools:
             logger.info(f"Tool-calling mode: {len(tools)} tools available")
@@ -1043,16 +1112,21 @@ class PulseEngine:
                 f"{conversation_text}"
             )}
         ]
-        # Run in thread — this is also a sync HTTP call
-        # Don't pass tools — this is a utility call, not a conversation
-        # A summary prompt is unique and never reused. Anthropic's ordinary
-        # chat path would otherwise buy a 1h cache entry for the full old
-        # conversation, doubling input cost with no later read.
-        summary_chat = getattr(self.llm, "chat_uncached", self.llm.chat)
+        # Summaries are one-shot: use the uncached path where the client has
+        # one (a cache entry for the whole old conversation is never read
+        # again). provider.summarization_model routes this to a cheaper
+        # model; otherwise summarizer_llm is self.llm.
+        summarizer = self.summarizer_llm
+        summary_chat = getattr(summarizer, "chat_uncached", summarizer.chat)
         response = await asyncio.to_thread(summary_chat, summary_prompt)
         if response and response.raw:
             summary = strip_think_tags(response.raw).strip()
             if summary:
+                # Byline: if a different model wrote the summary, prefix it so future
+                # readers (memory loads, archived conversations, next-instance context)
+                # know that model authored this mechanical compression — NOT the persona.
+                if self.summarizer_llm is not self.llm:
+                    summary = f"[summarized by {self.summarizer_llm.model_name}]\n\n{summary}"
                 logger.info(f"Conversation summarized: {summary[:80]}...")
                 return summary
         return None
@@ -1072,7 +1146,7 @@ class PulseEngine:
             logger.warning("LLM server not available — can't execute due tasks.")
             return False
 
-        tools = self.skill_registry.get_all_tools() if self.skill_registry else []
+        tools = self._available_tools()
 
         for task in due_tasks:
             logger.info(f"Executing due task: {task['task']}")
@@ -1080,6 +1154,7 @@ class PulseEngine:
 
             response = None
             tg_msg_id = None
+            tools_used = []
             if tools:
                 self._log_tool_payload_breakdown("scheduled_task", tools)
                 tool_mode, tool_budget = self._resolve_tool_loop_params()
@@ -1096,6 +1171,8 @@ class PulseEngine:
                 response = await asyncio.to_thread(self.llm.chat, messages)
                 if response:
                     tg_msg_id = await self._dispatch(response)
+            if response and response.parse_failed:
+                await self._report_parse_failure("task", tools_used)
 
             # Capture voice text BEFORE flushing (flush clears the queue)
             voice_text = self._capture_pending_skill_text()
@@ -1159,7 +1236,7 @@ class PulseEngine:
             return None
 
         # Free-think tick — companion decides what to do
-        if self.skill_registry:
+        if self.skill_registry and self.tools_enabled:
             shelf_names = self.skill_registry.get_heartbeat_shelf_names()
             tools = self.skill_registry.get_heartbeat_tools(shelf_names)
             if shelf_names:
@@ -1211,7 +1288,10 @@ class PulseEngine:
                         response, tools_used, int(elapsed)
                     )
                 tg_msg_id = await self._dispatch(response)
-                self._log_action(response.action, tools_used, response.message)
+                if response.parse_failed:
+                    await self._report_parse_failure("heartbeat", tools_used)
+                else:
+                    self._log_action(response.action, tools_used, response.message)
             else:
                 if self._heartbeat_debug:
                     await self._send_heartbeat_debug(
@@ -1239,7 +1319,10 @@ class PulseEngine:
                         response, tools_used, int(elapsed)
                     )
                 tg_msg_id = await self._dispatch(response)
-                self._log_action(response.action, summary=response.message)
+                if response.parse_failed:
+                    await self._report_parse_failure("heartbeat")
+                else:
+                    self._log_action(response.action, summary=response.message)
                 db_ids = self._save_heartbeat_to_history(None, response)
                 if tg_msg_id and db_ids:
                     self.db.update_message_channel_id(db_ids[-1], tg_msg_id)
