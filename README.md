@@ -223,8 +223,10 @@ All `{name}` and `{user_name}` placeholders are resolved automatically. YAML is 
 | Command | What it does |
 |---------|--------------|
 | `/start` | Register this chat so the companion can reach you |
-| `/status` | Show heartbeat interval, quiet-mode state, LLM status, and active schedules |
+| `/status` | Show heartbeat interval, away mode, quiet-mode state, LLM status, and active schedules |
 | `/quiet` | Sticky toggle — stop all proactive messages (even while you chat). Send again to resume; check state with `/status` |
+| `/heartbeat` | Run one heartbeat right now (ignores quiet hours and `/quiet`, since you asked for it). If the companion chooses not to message, the bot tells you so |
+| `/heartbeat once` \| `taper` \| `always` | Switch the [away mode](#heartbeat-configyaml) until restart; `/heartbeat default` goes back to the config setting, `/heartbeat mode` shows it |
 | `/ping` | Instant "is the bot alive?" check (no LLM call) |
 | `/remind <text>` | Quick reminder via the scheduler |
 | `/tasks`, `/tasks_clear` | Show or clear the companion's task list |
@@ -390,7 +392,7 @@ Your companion doesn't just remember what's *important* — it remembers what's 
 - Long memories (like multi-paragraph session summaries) also store **chunk-level embeddings**, so they can be found by their later paragraphs — not just the part that fits the embedding model's 256-token window.
 - High-importance facts (importance ≥ 8) and the latest session summary are always included, regardless of the message.
 
-Recall happens at prompt-build time inside the running daemon — it applies to conversation replies out of the box, and to heartbeats if `heartbeat_query` is enabled.
+Recall happens at prompt-build time inside the running daemon — it applies to conversation replies and scheduled tasks (the task's own text is the query) out of the box, and to heartbeats if `heartbeat_query` is enabled.
 
 **Configuration (`config.yaml`):**
 
@@ -419,6 +421,30 @@ The script is idempotent and insert-only — safe to re-run, never modifies memo
 
 **Tuning:** watch the log lines (`Passive recall: chunks=… hits_above_thresh=… top_base=…`) for a few days. If companions bring up irrelevant memories, nudge `min_similarity` toward 0.35; if they never surface anything, drop it toward 0.25.
 
+### Story-so-far recaps (optional)
+
+When a conversation grows long, Pulse compresses it: older messages become a summary, and only the last few raw exchanges stay (`context_budget.recent_tail_exchanges`, default 2). The newest summary is always shown as *"Last session"*; older ones move into the memory pool and come back only when recall finds them relevant. On a small context window compression runs often, so the thread of *what's been happening lately* can thin out, and a companion may wake from a heartbeat a little hazy.
+
+**Recaps** are a companion's own answer to that: a short story-so-far note in their own voice, saved with the `save_recap` tool (memory skill, loaded on demand). The newest few appear with their memories under *"Story so far"*, next to the last session, so the thread carries across compressions and heartbeats. With shared memories, each resident only sees their own.
+
+```yaml
+context:
+  recent_recaps: 3            # how many recaps to show (0 = off)
+
+auto_recap:                   # optional safety net, off by default
+  enabled: false
+  inactivity_minutes: 120     # quiet time since the human's last message (heartbeats don't count)
+  cooldown_hours: 4           # at most one auto-recap per this many hours
+  min_messages: 4             # skip tiny conversations
+```
+
+**Auto-recap** writes one for the companion if they don't do it themselves: once the conversation has gone quiet, and only if something new was said since the last recap. It's one call to the persona's own model. `python scripts/test_recap.py --persona <name> --dry-run` shows what it would write without saving.
+
+**Other continuity levers**, if a companion seems to lose the thread:
+
+- Raise `context_budget.recent_tail_exchanges` (e.g. 3–4) so more raw conversation survives each compression.
+- `provider.summarization_model` sends compression to a cheaper model of the same provider (summaries get a `[summarized by …]` byline). It saves money, but a smaller model may drop details, so use your persona's own model if continuity matters more than cost. Ignored, with a log line, for local llama-server.
+
 ### Heartbeat (`config.yaml`)
 
 ```yaml
@@ -430,9 +456,21 @@ heartbeat:
   quiet_hours_start: 23       # no notifications after 11pm
   quiet_hours_end: 8          # no notifications before 8am
   startup_checkin: true       # think on startup
+  away_mode: "always"         # always | taper | once (see below)
+  suggestion_mode: "off"      # "rotate" = one gentle suggestion per heartbeat (see Dynamic tool loading)
 ```
 
 When `randomize` is enabled, each heartbeat interval is randomly chosen between min and max — the companion thinks at unpredictable intervals instead of a fixed schedule. Re-rolls after each heartbeat and after each conversation.
+
+**Away mode** decides what heartbeats do while you haven't written, so a companion doesn't spend a whole day thinking alone while your phone is in another room:
+
+| `away_mode` | While you're away |
+|---|---|
+| `always` (default) | Heartbeats keep their usual rhythm |
+| `taper` | Each unanswered heartbeat waits twice as long as the last: 30m → 1h → 2h → 4h… (at most 16× the interval, never over 24h) |
+| `once` | One heartbeat after you go quiet, then none until you write |
+
+Any message from you, or `/heartbeat`, starts heartbeats fresh. Ticks skipped for quiet hours or an unreachable model don't count as unanswered. You can set it per persona in the GUI (Heartbeat → *While Away*) or switch it from Telegram with `/heartbeat once | taper | always` until the next restart. A restart starts the count at zero, so a restarted companion in `once` mode gets one heartbeat even after a long absence.
 
 ### Vision (optional)
 
@@ -574,6 +612,18 @@ the companion concrete playful affordances without sending every tool schema
 on every call. Persona overlays can replace `heartbeat.tool_shelf_skills` and
 adjust or disable `heartbeat.tool_discovery_rotation`; ordinary conversations
 keep the lean core set and full searchable catalogue.
+
+Some models don't reach for tools unless pointed at them. With
+`heartbeat.suggestion_mode: "rotate"`, each open-ended heartbeat gets one
+gentle line, *"A suggestion for this heartbeat (not a command)"*, rotating
+by hour and by companion. Often it invites the shelf skill the companion has
+used least recently (from the action log), e.g. *"If you'd like something to
+do: **paint**, make small pixel-art pieces."* Other options are tool-free
+(free think, look back at recent actions, follow up on something the human
+said), journal or memory nudges, or reaching out. It only mentions tools that
+are loaded for that heartbeat, and with tools off it uses only the tool-free
+ones. Each tick logs `Heartbeat suggestion: <what was offered>`, so you can
+compare it with what the companion actually did.
 
 Skills can control their loading behavior:
 - `always_loaded = True` — all tools always present (e.g., schedule, lantern)
