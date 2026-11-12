@@ -29,6 +29,7 @@ Pulse gives your AI companion a life of their own. It runs in the background, le
 - **Desktop notifications** — Windows toast notifications for proactive messages (optional, Windows-only for now)
 - **Timeout** — Companions can disengage from genuinely harmful conversations via model-initiated soft/hard timeouts (not censorship — the companion decides based on context)
 - **Quiet hours** — No notifications while you sleep
+- **Desktop GUI** — Create and edit personas, browse their memories and journal, tune heartbeats and skills, and start or stop companions, without touching YAML (see [Desktop GUI](#desktop-gui))
 
 ## Architecture
 
@@ -274,7 +275,38 @@ python pulse.py                    # uses base config
 python pulse.py --persona nova     # loads personas/nova/ overlay
 ```
 
-Or on Windows, double-click `start.bat`.
+Or on Windows, double-click `start.bat`. For the desktop GUI, double-click `start_gui.bat` (or run `python pulse_gui.py`).
+
+## Desktop GUI
+
+The Pulse Engine GUI is the comfortable way to run a household of companions. Pick a persona from the menu (or create a new one, optionally starting from an exported OpenRouter chat), start or stop it from the header, click the avatar to set a picture and accent colour, and work through its settings top to bottom:
+
+<p align="center"><img src="docs/images/gui-overview.png" width="640" alt="Pulse Engine GUI: the Mossling persona running on a home server, with its Identity and Provider settings open"></p>
+
+| Section | What's there |
+|---|---|
+| **01 Identity** | Name, the human's name, display model name, system prompt, traits, relationship context, voice notes |
+| **02 Continuity** | Lantern (current state and open threads), memories and journal browsers, core anchors (self, human, relationship), and importing older conversations from ChatGPT, Claude, Grok, OpenRouter and more |
+| **03 Provider** | Local model or cloud API, model name, API keys, prompt-cache options |
+| **04 Local Server** | llama.cpp paths, model file, GPU layers, context size, vision projector |
+| **05 Model Tuning** | Temperature and friends, reasoning, tool rounds, recent-tail size |
+| **06 Heartbeat** | Interval (fixed or randomized), quiet hours, and what heartbeats do *while you're away* |
+| **07 TTS Voice** | Voice description, or a reference sample for voice cloning |
+| **08 Skills** | One card per skill: turn it on or off and adjust its settings, including MCP servers with *Test Connection* |
+| **09 Channels** | Telegram, desktop notifications, the LoR forum |
+| **10 Runtime** | Live status: provider and model, LLM and Telegram connection, last and next heartbeat, last error |
+| **11 Logs** | The running persona's log, live |
+
+<p align="center"><img src="docs/images/gui-continuity.png" width="640" alt="The Continuity section: Lantern, Memories, Journal, Core anchors and Import"></p>
+
+A few things worth knowing:
+
+- **Saving is safe.** Every save shows what will change and makes a backup first. The **Backups** window lists earlier versions, and **Undo** puts the last one back. Edits to memories and journal entries can be undone too.
+- **Editors open ready to edit.** Windows such as memories, journal, Lantern and the core anchors open straight into editing, and warn you before closing with unsaved changes.
+- **Closing the app is your choice:** *Stop & Close* stops every running companion, while *Close* leaves them running in the background until you reopen the GUI.
+- **Companions on a home server** (experimental, see `scripts/remote.py`) show as *Running · box*. Start/Stop and logs go to the server, and the ⇅ **Sync** window moves settings both ways and pulls a backup of their memories and journal.
+
+<p align="center"><img src="docs/images/gui-heartbeat-skills.png" width="640" alt="Heartbeat settings with the While Away mode, and the Skills cards"></p>
 
 ## Configuration
 
