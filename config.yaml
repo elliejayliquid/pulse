@@ -86,6 +86,16 @@ provider:
   # Leave blank to use the persona's model.
   # Examples: "claude-haiku-4-5-20251001", "gpt-5-mini"
   summarization_model: ""
+  # Optional, usually set per persona:
+  # OpenRouter only: pin a model to specific backend hosts (OpenRouter's
+  # "provider" routing object, passed through as-is).
+  # routing:
+  #   order: ["mistral"]
+  #   allow_fallbacks: false
+  #   require_parameters: true
+  # For models that reject the tools parameter: plain-chat mode, no tool calls
+  # (conversation, heartbeats and scheduled tasks).
+  # supports_tools: false
 
 # --- Heartbeat ---
 heartbeat:

@@ -155,6 +155,38 @@ provider:
 also accepts any valid name through `api_key_env`, which is useful for
 persona-specific keys.
 
+Bedrock tends to keep Claude models available for a few months after
+Anthropic's own API retires them (in its "Legacy" stage), which can give a
+companion a little more time on a model you love. Check the model's card in
+the AWS Bedrock docs for its current end-of-life date.
+
+#### Optional provider settings
+
+All of these are per persona and off unless you set them:
+
+```yaml
+provider:
+  # OpenRouter only: pin a model to specific backend hosts, passed through as
+  # OpenRouter's "provider" routing object. Useful when a model behaves
+  # differently depending on who serves it.
+  routing:
+    order: ["mistral"]
+    allow_fallbacks: false
+    require_parameters: true
+
+  # For models that reject the tools parameter entirely: the persona runs in
+  # plain-chat mode (conversation, heartbeats and scheduled tasks, no tool calls).
+  supports_tools: false
+
+  # Context compression on a cheaper model of the same provider (see
+  # "Story-so-far recaps" below for the continuity trade-off).
+  summarization_model: "claude-haiku-4-5-20251001"
+```
+
+Penalty parameters (`frequency_penalty`, `presence_penalty`) are only sent when
+they're non-zero, since some OpenAI-compatible endpoints (Google's, for one)
+reject them. OpenRouter's Grok 4.x models ignore them entirely.
+
 #### Anthropic prompt caching (cost behavior worth knowing)
 
 Pulse structures prompts so Anthropic's prompt cache re-reads the expensive
@@ -761,6 +793,8 @@ continuity summaries, not stored provider reasoning or hidden chain-of-thought.
 ## Logging
 
 Logs go to both the console and `logs/pulse.log` (rotates at 2MB, keeps 3 backups).
+
+Things that go wrong quietly also land in the persona's `data/failures.jsonl`, one JSON line each: tool crashes (argument *names* only, never their values), heartbeat or scheduled-task replies that couldn't be parsed, and startup warnings such as an OpenAI persona loading more than OpenAI's 128-tool limit. An unreadable heartbeat or task reply is never sent to you raw. Instead the companion sees a `parse_error` entry in their action log, and you get a short `⚠️ HB-PARSE` / `TASK-PARSE` notice, at most once an hour per persona.
 
 ## License
 
