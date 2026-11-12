@@ -113,6 +113,34 @@ class MemorySkill(BaseSkill):
             {
                 "type": "function",
                 "function": {
+                    "name": "save_recap",
+                    "description": (
+                        "Save a story-so-far recap: a short note in your own voice "
+                        "about what's been happening lately, with the user and in "
+                        "your own thinking. Your newest few recaps appear with your "
+                        "memories, so a recap helps you carry the thread forward. "
+                        "A few paragraphs is right: what you talked about, what "
+                        "mattered, what you noticed."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "text": {
+                                "type": "string",
+                                "description": "The recap text (a few paragraphs).",
+                            },
+                            "tags": {
+                                "type": "string",
+                                "description": "Optional comma-separated tags (e.g. 'weekly, with-user, household').",
+                            },
+                        },
+                        "required": ["text"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
                     "name": "search_memory",
                     "description": (
                         "Search your memories for facts, past conversations, or details. "
@@ -384,6 +412,11 @@ class MemorySkill(BaseSkill):
                 text=arguments.get("text", ""),
                 tags=arguments.get("tags", ""),
             )
+        elif tool_name == "save_recap":
+            return self._save_recap(
+                text=arguments.get("text", ""),
+                tags=arguments.get("tags", ""),
+            )
         elif tool_name == "search_memory":
             return self._search_memory(
                 query=arguments.get("query", ""),
@@ -512,6 +545,55 @@ class MemorySkill(BaseSkill):
         except IOError as e:
             logger.error(f"Failed to save memory: {e}")
             return f"Failed to save memory: {e}"
+
+    # ── Recap (story-so-far summary) ─────────────────────────
+
+    def _save_recap(self, text: str, tags: str = "") -> str:
+        """Save a recap memory (type='recap', importance=5).
+
+        The newest few recaps appear in the memories block of later prompts
+        (context.recent_recaps), so they carry the thread forward.
+        """
+        if not text.strip():
+            return "Cannot save empty recap."
+
+        tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
+        if "recap" not in tag_list:
+            tag_list.append("recap")
+
+        model = _get_embedding_model()
+        embedding_vec = model.encode(text.strip()) if model else None
+
+        if self._db:
+            embedding_blob = _embedding_to_blob(embedding_vec)
+            mem_id = self._db.save_memory(
+                text=text.strip(), tags=tag_list, type="recap",
+                importance=5, embedding=embedding_blob,
+                resident_id=self._resident_id,
+            )
+            logger.info(f"Recap saved to DB (ID: {mem_id}) — {text[:60]}...")
+            return f"Recap saved (ID: {mem_id}). Your newest recaps appear with your memories."
+
+        # JSON fallback
+        mem_id = f"{self._get_next_id():03d}"
+        embedding = embedding_vec.tolist() if embedding_vec is not None else []
+        memory = {
+            "id": mem_id, "text": text.strip(),
+            "tags": tag_list, "type": "recap", "importance": 5,
+            "resident_id": self._resident_id,
+            "retrieval_count": 0, "last_accessed": None,
+            "date": datetime.now().isoformat(), "embedding": embedding,
+        }
+        mem_file = self.memory_dir / f"memory_{mem_id}.json"
+        try:
+            with open(mem_file, "w", encoding="utf-8") as f:
+                json.dump(memory, f, indent=2)
+            self._rebuild_aggregate()
+            logger.info(f"Recap saved: {mem_file.name}")
+            return f"Recap saved (ID: {mem_id}). Your newest recaps appear with your memories."
+        except IOError as e:
+            logger.error(f"Failed to save recap: {e}")
+            return f"Failed to save recap: {e}"
 
     # ── Update ───────────────────────────────────────────────
 

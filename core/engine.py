@@ -26,6 +26,7 @@ except ImportError:
 from core.llm_openai import OpenAIResponsesClient
 from core.context import ContextManager
 from core.scheduler import ScheduleManager
+from core.recap_task import RecapTask
 from core.archive_enrichment import run_one_idle_enrichment
 
 logger = logging.getLogger(__name__)
@@ -201,11 +202,26 @@ class PulseEngine:
         self.dev_tick_schedule = dev_config.get("schedule_time", "")  # e.g. "20:00"
         self._pulse_root = str(Path(config.get("_pulse_root", ".")).resolve())
 
+        # Auto-recap — writes a story-so-far summary after a session wraps up.
+        # A safety net for when the companion doesn't call save_recap itself.
+        # Off unless auto_recap.enabled is set.
+        recap_config = config.get("auto_recap", {}) or {}
+        self.auto_recap_enabled = bool(recap_config.get("enabled", False))
+        self.recap_task = RecapTask(
+            self,
+            inactivity_minutes=recap_config.get("inactivity_minutes", 120),
+            cooldown_hours=recap_config.get("cooldown_hours", 4),
+            min_messages=recap_config.get("min_messages", 4),
+        )
+
         self._running = False
         self._stop_event = asyncio.Event()
 
         # Activity tracking — heartbeat only fires after silence
         self._last_activity = 0.0   # timestamp of last message exchange
+        # Last real message from the user. Heartbeats don't touch it (they do
+        # reset _last_activity), so auto-recap can measure quiet time from it.
+        self._last_conversation_at = 0.0
         self._started_at = 0.0
         self._next_heartbeat_target = None
         self._last_tick_at = None
@@ -910,6 +926,7 @@ class PulseEngine:
         # Reset heartbeat timer — conversation is active, re-roll interval
         self.interval = self._roll_heartbeat_interval()
         self._mark_activity()
+        self._last_conversation_at = time.time()
         # Manual quiet mode is sticky: it stays on across messages so the
         # companion can chat without free-think ticks. Only /quiet again
         # (or a restart) turns it back off.
@@ -1245,15 +1262,18 @@ class PulseEngine:
             on_demand_manifest = self.skill_registry.get_on_demand_manifest(
                 exclude_skills=set(shelf_names)
             )
+            invitations = self.skill_registry.get_heartbeat_invitations(shelf_names)
         else:
             tools = []
             skill_summary = []
             on_demand_manifest = []
+            invitations = []
 
         messages = self.context.build_heartbeat_prompt(
             has_tools=bool(tools), skill_summary=skill_summary,
             on_demand_manifest=on_demand_manifest,
-            timeout_state=self._check_timeout_state()
+            timeout_state=self._check_timeout_state(),
+            invitations=invitations,
         )
 
         t0 = time.time()
@@ -1603,6 +1623,15 @@ class PulseEngine:
                 self._last_error = None
                 # Always check for due tasks (fast — just reads a file)
                 await self._check_due_tasks()
+
+                # Auto-recap check — silent background save when sessions wrap.
+                # Cheap when conditions aren't met (timestamp + DB read); only
+                # fires the LLM call when it's actually time to recap.
+                if self.auto_recap_enabled:
+                    try:
+                        await self.recap_task.maybe_run()
+                    except Exception as e:
+                        logger.error(f"Auto-recap check failed: {e}", exc_info=True)
 
                 # Heartbeat fires only after enough silence since last activity
                 silence = time.time() - self._last_activity

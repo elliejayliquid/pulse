@@ -238,6 +238,44 @@ class SkillRegistry:
         names.extend(candidates[:slots])
         return names
 
+    def get_heartbeat_invitations(self, shelf_names: list[str] | None = None) -> list[dict]:
+        """Shelf skills worth gently pointing at in a heartbeat suggestion.
+
+        Uses the same category filter as tool_discovery_rotation, so it's
+        always something creative/social/research, never housekeeping. Their
+        tools are already loaded for the heartbeat (no search_tools step).
+        """
+        names = (
+            self.get_heartbeat_shelf_names()
+            if shelf_names is None else shelf_names
+        )
+        rotation = (self.config.get("heartbeat", {}) or {}).get(
+            "tool_discovery_rotation", {}) or {}
+        raw = rotation.get("categories", ["creative", "social", "research"]) \
+            if isinstance(rotation, dict) else ["creative", "social", "research"]
+        if isinstance(raw, str):
+            raw = [raw]
+        categories = {str(c).strip().lower() for c in (raw or []) if str(c).strip()}
+        invitations = []
+        for name in names:
+            skill = self._on_demand_skills.get(name)
+            if not skill:
+                continue
+            skill_categories = {
+                str(c).strip().lower() for c in (getattr(skill, "categories", []) or [])
+            }
+            if categories and not (categories & skill_categories):
+                continue
+            invitations.append({
+                "skill": name,
+                "summary": self._skill_display_summary(name, skill),
+                "tools": [
+                    td.get("function", {}).get("name")
+                    for td in self._on_demand_tools.get(name, [])
+                ],
+            })
+        return invitations
+
     def get_heartbeat_tools(self, shelf_names: list[str] | None = None) -> list[dict]:
         """Always-loaded tools plus the heartbeat's direct-access shelf."""
         names = (
