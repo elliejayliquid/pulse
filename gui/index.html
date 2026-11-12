@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Pulse Engine</title>
-  <link rel="stylesheet" href="style.css?v=20261109b">
+  <link rel="stylesheet" href="style.css?v=20261112a">
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
   <meta http-equiv="Pragma" content="no-cache">
   <meta http-equiv="Expires" content="0">
@@ -389,6 +389,18 @@
               <input id="hbQuietEnd" class="hb-input" type="number" min="0" max="23">
               <span class="hb-unit">h</span>
             </div>
+          </div>
+          <div class="hb-group">
+            <div class="hb-group-label">While Away</div>
+            <div class="hb-row hb-row-wide" title="What heartbeats do while the human hasn't written. Any human message (or /heartbeat) starts them fresh. Telegram: /heartbeat once | taper | always switches it until restart.">
+              <span class="hb-label">Mode</span>
+              <select id="hbAwayMode" class="hb-input hb-select">
+                <option value="always">Keep going</option>
+                <option value="taper">Taper off</option>
+                <option value="once">One, then wait</option>
+              </select>
+            </div>
+            <div id="hbAwayHint" class="hb-hint"></div>
           </div>
         </div>
       </section>

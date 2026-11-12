@@ -1064,6 +1064,22 @@ input[type="number"]::-webkit-outer-spin-button {
   color: var(--text-tertiary);
 }
 
+/* A row whose control has no unit: the field takes the unit column too. */
+.hb-row-wide {
+  grid-template-columns: 72px 1fr;
+}
+
+.hb-select {
+  text-align: left;
+  padding-right: 30px;
+}
+
+.hb-hint {
+  padding: 6px 0 0;
+  color: var(--text-tertiary);
+  font: 11px/1.45 var(--body);
+}
+
 .hb-toggle {
   display: flex;
   align-items: center;

@@ -104,7 +104,10 @@ HEARTBEAT_FIELDS = {
     "quiet_hours_start": "Quiet Hours Start",
     "quiet_hours_end": "Quiet Hours End",
     "debug": "Heartbeat Debug",
+    "away_mode": "Heartbeat Away Mode",
 }
+
+HEARTBEAT_AWAY_MODES = ("always", "taper", "once")
 
 HEARTBEAT_LIMITS = {
     "interval_minutes": (1, 1440),
@@ -508,8 +511,12 @@ class ConfigEditor:
             raise ValueError(f"{label} must be between {low} and {high}.")
         return value
 
-    def _clean_heartbeat_value(self, key: str, value: Any) -> int | bool:
+    def _clean_heartbeat_value(self, key: str, value: Any) -> int | bool | str:
         label = HEARTBEAT_FIELDS[key]
+        if key == "away_mode":
+            if value not in HEARTBEAT_AWAY_MODES:
+                raise ValueError(f"{label} must be one of: {', '.join(HEARTBEAT_AWAY_MODES)}.")
+            return value
         if key in ("randomize", "debug"):
             if type(value) is not bool:
                 raise ValueError(f"{label} must be true or false.")

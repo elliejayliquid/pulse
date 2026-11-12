@@ -94,6 +94,14 @@ heartbeat:
   quiet_hours_end: 8              # no notifications before 8am
   startup_checkin: false           # companion checks in when Pulse starts
   notify_cooldown_minutes: 60     # max 1 notification per hour (free-think only)
+  # What heartbeats do while the human hasn't written (GUI: Heartbeat → While Away):
+  #   "always" = keep the usual rhythm (default)
+  #   "taper"  = each unanswered heartbeat waits twice as long (30m, 1h, 2h, 4h…, max 16x / 24h)
+  #   "once"   = one heartbeat after the human goes quiet, then none until they write
+  # Any human message, or /heartbeat in Telegram, starts heartbeats fresh.
+  # Telegram: /heartbeat runs one now (ignores quiet hours); /heartbeat once |
+  # taper | always switches the mode until restart; /heartbeat default goes back.
+  away_mode: "always"
   # Open-ended heartbeats get a small direct-access tool shelf. A persona can
   # replace this list in personas/<name>/config.yaml with its own favorites.
   tool_shelf_skills: [tts, sticker]

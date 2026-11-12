@@ -210,6 +210,7 @@ class TelegramChannel(Channel):
         self.app.add_handler(CommandHandler("start", self._cmd_start))
         self.app.add_handler(CommandHandler("status", self._cmd_status))
         self.app.add_handler(CommandHandler("quiet", self._cmd_quiet))
+        self.app.add_handler(CommandHandler("heartbeat", self._cmd_heartbeat))
         self.app.add_handler(CommandHandler("remind", self._cmd_remind))
         self.app.add_handler(CommandHandler("ping", self._cmd_ping))
         self.app.add_handler(CommandHandler("tasks", self._cmd_tasks))
@@ -834,9 +835,18 @@ class TelegramChannel(Channel):
 
         active_schedules = self._engine.scheduler.list_active()
         quiet = getattr(self._engine, "_manual_quiet", False)
+        if quiet:
+            heartbeat_line = "paused (quiet mode)"
+        elif self._engine.heartbeat_waiting_for_human():
+            heartbeat_line = "waiting for your next message"
+        else:
+            heartbeat_line = f"every {self._engine.interval // 60}m"
+            if self._engine._unanswered_heartbeats and self._engine.away_mode == "taper":
+                heartbeat_line += f", tapering ({self._engine._unanswered_heartbeats} unanswered)"
         status_lines = [
             "Pulse Status:",
-            f"  Heartbeat: {'paused (quiet mode)' if quiet else f'every {self._engine.interval // 60}m'}",
+            f"  Heartbeat: {heartbeat_line}",
+            f"  Away mode: {self._away_mode_text()}",
             f"  Quiet mode: {'on — /quiet to resume' if quiet else 'off'}",
             f"  LLM server: {'connected' if self._engine.llm._available else 'disconnected'}",
             f"  Active schedules: {len(active_schedules)}",
@@ -845,6 +855,82 @@ class TelegramChannel(Channel):
             status_lines.append(f"    - {s['task']} ({s.get('schedule_type', '?')})")
 
         await update.message.reply_text("\n".join(status_lines))
+
+    _AWAY_MODE_HELP = {
+        "always": "heartbeats keep their usual rhythm while you're away",
+        "taper": "each unanswered heartbeat waits twice as long as the last",
+        "once": "one heartbeat after you go quiet, then none until you write",
+    }
+
+    def _away_mode_text(self) -> str:
+        """'once (until restart; config: always)' style summary for /status."""
+        engine = self._engine
+        mode = engine.away_mode
+        if engine._away_mode_override:
+            return f"{mode} (until restart; config: {engine._away_mode_config})"
+        return mode
+
+    async def _cmd_heartbeat(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /heartbeat — run one heartbeat now, or switch the away mode.
+
+        /heartbeat                  run one heartbeat now (ignores quiet hours)
+        /heartbeat once|taper|always  away mode until restart
+        /heartbeat default          back to the config's away mode
+        /heartbeat mode             show the current away mode
+        """
+        engine = self._engine
+        if not engine:
+            await update.message.reply_text("Engine not connected yet.")
+            return
+
+        word = (context.args[0].strip().lower() if context.args else "")
+        if word in ("always", "taper", "once", "default", "reset"):
+            mode = engine.set_away_mode(None if word in ("default", "reset") else word)
+            suffix = " (until restart)" if engine._away_mode_override else " (from config)"
+            await update.message.reply_text(
+                f"Away mode: {mode}{suffix} — {self._AWAY_MODE_HELP[mode]}."
+            )
+            return
+        if word in ("mode", "status", "help"):
+            await update.message.reply_text(
+                f"Away mode: {self._away_mode_text()} — {self._AWAY_MODE_HELP[engine.away_mode]}.\n\n"
+                "/heartbeat — run one heartbeat now\n"
+                "/heartbeat once | taper | always — change the away mode until restart\n"
+                "/heartbeat default — back to the config setting"
+            )
+            return
+        if word:
+            await update.message.reply_text(
+                "I know: /heartbeat (run one now), /heartbeat once | taper | always, "
+                "/heartbeat default, /heartbeat mode."
+            )
+            return
+
+        if engine._heartbeat_in_progress:
+            await update.message.reply_text("A heartbeat is already running — hang on a moment.")
+            return
+
+        name = engine.context.ai_name
+        typing_task = self._start_typing_loop(update.effective_chat)
+        try:
+            response = await engine.run_heartbeat_tick(manual=True)
+        except RuntimeError:
+            await update.message.reply_text("A heartbeat is already running — hang on a moment.")
+            return
+        except Exception as e:
+            logger.error(f"/heartbeat failed: {e}", exc_info=True)
+            await update.message.reply_text(f"Heartbeat failed: {e}")
+            return
+        finally:
+            typing_task.cancel()
+
+        # A notify already arrived as its own message; only report the quiet outcomes.
+        if response is None and engine._heartbeat_skipped:
+            await update.message.reply_text(
+                "Couldn't run the heartbeat — the model isn't reachable right now."
+            )
+        elif response is None or response.action != "notify":
+            await update.message.reply_text(f"{name} spent this heartbeat quietly — no message this time.")
 
     async def _cmd_quiet(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /quiet — sticky toggle for manual quiet mode (no heartbeats)."""

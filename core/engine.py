@@ -31,6 +31,13 @@ from core.archive_enrichment import run_one_idle_enrichment
 
 logger = logging.getLogger(__name__)
 
+# heartbeat.away_mode values (see PulseEngine.__init__)
+AWAY_MODES = ("always", "taper", "once")
+# Taper doubles the wait per unanswered heartbeat, capped so a long absence
+# still gets an occasional heartbeat instead of drifting off to days.
+TAPER_MAX_DOUBLINGS = 5            # 30 min interval -> at most 16 h
+TAPER_MAX_SECONDS = 24 * 3600
+
 
 class PulseEngine:
     """Main engine that drives the heartbeat loop."""
@@ -193,6 +200,21 @@ class PulseEngine:
         self.quiet_end = heartbeat_config.get("quiet_hours_end", 8)
         self.startup_checkin = heartbeat_config.get("startup_checkin", True)
         self._heartbeat_debug = heartbeat_config.get("debug", False)
+        # Away mode: what heartbeats do while the human is quiet.
+        #   always: fire every interval (default, the classic behaviour)
+        #   taper:  each unanswered heartbeat waits twice as long as the last
+        #   once:   one heartbeat, then none until the human writes again
+        # /heartbeat <mode> overrides it until restart. A human message (or a
+        # manual /heartbeat) resets the unanswered count.
+        raw_away = str(heartbeat_config.get("away_mode", "always") or "always").strip().lower()
+        if raw_away not in AWAY_MODES:
+            logger.warning(f"heartbeat.away_mode '{raw_away}' is not one of {AWAY_MODES}; using 'always'")
+            raw_away = "always"
+        self._away_mode_config = raw_away
+        self._away_mode_override: str | None = None
+        self._unanswered_heartbeats = 0
+        self._heartbeat_in_progress = False
+        self._heartbeat_skipped = False
 
         # Dev tick — autonomous self-improvement
         dev_config = config.get("dev_tick", {})
@@ -321,7 +343,89 @@ class PulseEngine:
     def _mark_activity(self) -> None:
         """Reset the silence clock and next heartbeat target."""
         self._last_activity = time.time()
-        self._next_heartbeat_target = self._last_activity + self.interval
+        self._update_next_heartbeat_target()
+
+    # ── Away mode ────────────────────────────────────────────
+
+    @property
+    def away_mode(self) -> str:
+        """The active away mode: the /heartbeat override, else the config value."""
+        return self._away_mode_override or self._away_mode_config
+
+    def set_away_mode(self, mode: str | None) -> str:
+        """Override the away mode until restart (None = back to the config value).
+
+        Returns the mode now in effect.
+        """
+        if mode is not None and mode not in AWAY_MODES:
+            raise ValueError(f"away mode must be one of {AWAY_MODES}")
+        self._away_mode_override = None if mode == self._away_mode_config else mode
+        logger.info(f"Away mode: {self.away_mode}"
+                    + (" (override until restart)" if self._away_mode_override else " (config)"))
+        self._update_next_heartbeat_target()
+        return self.away_mode
+
+    def _away_interval(self) -> int | None:
+        """Seconds of silence before the next automatic heartbeat.
+
+        None means "wait for the human": in 'once' mode after one unanswered
+        heartbeat. In 'taper' mode every unanswered heartbeat doubles the wait.
+        """
+        n = self._unanswered_heartbeats
+        mode = self.away_mode
+        if mode == "once" and n >= 1:
+            return None
+        if mode == "taper" and n:
+            return min(self.interval * (2 ** min(n, TAPER_MAX_DOUBLINGS)), TAPER_MAX_SECONDS)
+        return self.interval
+
+    def _update_next_heartbeat_target(self) -> None:
+        wait = self._away_interval()
+        self._next_heartbeat_target = (
+            self._last_activity + wait if wait is not None and self._last_activity else None
+        )
+
+    def _human_is_back(self) -> None:
+        """A human message or manual /heartbeat: heartbeats start fresh."""
+        if self._unanswered_heartbeats:
+            logger.info(f"Human is back after {self._unanswered_heartbeats} unanswered heartbeat(s)")
+        self._unanswered_heartbeats = 0
+
+    def heartbeat_waiting_for_human(self) -> bool:
+        """True when away mode has paused automatic heartbeats until the human writes."""
+        return self._away_interval() is None
+
+    async def run_heartbeat_tick(self, manual: bool = False):
+        """Run one heartbeat and do the bookkeeping around it.
+
+        Used by the main loop, the startup check-in and /heartbeat. A manual
+        tick is the human asking for one: it ignores quiet hours and /quiet,
+        resets the unanswered count, and doesn't count as unanswered itself.
+        Returns the PulseResponse (or None if skipped). Raises RuntimeError if
+        a heartbeat is already running.
+        """
+        if self._heartbeat_in_progress:
+            raise RuntimeError("A heartbeat is already running.")
+        self._heartbeat_in_progress = True
+        try:
+            if manual:
+                self._human_is_back()
+            self._mark_activity()  # reset so the loop doesn't fire again meanwhile
+            response = await self._do_heartbeat(manual=manual)
+            self._last_tick_at = datetime.now(timezone.utc).isoformat()
+            self._last_tick_action = response.action if response else "skipped"
+            self._last_tick_summary = (response.message or "")[:120] if response else None
+            if not manual and not self._heartbeat_skipped:
+                self._unanswered_heartbeats += 1
+                if self.away_mode != "always":
+                    logger.info(f"Unanswered heartbeats: {self._unanswered_heartbeats} (away mode: {self.away_mode})")
+            self.interval = self._roll_heartbeat_interval()
+            self._update_next_heartbeat_target()
+            if self.heartbeat_waiting_for_human():
+                logger.info("Away mode 'once': no more heartbeats until the human writes.")
+            return response
+        finally:
+            self._heartbeat_in_progress = False
 
     def _iso_from_timestamp(self, timestamp: float | None) -> str | None:
         if not timestamp:
@@ -352,6 +456,9 @@ class PulseEngine:
                 max(0, int(self._next_heartbeat_target - time.time()))
                 if self._next_heartbeat_target else None
             ),
+            "away_mode": self.away_mode,
+            "unanswered_heartbeats": self._unanswered_heartbeats,
+            "heartbeat_waiting_for_human": self.heartbeat_waiting_for_human(),
             "telegram_connected": (
                 telegram_ch.is_connected
                 if telegram_ch and hasattr(telegram_ch, "is_connected")
@@ -365,8 +472,10 @@ class PulseEngine:
         """Process at most one local archive chunk during genuine idle time."""
         if not self.db or silence_seconds < self._enrichment_idle_seconds:
             return None
-        # A companion heartbeat takes priority when it is already due.
-        if silence_seconds >= self.interval:
+        # A companion heartbeat takes priority when it is already due. (While
+        # away mode waits for the human, no heartbeat is due: enrichment runs.)
+        due = self._away_interval()
+        if due is not None and silence_seconds >= due:
             return None
         try:
             result = await asyncio.to_thread(
@@ -925,6 +1034,7 @@ class PulseEngine:
         """
         # Reset heartbeat timer — conversation is active, re-roll interval
         self.interval = self._roll_heartbeat_interval()
+        self._human_is_back()
         self._mark_activity()
         self._last_conversation_at = time.time()
         # Manual quiet mode is sticky: it stays on across messages so the
@@ -1233,17 +1343,19 @@ class PulseEngine:
 
         await telegram.send("\n".join(parts))
 
-    async def _do_heartbeat(self):
+    async def _do_heartbeat(self, manual: bool = False):
         """Execute a single heartbeat tick (free-think).
 
         If skills are available, the companion can use tools (search memory,
         write journal, etc.) before deciding on an action. The final response
-        is still parsed as JSON (PulseResponse) for dispatch.
+        is still parsed as JSON (PulseResponse) for dispatch. A manual tick
+        (/heartbeat) was asked for by the human, so quiet hours don't apply.
         """
-        logger.info("--- Heartbeat tick ---")
+        logger.info("--- Heartbeat tick ---" + (" (manual)" if manual else ""))
         response = None
+        self._heartbeat_skipped = True
 
-        if self._in_quiet_hours():
+        if not manual and self._in_quiet_hours():
             logger.info("Quiet hours — skipping heartbeat.")
             return None
 
@@ -1251,6 +1363,7 @@ class PulseEngine:
         if not available:
             logger.warning("LLM server is not available — skipping tick.")
             return None
+        self._heartbeat_skipped = False
 
         # Free-think tick — companion decides what to do
         if self.skill_registry and self.tools_enabled:
@@ -1583,10 +1696,7 @@ class PulseEngine:
         if self.startup_checkin:
             logger.info("Running startup check-in...")
             await self._check_due_tasks()
-            response = await self._do_heartbeat()
-            self._last_tick_at = datetime.now(timezone.utc).isoformat()
-            self._last_tick_action = response.action if response else "skipped"
-            self._last_tick_summary = (response.message or "")[:120] if response else None
+            await self.run_heartbeat_tick()
         self._write_runtime_status()
 
         # Main loop — wake up every 60s to check schedules,
@@ -1633,18 +1743,15 @@ class PulseEngine:
                     except Exception as e:
                         logger.error(f"Auto-recap check failed: {e}", exc_info=True)
 
-                # Heartbeat fires only after enough silence since last activity
+                # Heartbeat fires only after enough silence since last activity.
+                # Away mode can stretch that wait (taper) or pause it until the
+                # human writes (once): _away_interval() is None then.
                 silence = time.time() - self._last_activity
                 await self._run_idle_enrichment_once(silence)
                 silence = time.time() - self._last_activity
-                if silence >= self.interval:
-                    self._mark_activity()  # reset so we don't fire every 60s
-                    response = await self._do_heartbeat()
-                    self._last_tick_at = datetime.now(timezone.utc).isoformat()
-                    self._last_tick_action = response.action if response else "skipped"
-                    self._last_tick_summary = (response.message or "")[:120] if response else None
-                    self.interval = self._roll_heartbeat_interval()
-                    self._next_heartbeat_target = self._last_activity + self.interval
+                due = self._away_interval()
+                if due is not None and silence >= due and not self._heartbeat_in_progress:
+                    await self.run_heartbeat_tick()
 
                 # Dev tick — scheduled time or interval
                 if self.dev_tick_enabled:

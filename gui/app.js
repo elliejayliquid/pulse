@@ -3624,6 +3624,19 @@ function renderHeartbeat(summary) {
   el("hbQuietEnd").value = text(hb.quiet_hours_end);
   el("hbRandomize").checked = Boolean(hb.randomize);
   el("hbDebug").checked = Boolean(hb.debug);
+  const awayMode = ["always", "taper", "once"].includes(hb.away_mode) ? hb.away_mode : "always";
+  el("hbAwayMode").value = awayMode;
+  syncAwayModeHint();
+}
+
+const AWAY_MODE_HINTS = {
+  always: "Heartbeats keep their usual rhythm while you're away.",
+  taper: "Each unanswered heartbeat waits twice as long: 30m, 1h, 2h, 4h…",
+  once: "One heartbeat after you go quiet, then none until you write.",
+};
+
+function syncAwayModeHint() {
+  el("hbAwayHint").textContent = AWAY_MODE_HINTS[el("hbAwayMode").value] || "";
 }
 
 function syncTtsMode() {
@@ -3739,6 +3752,7 @@ function editableSnapshot() {
       quiet_hours_end: el("hbQuietEnd").value,
       randomize: el("hbRandomize").checked,
       debug: el("hbDebug").checked,
+      away_mode: el("hbAwayMode").value,
     },
   };
 }
@@ -3788,6 +3802,7 @@ function setEditableState(data) {
     "tuningEffort",
     "tuningShowReasoning",
     "hbDebug",
+    "hbAwayMode",
   ].forEach((id) => {
     const field = el(id);
     if (field) field.disabled = !editable;
@@ -3930,7 +3945,7 @@ function collectEditableChanges() {
 
   for (const [key, value] of Object.entries(current.heartbeat)) {
     if (value !== original.heartbeat?.[key]) {
-      changes.heartbeat[key] = ["randomize", "debug"].includes(key) ? value : parseHeartbeatNumber(value);
+      changes.heartbeat[key] = ["randomize", "debug", "away_mode"].includes(key) ? value : parseHeartbeatNumber(value);
     }
   }
 
@@ -6200,6 +6215,10 @@ function wireEvents() {
   });
   el("hbRandomize").addEventListener("change", () => setDirty(hasEditableChanges()));
   el("hbDebug").addEventListener("change", () => setDirty(hasEditableChanges()));
+  el("hbAwayMode").addEventListener("change", () => {
+    syncAwayModeHint();
+    setDirty(hasEditableChanges());
+  });
   el("ttsSamplePicker").addEventListener("click", async () => {
     if (!state.current || state.current.name === "__base__") return;
     const result = await api().pick_voice_sample(state.current.name, el("ttsSample").value || "");
