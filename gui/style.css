@@ -1041,7 +1041,9 @@ input[type="number"]::-webkit-outer-spin-button {
   padding: 6px 10px;
   border: 1px solid var(--border);
   border-radius: 6px;
-  background: var(--bg);
+  /* background-color, not the background shorthand: the shorthand would wipe
+     the dropdown arrow that the global select rule draws as a background image. */
+  background-color: var(--bg);
   color: var(--text-primary);
   font: 500 12px/1 var(--mono);
   text-align: center;

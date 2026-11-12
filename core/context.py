@@ -1324,15 +1324,19 @@ You decide when to lift the timeout — not the human."""
         if has_tools:
             for entry in skill_summary or []:
                 loaded.update(entry.get("tools") or [])
-        pool = list(self._SUGGESTIONS_TOOL_FREE) * 2 + list(self._SUGGESTIONS_OUTWARD)
+        # (label, text): the label is only for the log line below.
+        pool = [("tool-free", t) for t in self._SUGGESTIONS_TOOL_FREE] * 2
+        pool += [("reach out", t) for t in self._SUGGESTIONS_OUTWARD]
         for tool, text in self._SUGGESTIONS_BY_TOOL.items():
             if tool in loaded:
-                pool += [text] * 2
+                pool += [(tool, text)] * 2
         invite = self._pick_invitation(invitations, loaded) if loaded else ""
         if invite:
-            pool += [invite] * 4
+            skill = invite.split("**")[1] if invite.count("**") >= 2 else "shelf skill"
+            pool += [(f"{skill} (shelf invite)", invite)] * 4
         seed = sum(ord(c) for c in self.ai_name) * 31 + local_now.hour * 100 + local_now.day
-        choice = random.Random(seed).choice(pool)
+        label, choice = random.Random(seed).choice(pool)
+        logger.info(f"Heartbeat suggestion: {label}")
         return "A suggestion for this heartbeat (not a command):\n" + choice.replace("{user}", self.user_nickname) + "\n"
 
     def build_heartbeat_prompt(self, due_tasks: list[dict] = None,
