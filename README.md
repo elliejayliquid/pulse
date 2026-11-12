@@ -279,14 +279,14 @@ Or on Windows, double-click `start.bat`. For the desktop GUI, double-click `star
 
 ## Desktop GUI
 
-The Pulse Engine GUI is the comfortable way to run a household of companions. Pick a persona from the menu (or create a new one, optionally starting from an exported OpenRouter chat), start or stop it from the header, click the avatar to set a picture and accent colour, and work through its settings top to bottom:
+The Pulse Engine GUI is the comfortable way to run a household of companions. Pick a persona from the menu (or create a new one and go straight to importing your history with them: a Claude, ChatGPT, Grok, OpenRouter or Markdown export becomes searchable history, see [Legacy Conversation Archive](#legacy-conversation-archive)), start or stop it from the header, click the avatar to set a picture and accent colour, and work through its settings top to bottom:
 
 <p align="center"><img src="docs/images/gui-overview.png" width="640" alt="Pulse Engine GUI: the Mossling persona running on a home server, with its Identity and Provider settings open"></p>
 
 | Section | What's there |
 |---|---|
 | **01 Identity** | Name, the human's name, display model name, system prompt, traits, relationship context, voice notes |
-| **02 Continuity** | Lantern (current state and open threads), memories and journal browsers, core anchors (self, human, relationship), and importing older conversations from ChatGPT, Claude, Grok, OpenRouter and more |
+| **02 Continuity** | Lantern (current state and open threads), memories and journal browsers, core anchors (self, human, relationship), and importing older conversations from Claude, ChatGPT, Grok, OpenRouter, Markdown and more |
 | **03 Provider** | Local model or cloud API, model name, API keys, prompt-cache options |
 | **04 Local Server** | llama.cpp paths, model file, GPU layers, context size, vision projector |
 | **05 Model Tuning** | Temperature and friends, reasoning, tool rounds, recent-tail size |
